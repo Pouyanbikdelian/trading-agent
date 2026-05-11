@@ -53,9 +53,9 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] Order lifecycle persistence in SQLite
 
 ## Phase 7 — Risk manager
-- [ ] Pre-trade: per-position, gross/net exposure, sector caps
-- [ ] Intraday: daily-loss kill switch, drawdown halt
-- [ ] Force-flatten command + persisted halt state
+- [x] Pre-trade: per-position, gross/net exposure, sector caps
+- [x] Intraday: daily-loss kill switch, drawdown halt
+- [x] Force-flatten command + persisted halt state
 
 ## Phase 8 — Live runner
 - [ ] APScheduler-based daily cycle: fetch → signal → risk → execute → reconcile
