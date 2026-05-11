@@ -25,6 +25,7 @@ from trading.core.types import AssetClass, Instrument
 from trading.core.universes import available_universes, load_universe
 from trading.data.base import CANONICAL_FREQUENCIES, DataSource, Frequency
 from trading.data.cache import ParquetCache
+from trading.runner import Runner, RunnerConfig
 from trading.strategies import available_strategies, get_strategy
 
 app = typer.Typer(
@@ -297,6 +298,118 @@ def _backtest_run(
     t.add_row("bars", f"{len(prices):d}")
     t.add_row("symbols", f"{prices.shape[1]:d}")
     console.print(t)
+
+
+# ---------------------------------------------------------------------------
+# Paper / live runner subcommands
+# ---------------------------------------------------------------------------
+
+
+def _build_runner_config(
+    universe: str,
+    strategies: list[str],
+    freq: str,
+    schedule_cron: str,
+    schedule_tz: str,
+    vol_target_value: float | None,
+    initial_cash: float,
+    use_simulator: bool,
+) -> RunnerConfig:
+    if freq not in CANONICAL_FREQUENCIES:
+        raise typer.BadParameter(f"freq={freq!r} not in {list(CANONICAL_FREQUENCIES)}")
+    return RunnerConfig(
+        universe=universe,
+        strategies=strategies,
+        freq=freq,             # type: ignore[arg-type]
+        schedule_cron=schedule_cron,
+        schedule_tz=schedule_tz,
+        vol_target=vol_target_value,
+        initial_cash=initial_cash,
+        use_simulator=use_simulator,
+    )
+
+
+def _print_report(report) -> None:
+    t = Table(title=f"Cycle @ {report.ts.isoformat()}")
+    t.add_column("field", style="cyan")
+    t.add_column("value", justify="right")
+    t.add_row("status", report.status)
+    t.add_row("orders_submitted", str(report.orders_submitted))
+    t.add_row("fills_received", str(report.fills_received))
+    t.add_row("decisions", str(len(report.decisions)))
+    t.add_row("duration_ms", f"{report.duration_ms:.1f}")
+    if report.error:
+        t.add_row("error", f"[red]{report.error}[/red]")
+    console.print(t)
+
+
+@paper_app.command("run")
+def _paper_run(
+    universe: str = typer.Argument(..., help="Universe from config/universes.yaml."),
+    strategy: list[str] = typer.Option(
+        ["donchian"], "--strategy", "-s", help="Strategy name(s); repeat for multi."
+    ),
+    freq: str = typer.Option("1D", "--freq"),
+    cron: str = typer.Option("0 16 * * MON-FRI", "--cron", help="Crontab schedule."),
+    tz: str = typer.Option("UTC", "--tz"),
+    vol_target_value: float | None = typer.Option(
+        None, "--vol-target", help="Annualized portfolio vol target (e.g. 0.10)."
+    ),
+    initial_cash: float = typer.Option(100_000.0, "--cash"),
+    once: bool = typer.Option(False, "--once", help="Run one cycle and exit."),
+) -> None:
+    """Paper-trading runner (uses the in-memory Simulator)."""
+    cfg = _build_runner_config(
+        universe=universe, strategies=strategy, freq=freq,
+        schedule_cron=cron, schedule_tz=tz,
+        vol_target_value=vol_target_value,
+        initial_cash=initial_cash, use_simulator=True,
+    )
+    runner = Runner.from_config(cfg)
+
+    if once:
+        report = runner.run_once()
+        _print_report(report)
+        return
+
+    import asyncio
+    try:
+        asyncio.run(runner.run_forever())
+    except KeyboardInterrupt:
+        console.print("[yellow]interrupted[/yellow]")
+
+
+@live_app.command("run")
+def _live_run(
+    universe: str = typer.Argument(..., help="Universe from config/universes.yaml."),
+    strategy: list[str] = typer.Option(["donchian"], "--strategy", "-s"),
+    freq: str = typer.Option("1D", "--freq"),
+    cron: str = typer.Option("0 16 * * MON-FRI", "--cron"),
+    tz: str = typer.Option("UTC", "--tz"),
+    vol_target_value: float | None = typer.Option(None, "--vol-target"),
+    initial_cash: float = typer.Option(100_000.0, "--cash"),
+) -> None:
+    """Live-trading runner. Refuses unless both .env flags say live."""
+    if not settings.is_live_armed():
+        raise typer.BadParameter(
+            "live trading requires BOTH TRADING_ENV=live AND ALLOW_LIVE_TRADING=true in .env"
+        )
+    # Build with the IBKR broker.
+    from trading.execution.ibkr import IbkrBroker
+    broker = IbkrBroker()
+    broker.connect()
+    cfg = _build_runner_config(
+        universe=universe, strategies=strategy, freq=freq,
+        schedule_cron=cron, schedule_tz=tz,
+        vol_target_value=vol_target_value,
+        initial_cash=initial_cash, use_simulator=False,
+    )
+    runner = Runner.from_config(cfg, broker=broker)
+    import asyncio
+    try:
+        asyncio.run(runner.run_forever())
+    except KeyboardInterrupt:
+        console.print("[yellow]interrupted[/yellow]")
 
 
 if __name__ == "__main__":  # pragma: no cover

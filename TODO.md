@@ -58,10 +58,10 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] Force-flatten command + persisted halt state
 
 ## Phase 8 — Live runner
-- [ ] APScheduler-based daily cycle: fetch → signal → risk → execute → reconcile
-- [ ] State persistence (positions, P&L, halts) in SQLite
-- [ ] Telegram alerts on errors and significant events
-- [ ] Health endpoint + heartbeat file
+- [x] APScheduler-based daily cycle: fetch → signal → risk → execute → reconcile
+- [x] State persistence (positions, P&L, halts) in SQLite
+- [x] Telegram alerts on errors and significant events
+- [x] Heartbeat file (HTTP health endpoint deferred — not needed v1)
 
 ## Phase 9 — Deploy
 - [ ] Dockerfile + docker-compose with IB Gateway image
