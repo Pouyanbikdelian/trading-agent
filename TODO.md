@@ -22,11 +22,11 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] CLI: `trading data fetch <universe> --from --to --freq`
 
 ## Phase 2 — Backtester
-- [ ] `backtest.engine.run_vectorized(prices_df, weights_df) -> pnl, trades`
-- [ ] `backtest.metrics`: Sharpe, Sortino, Calmar, max DD, turnover, hit rate, exposure
-- [ ] `backtest.walkforward.expanding(...)` — rolling OOS evaluation
-- [ ] Slippage + commission models plugged in
-- [ ] CLI: `trading backtest <strategy> <universe>`
+- [x] `backtest.engine.run_vectorized(prices_df, weights_df) -> BacktestResult`
+- [x] `backtest.metrics`: Sharpe, Sortino, Calmar, max DD, turnover, hit rate, exposure
+- [x] `backtest.walkforward.expanding(...)` — rolling OOS evaluation
+- [x] Slippage + commission models plugged in
+- [ ] CLI: `trading backtest <strategy> <universe>` (deferred — needs Phase 3 Strategy interface)
 
 ## Phase 3 — Strategy library
 - [ ] `strategies.base.Strategy` interface (generates Signal from bars)
