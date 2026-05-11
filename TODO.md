@@ -26,15 +26,15 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] `backtest.metrics`: Sharpe, Sortino, Calmar, max DD, turnover, hit rate, exposure
 - [x] `backtest.walkforward.expanding(...)` — rolling OOS evaluation
 - [x] Slippage + commission models plugged in
-- [ ] CLI: `trading backtest <strategy> <universe>` (deferred — needs Phase 3 Strategy interface)
+- [x] CLI: `trading backtest <strategy> <universe>`
 
 ## Phase 3 — Strategy library
-- [ ] `strategies.base.Strategy` interface (generates Signal from bars)
-- [ ] Trend: Donchian breakout + EMA crossover
-- [ ] Cross-sectional momentum (12-1 month, sector-neutral)
-- [ ] Mean-reversion: RSI(2), z-score on residuals
-- [ ] Pairs / stat-arb: cointegration test + z-score entry
-- [ ] Risk-parity with realized-vol weighting
+- [x] `strategies.base.Strategy` interface + registry
+- [x] Trend: Donchian breakout + EMA crossover
+- [x] Cross-sectional momentum (12-1 month)
+- [x] Mean-reversion: RSI(2), z-score on residuals
+- [ ] Pairs / stat-arb: cointegration test + z-score entry (next pass)
+- [x] Risk-parity with inverse-vol weighting
 
 ## Phase 4 — Regime layer
 - [ ] HMM regime model (Gaussian, 2-3 states) over market returns

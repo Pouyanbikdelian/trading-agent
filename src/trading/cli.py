@@ -17,12 +17,15 @@ from rich.console import Console
 from rich.table import Table
 
 from trading import __version__
+from trading.backtest import compute_metrics, run_vectorized
+from trading.backtest.costs import CostModel
 from trading.core.config import settings
 from trading.core.logging import configure_logging, logger
 from trading.core.types import AssetClass, Instrument
 from trading.core.universes import available_universes, load_universe
 from trading.data.base import CANONICAL_FREQUENCIES, DataSource, Frequency
 from trading.data.cache import ParquetCache
+from trading.strategies import available_strategies, get_strategy
 
 app = typer.Typer(
     name="trading",
@@ -165,6 +168,135 @@ def _data_fetch(
             logger.bind(symbol=ins.symbol).exception("fetch failed")
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Backtest subcommands
+# ---------------------------------------------------------------------------
+
+
+@backtest_app.command("strategies")
+def _backtest_strategies() -> None:
+    """List built-in strategies."""
+    for n in available_strategies():
+        console.print(f"- {n}")
+
+
+def _parse_params(pairs: list[str]) -> dict[str, str]:
+    """Parse ``--param key=value`` flags into a plain dict.
+
+    The pydantic Params class on each strategy handles type coercion, so we
+    don't try to be clever about int/float/bool parsing here.
+    """
+    out: dict[str, str] = {}
+    for raw in pairs:
+        if "=" not in raw:
+            raise typer.BadParameter(f"--param expects key=value, got {raw!r}")
+        k, v = raw.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def _load_prices_from_cache(
+    universe: str,
+    freq: str,
+    start: datetime,
+    end: datetime,
+    price_column: str,
+) -> "pd.DataFrame":
+    """Read each instrument's cached parquet and align into one wide frame."""
+    import pandas as pd
+
+    instruments = load_universe(universe)
+    cache = ParquetCache(settings.data_dir)
+    series: dict[str, pd.Series] = {}
+    for ins in instruments:
+        df = cache.read(ins, freq)  # type: ignore[arg-type]
+        if df.empty:
+            logger.bind(symbol=ins.symbol).warning("no cached bars; run `trading data fetch` first")
+            continue
+        if price_column not in df.columns:
+            raise typer.BadParameter(f"price_column={price_column!r} not in cache schema")
+        s = df[price_column].dropna()
+        s = s[(s.index >= start) & (s.index <= end)]
+        if not s.empty:
+            series[ins.symbol] = s
+    if not series:
+        raise typer.BadParameter(
+            f"no cached prices for any symbol in universe {universe!r}; "
+            "run `trading data fetch` first."
+        )
+    prices = pd.DataFrame(series).sort_index()
+    # Inner-align: a strategy needs prices for the same dates across symbols.
+    prices = prices.dropna(how="any")
+    return prices
+
+
+@backtest_app.command("run")
+def _backtest_run(
+    strategy: str = typer.Argument(..., help="Strategy name (see `trading backtest strategies`)."),
+    universe: str = typer.Argument(..., help="Universe name from config/universes.yaml."),
+    from_: str = typer.Option(..., "--from", help="Start date (ISO 8601)."),
+    to: str = typer.Option(
+        datetime.now(tz=timezone.utc).date().isoformat(),
+        "--to",
+        help="End date (default: today UTC).",
+    ),
+    freq: str = typer.Option("1D", "--freq", help=f"One of {list(CANONICAL_FREQUENCIES)}."),
+    price_column: str = typer.Option(
+        "adj_close",
+        "--price-column",
+        help="Which OHLCV column to use as the price series (close, adj_close, ...).",
+    ),
+    param: list[str] = typer.Option(
+        [], "--param", "-p", help="Strategy override, e.g. -p lookback=20."
+    ),
+    commission_bps: float = typer.Option(1.0, "--commission-bps"),
+    slippage_bps: float = typer.Option(2.0, "--slippage-bps"),
+    periods_per_year: int = typer.Option(
+        252, "--periods-per-year", help="Used to annualize Sharpe/CAGR. 252 daily equities, 365 crypto."
+    ),
+) -> None:
+    """Backtest a single strategy over a universe.
+
+    Reads prices from the Parquet cache (populated by `trading data fetch`),
+    materializes target weights via the strategy, runs the vectorized
+    engine, and prints headline metrics.
+    """
+    if freq not in CANONICAL_FREQUENCIES:
+        raise typer.BadParameter(f"freq={freq!r} not in {list(CANONICAL_FREQUENCIES)}")
+
+    start = _parse_iso_date(from_)
+    end = _parse_iso_date(to)
+
+    overrides = _parse_params(param)
+    StrategyCls = get_strategy(strategy)
+    # Pydantic coerces string overrides ("True", "55", "0.2") into the right types.
+    params = StrategyCls.Params(**overrides) if overrides else StrategyCls.Params()
+    instance = StrategyCls(params=params)
+
+    prices = _load_prices_from_cache(universe, freq, start, end, price_column)
+    if len(prices) < 2:
+        raise typer.BadParameter("need at least 2 aligned price rows to run a backtest")
+
+    weights = instance.generate(prices)
+    costs = CostModel(commission_bps=commission_bps, slippage_bps=slippage_bps)
+    result = run_vectorized(prices, weights, costs=costs)
+    metrics = compute_metrics(result, periods_per_year=periods_per_year)
+
+    t = Table(title=f"Backtest — {strategy} on {universe} [{freq}]")
+    t.add_column("metric", style="cyan")
+    t.add_column("value", justify="right")
+    for k, v in metrics.items():
+        if k == "n_trades":
+            t.add_row(k, f"{int(v):d}")
+        elif "return" in k or "drawdown" in k or "exposure" in k or "rate" in k or "vol" in k or "turnover" in k or "cagr" in k:
+            t.add_row(k, f"{v:.2%}")
+        else:
+            t.add_row(k, f"{v:.3f}")
+    t.add_row("bars", f"{len(prices):d}")
+    t.add_row("symbols", f"{prices.shape[1]:d}")
+    console.print(t)
 
 
 if __name__ == "__main__":  # pragma: no cover
