@@ -64,7 +64,7 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] Heartbeat file (HTTP health endpoint deferred — not needed v1)
 
 ## Phase 9 — Deploy
-- [ ] Dockerfile + docker-compose with IB Gateway image
-- [ ] Hetzner / DigitalOcean deploy runbook
-- [ ] Log shipping (optional)
-- [ ] Restore-from-state drill documented
+- [x] Dockerfile + docker-compose with IB Gateway image
+- [x] Hetzner / DigitalOcean deploy runbook
+- [ ] Log shipping (optional — deferred)
+- [x] Restore-from-state drill documented

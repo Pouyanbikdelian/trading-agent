@@ -1,0 +1,52 @@
+# Anything not needed at build time. Smaller context = faster builds and
+# less chance of accidentally leaking secrets/data into the image.
+
+.git
+.github
+.venv
+venv
+
+# Python caches
+__pycache__
+*.py[cod]
+*.so
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Secrets / env — NEVER bake these into images.
+.env
+.env.*
+!.env.example
+secrets
+*.pem
+*.key
+
+# Runtime state, not buildable artifacts.
+data
+logs
+state
+runs
+checkpoints
+ib_settings
+gateway_logs
+
+# Tests + notebooks aren't shipped.
+tests
+notebooks
+docs
+
+# Editor + OS
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Build artifacts
+build
+dist

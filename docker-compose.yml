@@ -1,0 +1,113 @@
+# docker-compose for the trading agent + IB Gateway.
+#
+# Usage (paper trading; default):
+#   docker compose up -d
+#
+# Usage (live trading — requires .env with TRADING_ENV=live + ALLOW_LIVE_TRADING=true):
+#   docker compose --profile live up -d
+#
+# Daily ops:
+#   docker compose logs -f trader            # follow the runner
+#   docker compose exec trader trading status
+#   docker compose restart trader            # safe; halt state + cache survive
+#   docker compose down                      # stop both containers
+#
+# Volumes live in named docker volumes by default so a `compose down -v` is
+# the one explicit "wipe everything" command. Switch to bind mounts on the
+# VPS (./data, ./logs, ./state) when you want them visible from the host.
+
+services:
+  ib-gateway:
+    # gnzsnz's image is the maintained community IB Gateway in Docker. It
+    # boots TWS in headless mode and exposes port 4002 (paper) / 4001 (live).
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ibkr-gateway
+    restart: unless-stopped
+    environment:
+      # The image reads these on startup. .env must define them.
+      TWS_USERID: ${IBKR_USERNAME}
+      TWS_PASSWORD: ${IBKR_PASSWORD}
+      TRADING_MODE: ${IBKR_TRADING_MODE:-paper}    # 'paper' or 'live'
+      READ_ONLY_API: "no"
+      TIME_ZONE: ${TZ:-UTC}
+      # 2FA: IBKR's gateway falls back to mobile auth; keep IBC alive long enough.
+      TWOFA_TIMEOUT_ACTION: "restart"
+    ports:
+      # Exposed to localhost only — never publish to 0.0.0.0 unless you
+      # know exactly what you're doing. The trader container reaches the
+      # gateway over the docker network on the same ports.
+      - "127.0.0.1:4001:4001"   # live API
+      - "127.0.0.1:4002:4002"   # paper API
+    volumes:
+      - ib_settings:/home/ibgateway/Jts
+    networks:
+      - trading
+
+  trader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: trading-agent:latest
+    container_name: trader
+    restart: unless-stopped
+    depends_on:
+      - ib-gateway
+    env_file:
+      - .env
+    environment:
+      IBKR_HOST: ib-gateway              # docker DNS — same network
+      # 4001 = live, 4002 = paper. We pick the right port based on the
+      # mode the gateway booted in.
+      IBKR_PORT: ${IBKR_PORT:-4002}
+    volumes:
+      - data:/app/data
+      - logs:/app/logs
+      - state:/app/state
+      # Mount config/ read-only so universes.yaml + risk.yaml are editable
+      # from the host without rebuilding.
+      - ./config:/app/config:ro
+    # Override CMD here so the image's default ("status") doesn't apply.
+    # The runner picks paper or live based on TRADING_ENV in .env.
+    command: ["paper", "run", "${UNIVERSE:-us_large_cap}",
+              "--strategy", "${STRATEGY:-donchian}",
+              "--cron", "${CRON:-0 16 * * MON-FRI}",
+              "--tz",   "${TZ:-UTC}"]
+    networks:
+      - trading
+
+  # Live profile flips the command. Activate with `--profile live`.
+  trader-live:
+    profiles: ["live"]
+    image: trading-agent:latest
+    container_name: trader-live
+    restart: unless-stopped
+    depends_on:
+      - ib-gateway
+    env_file:
+      - .env
+    environment:
+      IBKR_HOST: ib-gateway
+      IBKR_PORT: ${IBKR_PORT:-4001}
+      TRADING_ENV: live
+      ALLOW_LIVE_TRADING: "true"
+    volumes:
+      - data:/app/data
+      - logs:/app/logs
+      - state:/app/state
+      - ./config:/app/config:ro
+    command: ["live", "run", "${UNIVERSE:-us_large_cap}",
+              "--strategy", "${STRATEGY:-donchian}",
+              "--cron", "${CRON:-0 16 * * MON-FRI}",
+              "--tz",   "${TZ:-UTC}"]
+    networks:
+      - trading
+
+volumes:
+  ib_settings: {}
+  data: {}
+  logs: {}
+  state: {}
+
+networks:
+  trading:
+    driver: bridge
