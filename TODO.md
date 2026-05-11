@@ -2,24 +2,24 @@
 
 A staged plan. Each phase is reviewable independently and unlocks the next.
 
-## Phase 0 — Project scaffolding ✅ in progress
+## Phase 0 — Project scaffolding ✅ complete
 - [x] pyproject.toml with uv, ruff, mypy, pytest
 - [x] .env.example, .gitignore, Makefile
 - [x] src/trading/{__init__,cli}.py
 - [x] core/{types,config,logging,clock}.py
 - [x] config/{universes,risk}.yaml
 - [x] tests/test_smoke.py
-- [ ] `uv sync` succeeds end-to-end
-- [ ] `uv run pytest` green
-- [ ] `uv run trading status` prints config
+- [x] `uv sync` succeeds end-to-end
+- [x] `uv run pytest` green
+- [x] `uv run trading status` prints config
 
 ## Phase 1 — Data layer
-- [ ] `data.base.DataSource` Protocol — `get_bars(instrument, start, end, freq) -> DataFrame`
-- [ ] `data.cache.ParquetCache` — partition by `{asset_class}/{symbol}/{freq}.parquet`
-- [ ] `data.yfinance_source` — daily US equities
-- [ ] `data.ccxt_source` — daily/hourly crypto via Binance public API
-- [ ] `data.ibkr_source` — FX and intraday equities via ib-async
-- [ ] CLI: `trading data fetch <universe> --from --to --freq`
+- [x] `data.base.DataSource` Protocol — `get_bars(instrument, start, end, freq) -> DataFrame`
+- [x] `data.cache.ParquetCache` — partition by `{asset_class}/{symbol}/{freq}.parquet`
+- [x] `data.yfinance_source` — daily US equities
+- [x] `data.ccxt_source` — daily/hourly crypto via Binance public API
+- [x] `data.ibkr_source` — FX and intraday equities via ib-async (unit-tested only; live IB Gateway smoke test deferred)
+- [x] CLI: `trading data fetch <universe> --from --to --freq`
 
 ## Phase 2 — Backtester
 - [ ] `backtest.engine.run_vectorized(prices_df, weights_df) -> pnl, trades`

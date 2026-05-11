@@ -10,6 +10,8 @@ The CLI is the primary way humans interact with the system:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -17,6 +19,10 @@ from rich.table import Table
 from trading import __version__
 from trading.core.config import settings
 from trading.core.logging import configure_logging, logger
+from trading.core.types import AssetClass, Instrument
+from trading.core.universes import available_universes, load_universe
+from trading.data.base import CANONICAL_FREQUENCIES, DataSource, Frequency
+from trading.data.cache import ParquetCache
 
 app = typer.Typer(
     name="trading",
@@ -79,10 +85,86 @@ app.add_typer(paper_app, name="paper")
 app.add_typer(live_app, name="live")
 
 
-@data_app.command("hello")
-def _data_hello() -> None:
-    """Smoke command to verify the subcommand group is wired."""
-    console.print("data subcommand reachable.")
+@data_app.command("universes")
+def _data_universes() -> None:
+    """List the universes defined in config/universes.yaml."""
+    names = available_universes()
+    for n in names:
+        console.print(f"- {n}")
+
+
+def _source_for(instrument: Instrument) -> DataSource:
+    """Pick the right DataSource for an instrument's asset class.
+
+    Equities/ETFs -> yfinance (free, fine for research).
+    Crypto       -> ccxt (Binance public, free).
+    FX           -> IBKR (needs IB Gateway running).
+    """
+    cls = instrument.asset_class
+    if cls in (AssetClass.EQUITY, AssetClass.ETF):
+        from trading.data.yfinance_source import YFinanceSource
+        return YFinanceSource()
+    if cls == AssetClass.CRYPTO:
+        from trading.data.ccxt_source import CcxtSource
+        return CcxtSource(exchange_id=instrument.exchange or "binance")
+    if cls == AssetClass.FX:
+        from trading.data.ibkr_source import IbkrSource
+        return IbkrSource()
+    raise typer.BadParameter(f"no DataSource configured for asset_class={cls.value}")
+
+
+def _parse_iso_date(s: str) -> datetime:
+    """Accept ``YYYY-MM-DD`` or full ISO 8601. Assume UTC for date-only input."""
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError as e:
+        raise typer.BadParameter(f"invalid ISO date: {s!r}") from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+@data_app.command("fetch")
+def _data_fetch(
+    universe: str = typer.Argument(..., help="Universe name from config/universes.yaml."),
+    from_: str = typer.Option(..., "--from", help="Start date (ISO 8601, e.g. 2020-01-01)."),
+    to: str = typer.Option(
+        datetime.now(tz=timezone.utc).date().isoformat(),
+        "--to",
+        help="End date (default: today UTC).",
+    ),
+    freq: str = typer.Option("1D", "--freq", help=f"One of {list(CANONICAL_FREQUENCIES)}."),
+    force_refresh: bool = typer.Option(False, "--force-refresh", help="Ignore cached bars."),
+) -> None:
+    """Backfill bars for a universe into the Parquet cache.
+
+    Picks the appropriate adapter per asset_class (yfinance / ccxt / IBKR).
+    Cache layout: ``data/parquet/<asset_class>/<symbol>/<freq>.parquet``.
+    """
+    if freq not in CANONICAL_FREQUENCIES:
+        raise typer.BadParameter(f"freq={freq!r} not in {list(CANONICAL_FREQUENCIES)}")
+
+    start = _parse_iso_date(from_)
+    end = _parse_iso_date(to)
+    instruments = load_universe(universe)
+    cache = ParquetCache(settings.data_dir)
+
+    table = Table(title=f"Fetching {len(instruments)} symbols [{universe}] @ {freq}")
+    table.add_column("symbol")
+    table.add_column("rows", justify="right")
+    table.add_column("status")
+
+    for ins in instruments:
+        try:
+            source = _source_for(ins)
+            df = cache.get_bars(source, ins, start, end, freq, force_refresh=force_refresh)  # type: ignore[arg-type]
+            table.add_row(ins.symbol, str(len(df)), "ok")
+            logger.bind(symbol=ins.symbol).info(f"cached {len(df)} bars [{freq}] via {source.name}")
+        except Exception as e:  # noqa: BLE001 — surface, don't crash whole backfill
+            table.add_row(ins.symbol, "-", f"[red]{type(e).__name__}: {e}[/red]")
+            logger.bind(symbol=ins.symbol).exception("fetch failed")
+
+    console.print(table)
 
 
 if __name__ == "__main__":  # pragma: no cover
