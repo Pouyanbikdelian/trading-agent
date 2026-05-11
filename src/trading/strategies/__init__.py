@@ -12,6 +12,7 @@ Built-in strategies::
     rsi2              Larry Connors' RSI(2) mean reversion.
     zscore_meanrev    Rolling z-score mean reversion.
     risk_parity       Inverse-vol weighting.
+    pairs             Cointegration-screened pairs trade via spread z-score.
 """
 
 from __future__ import annotations
@@ -32,9 +33,11 @@ from trading.strategies import xsec_momentum as _xsec      # noqa: F401
 from trading.strategies import rsi2 as _rsi2               # noqa: F401
 from trading.strategies import zscore_meanrev as _zscore   # noqa: F401
 from trading.strategies import risk_parity as _rp          # noqa: F401
+from trading.strategies import pairs as _pairs             # noqa: F401
 
 from trading.strategies.donchian import Donchian, DonchianParams
 from trading.strategies.ema_cross import EmaCross, EmaCrossParams
+from trading.strategies.pairs import Pairs, PairsParams
 from trading.strategies.risk_parity import RiskParity, RiskParityParams
 from trading.strategies.rsi2 import Rsi2, Rsi2Params
 from trading.strategies.xsec_momentum import XSecMomentum, XSecMomentumParams
@@ -48,6 +51,8 @@ __all__ = [
     "DonchianParams",
     "EmaCross",
     "EmaCrossParams",
+    "Pairs",
+    "PairsParams",
     "RiskParity",
     "RiskParityParams",
     "Rsi2",

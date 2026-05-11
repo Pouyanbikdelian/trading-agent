@@ -33,7 +33,7 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] Trend: Donchian breakout + EMA crossover
 - [x] Cross-sectional momentum (12-1 month)
 - [x] Mean-reversion: RSI(2), z-score on residuals
-- [ ] Pairs / stat-arb: cointegration test + z-score entry (next pass)
+- [x] Pairs / stat-arb: cointegration test + z-score entry
 - [x] Risk-parity with inverse-vol weighting
 
 ## Phase 4 — Regime layer
