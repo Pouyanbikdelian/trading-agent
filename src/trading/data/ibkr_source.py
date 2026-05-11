@@ -155,14 +155,12 @@ class IbkrSource:
         # natural throttle. A real backfill should add explicit pacing.
         coro = self._get_bars_async(instrument, start, end, freq)
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If we're already inside a loop (e.g. notebook), schedule
-                # and wait synchronously via a nested helper.
-                return asyncio.run_coroutine_threadsafe(coro, loop).result()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            pass
-        return asyncio.run(coro)
+            # No running loop — synchronous caller. Run in a fresh loop.
+            return asyncio.run(coro)
+        # Inside an existing loop (notebook, runner): schedule onto it.
+        return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
     def disconnect(self) -> None:
         if self._ib is not None and self._ib.isConnected():

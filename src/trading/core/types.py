@@ -197,6 +197,26 @@ class Position(BaseModel):
     unrealized_pnl: float = 0.0
 
 
+class AccountSnapshot(BaseModel):
+    """A point-in-time view of the broker account. The runner persists one
+    of these per cycle; the risk manager reads the latest to size new
+    orders against current equity."""
+
+    model_config = ConfigDict(frozen=True)
+
+    ts: datetime
+    cash: float
+    equity: float                       # cash + market value of positions
+    positions: dict[str, Position] = Field(default_factory=dict)   # keyed by instrument.key
+
+    @field_validator("ts")
+    @classmethod
+    def _tz_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("AccountSnapshot.ts must be timezone-aware")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Risk events
 # ---------------------------------------------------------------------------

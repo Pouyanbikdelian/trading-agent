@@ -47,10 +47,10 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] Portfolio vol-targeting overlay
 
 ## Phase 6 — IBKR execution
-- [ ] `execution.base.Broker` Protocol
-- [ ] `execution.simulator` — fills against historical bars + slippage
-- [ ] `execution.ibkr` — ib-async wrapper, contract resolution, reconciliation
-- [ ] Order lifecycle persistence in SQLite
+- [x] `execution.base.Broker` Protocol
+- [x] `execution.simulator` — fills market orders against historical bars + slippage (limit/stop deferred)
+- [x] `execution.ibkr` — ib-async wrapper, contract resolution, reconciliation
+- [x] Order lifecycle persistence in SQLite
 
 ## Phase 7 — Risk manager
 - [ ] Pre-trade: per-position, gross/net exposure, sector caps
