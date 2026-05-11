@@ -50,12 +50,20 @@ class Strategy(ABC):
       * ``Params``      — a ``StrategyParams`` subclass describing config.
       * ``generate``    — the vectorized weight producer.
 
+    Subclasses MAY define ``regime_scale_map`` (``{state_id: multiplier}``)
+    to opt into the default ``modulate`` behavior, e.g.::
+
+        class MyTrend(Strategy):
+            # de-risk in the high-vol regime, full size in low/mid.
+            regime_scale_map = {0: 1.0, 1: 1.0, 2: 0.0}
+
     Construction takes a ``Params`` instance; we keep it as ``self.params``
     so subclasses don't need to copy each field into ``self``.
     """
 
     name: ClassVar[str] = ""
     Params: ClassVar[type[StrategyParams]]
+    regime_scale_map: ClassVar[dict[int, float]] = {}
 
     def __init__(self, params: StrategyParams | None = None, **kwargs: Any) -> None:
         if params is None:
@@ -77,6 +85,24 @@ class Strategy(ABC):
           * Fill leading bars with 0 (no position) while indicators warm up.
           * Be deterministic given the same ``prices`` input.
         """
+
+    def modulate(self, weights: pd.DataFrame, regime: pd.Series) -> pd.DataFrame:
+        """Apply a regime overlay to a weights frame.
+
+        Default behavior: if the subclass declares ``regime_scale_map``,
+        scale each row by the corresponding multiplier (states absent from
+        the map and the warm-up sentinel ``-1`` are left at full size).
+        Otherwise return the weights unchanged.
+
+        Override this in a subclass that needs richer regime logic — e.g.
+        flipping signs in mean-reverting vs. trending regimes.
+        """
+        if not self.regime_scale_map:
+            return weights
+        # Local import keeps the strategies module decoupled from the
+        # regime module's import order.
+        from trading.regime.base import regime_scale
+        return regime_scale(weights, regime, self.regime_scale_map)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.params!r})"

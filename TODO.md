@@ -37,9 +37,9 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] Risk-parity with inverse-vol weighting
 
 ## Phase 4 — Regime layer
-- [ ] HMM regime model (Gaussian, 2-3 states) over market returns
-- [ ] Realized-vol regime classifier (low/mid/high)
-- [ ] Strategy hook: `Strategy.modulate(regime) -> scaled_signal`
+- [x] HMM regime model (Gaussian, 2-3 states) over market returns
+- [x] Realized-vol regime classifier (low/mid/high)
+- [x] Strategy hook: `Strategy.modulate(weights, regime) -> scaled_weights`
 
 ## Phase 5 — Selection & combination
 - [ ] Walk-forward strategy ranking by OOS Sharpe with deflated-Sharpe penalty
