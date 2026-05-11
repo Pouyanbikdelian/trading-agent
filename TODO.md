@@ -42,9 +42,9 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] Strategy hook: `Strategy.modulate(weights, regime) -> scaled_weights`
 
 ## Phase 5 — Selection & combination
-- [ ] Walk-forward strategy ranking by OOS Sharpe with deflated-Sharpe penalty
-- [ ] Equal-weight, inverse-vol, and correlation-aware combiners
-- [ ] Portfolio vol-targeting overlay
+- [x] Walk-forward strategy ranking by OOS Sharpe with deflated-Sharpe penalty
+- [x] Equal-weight, inverse-vol, and minimum-variance combiners
+- [x] Portfolio vol-targeting overlay
 
 ## Phase 6 — IBKR execution
 - [ ] `execution.base.Broker` Protocol
