@@ -1,0 +1,39 @@
+# Risk manager configuration.
+# Values here override the per-account defaults in .env when present.
+# The risk manager applies these limits in ALL modes (research, paper, live).
+
+portfolio:
+  # Max total long+short exposure as a fraction of equity. 1.0 = fully invested, no leverage.
+  max_gross_exposure: 1.0
+  # Max net long-short exposure. 1.0 = fully long, -1.0 = fully short, 0 = market-neutral.
+  max_net_exposure: 1.0
+  # Annualized portfolio vol target. Used by the vol-targeting overlay.
+  vol_target: 0.12          # 12% annualized
+
+position:
+  # Cap any single instrument as a fraction of equity (long or short).
+  max_position_pct: 0.10
+  # Sector concentration cap (uses sector tags in universes.yaml — TBD).
+  max_sector_pct: 0.30
+  # Minimum trade size in account currency — skip dust trades.
+  min_trade_notional: 50.0
+
+drawdown:
+  # Daily PnL loss threshold (fraction of equity at session start). Triggers a
+  # one-day kill switch: positions can be reduced but not increased.
+  max_daily_loss_pct: 0.02
+  # Peak-to-trough drawdown that halts the system entirely until a human resets.
+  max_drawdown_pct: 0.15
+
+execution:
+  # Maximum % of average daily volume we'll ever consume in a single trade.
+  # Prevents marketability issues in lower-liquidity names.
+  max_pct_adv: 0.05
+  # Skip an instrument if our intended notional > this % of its 20-day avg volume.
+  # (Mostly applies to small caps — large caps will never hit this.)
+
+slippage_model:
+  # Used by the simulator and as a conservative pre-trade haircut in live.
+  equity_bps: 5        # 5 bps per side
+  fx_bps: 1
+  crypto_bps: 10

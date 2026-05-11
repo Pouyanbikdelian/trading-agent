@@ -1,0 +1,63 @@
+# Trading universes — symbol sets we sample strategies over.
+# Each universe is a logical group; strategies declare which ones they consume.
+
+universes:
+  # --- US equities ---
+  us_large_cap:
+    asset_class: equity
+    description: "Liquid US large-cap stocks. Used for trend + cross-sectional momentum."
+    symbols:
+      - AAPL
+      - MSFT
+      - GOOGL
+      - AMZN
+      - META
+      - NVDA
+      - TSLA
+      - JPM
+      - V
+      - UNH
+      - HD
+      - PG
+      - MA
+      - XOM
+      - CVX
+      - LLY
+      - AVGO
+      - WMT
+      - JNJ
+      - KO
+
+  us_sector_etfs:
+    asset_class: etf
+    description: "Sector ETFs for cross-sectional / risk-parity strategies."
+    symbols: [XLK, XLF, XLE, XLV, XLY, XLP, XLI, XLU, XLB, XLRE, XLC]
+
+  us_macro_etfs:
+    asset_class: etf
+    description: "Broad asset class ETFs for macro/risk-parity portfolios."
+    symbols:
+      - SPY    # US equities
+      - QQQ    # US tech
+      - IWM    # US small-cap
+      - EFA    # Developed ex-US
+      - EEM    # Emerging markets
+      - TLT    # Long bonds
+      - IEF    # 7-10y Treasuries
+      - LQD    # IG credit
+      - HYG    # High yield
+      - GLD    # Gold
+      - DBC    # Commodities
+
+  # --- FX (IBKR IDEALPRO) ---
+  fx_g10:
+    asset_class: fx
+    description: "G10 FX majors traded through IBKR IDEALPRO."
+    symbols: [EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD]
+
+  # --- Crypto (via ccxt for research data; IBKR PAXOS-limited for execution) ---
+  crypto_majors:
+    asset_class: crypto
+    exchange: binance
+    description: "Liquid majors. Used for trend strategies."
+    symbols: ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
