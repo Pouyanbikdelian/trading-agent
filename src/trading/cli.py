@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pandas as pd
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -23,7 +24,7 @@ from trading.core.config import settings
 from trading.core.logging import configure_logging, logger
 from trading.core.types import AssetClass, Instrument
 from trading.core.universes import available_universes, load_universe
-from trading.data.base import CANONICAL_FREQUENCIES, DataSource, Frequency
+from trading.data.base import CANONICAL_FREQUENCIES, DataSource
 from trading.data.cache import ParquetCache
 from trading.runner import Runner, RunnerConfig
 from trading.strategies import available_strategies, get_strategy
@@ -39,7 +40,9 @@ console = Console()
 
 
 @app.callback()
-def _root(verbose: bool = typer.Option(False, "--verbose", "-v", help="DEBUG logs to console")) -> None:
+def _root(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="DEBUG logs to console"),
+) -> None:
     configure_logging(level="DEBUG" if verbose else "INFO")
 
 
@@ -61,7 +64,9 @@ def status() -> None:
     t.add_row("version", __version__)
     t.add_row("trading_env", settings.trading_env)
     t.add_row("live armed?", "[red bold]YES[/red bold]" if settings.is_live_armed() else "no")
-    t.add_row("IBKR", f"{settings.ibkr_host}:{settings.ibkr_port} (client_id={settings.ibkr_client_id})")
+    t.add_row(
+        "IBKR", f"{settings.ibkr_host}:{settings.ibkr_port} (client_id={settings.ibkr_client_id})"
+    )
     t.add_row("data_dir", str(settings.data_dir))
     t.add_row("log_dir", str(settings.log_dir))
     t.add_row("state_dir", str(settings.state_dir))
@@ -107,12 +112,15 @@ def _source_for(instrument: Instrument) -> DataSource:
     cls = instrument.asset_class
     if cls in (AssetClass.EQUITY, AssetClass.ETF):
         from trading.data.yfinance_source import YFinanceSource
+
         return YFinanceSource()
     if cls == AssetClass.CRYPTO:
         from trading.data.ccxt_source import CcxtSource
+
         return CcxtSource(exchange_id=instrument.exchange or "binance")
     if cls == AssetClass.FX:
         from trading.data.ibkr_source import IbkrSource
+
         return IbkrSource()
     raise typer.BadParameter(f"no DataSource configured for asset_class={cls.value}")
 
@@ -164,7 +172,7 @@ def _data_fetch(
             df = cache.get_bars(source, ins, start, end, freq, force_refresh=force_refresh)  # type: ignore[arg-type]
             table.add_row(ins.symbol, str(len(df)), "ok")
             logger.bind(symbol=ins.symbol).info(f"cached {len(df)} bars [{freq}] via {source.name}")
-        except Exception as e:  # noqa: BLE001 — surface, don't crash whole backfill
+        except Exception as e:
             table.add_row(ins.symbol, "-", f"[red]{type(e).__name__}: {e}[/red]")
             logger.bind(symbol=ins.symbol).exception("fetch failed")
 
@@ -204,10 +212,8 @@ def _load_prices_from_cache(
     start: datetime,
     end: datetime,
     price_column: str,
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """Read each instrument's cached parquet and align into one wide frame."""
-    import pandas as pd
-
     instruments = load_universe(universe)
     cache = ParquetCache(settings.data_dir)
     series: dict[str, pd.Series] = {}
@@ -255,7 +261,9 @@ def _backtest_run(
     commission_bps: float = typer.Option(1.0, "--commission-bps"),
     slippage_bps: float = typer.Option(2.0, "--slippage-bps"),
     periods_per_year: int = typer.Option(
-        252, "--periods-per-year", help="Used to annualize Sharpe/CAGR. 252 daily equities, 365 crypto."
+        252,
+        "--periods-per-year",
+        help="Used to annualize Sharpe/CAGR. 252 daily equities, 365 crypto.",
     ),
 ) -> None:
     """Backtest a single strategy over a universe.
@@ -271,10 +279,10 @@ def _backtest_run(
     end = _parse_iso_date(to)
 
     overrides = _parse_params(param)
-    StrategyCls = get_strategy(strategy)
+    strategy_cls = get_strategy(strategy)
     # Pydantic coerces string overrides ("True", "55", "0.2") into the right types.
-    params = StrategyCls.Params(**overrides) if overrides else StrategyCls.Params()
-    instance = StrategyCls(params=params)
+    params = strategy_cls.Params(**overrides) if overrides else strategy_cls.Params()
+    instance = strategy_cls(params=params)
 
     prices = _load_prices_from_cache(universe, freq, start, end, price_column)
     if len(prices) < 2:
@@ -291,7 +299,15 @@ def _backtest_run(
     for k, v in metrics.items():
         if k == "n_trades":
             t.add_row(k, f"{int(v):d}")
-        elif "return" in k or "drawdown" in k or "exposure" in k or "rate" in k or "vol" in k or "turnover" in k or "cagr" in k:
+        elif (
+            "return" in k
+            or "drawdown" in k
+            or "exposure" in k
+            or "rate" in k
+            or "vol" in k
+            or "turnover" in k
+            or "cagr" in k
+        ):
             t.add_row(k, f"{v:.2%}")
         else:
             t.add_row(k, f"{v:.3f}")
@@ -320,7 +336,7 @@ def _build_runner_config(
     return RunnerConfig(
         universe=universe,
         strategies=strategies,
-        freq=freq,             # type: ignore[arg-type]
+        freq=freq,  # type: ignore[arg-type]
         schedule_cron=schedule_cron,
         schedule_tz=schedule_tz,
         vol_target=vol_target_value,
@@ -360,10 +376,14 @@ def _paper_run(
 ) -> None:
     """Paper-trading runner (uses the in-memory Simulator)."""
     cfg = _build_runner_config(
-        universe=universe, strategies=strategy, freq=freq,
-        schedule_cron=cron, schedule_tz=tz,
+        universe=universe,
+        strategies=strategy,
+        freq=freq,
+        schedule_cron=cron,
+        schedule_tz=tz,
         vol_target_value=vol_target_value,
-        initial_cash=initial_cash, use_simulator=True,
+        initial_cash=initial_cash,
+        use_simulator=True,
     )
     runner = Runner.from_config(cfg)
 
@@ -373,6 +393,7 @@ def _paper_run(
         return
 
     import asyncio
+
     try:
         asyncio.run(runner.run_forever())
     except KeyboardInterrupt:
@@ -396,16 +417,22 @@ def _live_run(
         )
     # Build with the IBKR broker.
     from trading.execution.ibkr import IbkrBroker
+
     broker = IbkrBroker()
     broker.connect()
     cfg = _build_runner_config(
-        universe=universe, strategies=strategy, freq=freq,
-        schedule_cron=cron, schedule_tz=tz,
+        universe=universe,
+        strategies=strategy,
+        freq=freq,
+        schedule_cron=cron,
+        schedule_tz=tz,
         vol_target_value=vol_target_value,
-        initial_cash=initial_cash, use_simulator=False,
+        initial_cash=initial_cash,
+        use_simulator=False,
     )
     runner = Runner.from_config(cfg, broker=broker)
     import asyncio
+
     try:
         asyncio.run(runner.run_forever())
     except KeyboardInterrupt:

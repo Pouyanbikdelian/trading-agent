@@ -29,6 +29,7 @@ class StrEnum(str, Enum):
     def __str__(self) -> str:  # match 3.11 StrEnum behavior
         return str(self.value)
 
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -65,8 +66,8 @@ class TimeInForce(StrEnum):
 
 
 class OrderStatus(StrEnum):
-    PENDING = "pending"          # created locally, not sent
-    SUBMITTED = "submitted"      # acknowledged by broker
+    PENDING = "pending"  # created locally, not sent
+    SUBMITTED = "submitted"  # acknowledged by broker
     PARTIAL = "partial"
     FILLED = "filled"
     CANCELLED = "cancelled"
@@ -93,8 +94,8 @@ class Instrument(BaseModel):
     asset_class: AssetClass
     exchange: str | None = None
     currency: str = "USD"
-    multiplier: float = 1.0           # contract multiplier for futures/options
-    min_tick: float = 0.01            # smallest price increment
+    multiplier: float = 1.0  # contract multiplier for futures/options
+    min_tick: float = 0.01  # smallest price increment
 
     @property
     def key(self) -> str:
@@ -151,9 +152,9 @@ class Signal(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     ts: datetime
-    strategy: str                          # producer name, for attribution
-    target_weights: dict[str, float]       # instrument.key -> weight in [-1, 1]
-    confidence: float = 1.0                # 0..1 — combiner can use this
+    strategy: str  # producer name, for attribution
+    target_weights: dict[str, float]  # instrument.key -> weight in [-1, 1]
+    confidence: float = 1.0  # 0..1 — combiner can use this
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
@@ -191,8 +192,8 @@ class Position(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     instrument: Instrument
-    quantity: float                     # signed; negative = short
-    avg_price: float                    # average entry price (signed-quantity weighted)
+    quantity: float  # signed; negative = short
+    avg_price: float  # average entry price (signed-quantity weighted)
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
 
@@ -206,8 +207,8 @@ class AccountSnapshot(BaseModel):
 
     ts: datetime
     cash: float
-    equity: float                       # cash + market value of positions
-    positions: dict[str, Position] = Field(default_factory=dict)   # keyed by instrument.key
+    equity: float  # cash + market value of positions
+    positions: dict[str, Position] = Field(default_factory=dict)  # keyed by instrument.key
 
     @field_validator("ts")
     @classmethod
@@ -229,4 +230,4 @@ class RiskDecision(BaseModel):
 
     action: RiskAction
     reason: str
-    scale_factor: float = 1.0           # used when action == "scale"
+    scale_factor: float = 1.0  # used when action == "scale"

@@ -21,13 +21,12 @@ from trading.core.types import (
     Bar,
     Instrument,
 )
-from trading.core.universes import _load_yaml, clear_cache    # type: ignore[attr-defined]
+from trading.core.universes import clear_cache  # type: ignore[attr-defined]
 from trading.data.cache import ParquetCache
 from trading.execution import OrderStore, Simulator
 from trading.risk.limits import RiskLimits
 from trading.risk.manager import RiskManager
 from trading.runner import Cycle, NullAlerts, RunnerConfig, RunnerStore
-
 
 # --------------------------------------------------------------- fixtures
 
@@ -43,14 +42,12 @@ def tiny_universe_yaml(tmp_path: Path, monkeypatch) -> str:
     universe_name = "_runner_test_universe"
     yaml_path = tmp_path / "universes.yaml"
     yaml_path.write_text(
-        f"universes:\n"
-        f"  {universe_name}:\n"
-        f"    asset_class: equity\n"
-        f"    symbols: [TEST_A, TEST_B]\n"
+        f"universes:\n  {universe_name}:\n    asset_class: equity\n    symbols: [TEST_A, TEST_B]\n"
     )
     # Patch the loader's default path. clear_cache() drops the lru_cache so
     # the next call re-reads from disk.
     from trading.core import universes as universes_module
+
     monkeypatch.setattr(universes_module, "DEFAULT_UNIVERSES_PATH", yaml_path)
     clear_cache()
     return universe_name
@@ -66,8 +63,11 @@ def primed_cache(tmp_path: Path) -> ParquetCache:
         prices = 100 * np.exp(np.cumsum(rng.normal(0.0005, sigma, 300)))
         df = pd.DataFrame(
             {
-                "open": prices, "high": prices * 1.001, "low": prices * 0.999,
-                "close": prices, "volume": np.full(300, 1000.0),
+                "open": prices,
+                "high": prices * 1.001,
+                "low": prices * 0.999,
+                "close": prices,
+                "volume": np.full(300, 1000.0),
                 "adj_close": prices,
             },
             index=idx,
@@ -84,8 +84,10 @@ class _NullSourceFactory:
     def __call__(self, instrument: Instrument):
         class _NoFetch:
             name = "noop"
+
             def get_bars(self, *a, **kw):
                 return pd.DataFrame()
+
         return _NoFetch()
 
 
@@ -105,9 +107,12 @@ def _make_cycle(
         df = cache.read(Instrument(symbol=ins_sym, asset_class=AssetClass.EQUITY), "1D")
         last_ts = df.index[-1].to_pydatetime()
         bars[ins_sym] = Bar(
-            ts=last_ts, open=float(df["open"].iloc[-1]),
-            high=float(df["high"].iloc[-1]), low=float(df["low"].iloc[-1]),
-            close=float(df["close"].iloc[-1]), volume=float(df["volume"].iloc[-1]),
+            ts=last_ts,
+            open=float(df["open"].iloc[-1]),
+            high=float(df["high"].iloc[-1]),
+            low=float(df["low"].iloc[-1]),
+            close=float(df["close"].iloc[-1]),
+            volume=float(df["volume"].iloc[-1]),
         )
     broker.step(last_ts, bars)
 
@@ -146,7 +151,7 @@ def test_cycle_produces_orders(tiny_universe_yaml, primed_cache, tmp_state) -> N
         history_bars=200,
         initial_cash=100_000.0,
     )
-    cycle, broker, alerts = _make_cycle(cfg, primed_cache, tmp_state)
+    cycle, _, _ = _make_cycle(cfg, primed_cache, tmp_state)
     report = cycle.run_cycle()
     # Status is one of {ok, no_orders} depending on the synthetic path.
     assert report.status in {"ok", "no_orders"}
@@ -155,8 +160,11 @@ def test_cycle_produces_orders(tiny_universe_yaml, primed_cache, tmp_state) -> N
 
 def test_cycle_persists_snapshot(tiny_universe_yaml, primed_cache, tmp_state) -> None:
     cfg = RunnerConfig(
-        universe=tiny_universe_yaml, strategies=["donchian"],
-        auto_refresh=False, history_bars=200, initial_cash=100_000.0,
+        universe=tiny_universe_yaml,
+        strategies=["donchian"],
+        auto_refresh=False,
+        history_bars=200,
+        initial_cash=100_000.0,
     )
     cycle, _, _ = _make_cycle(cfg, primed_cache, tmp_state)
     cycle.run_cycle()
@@ -167,8 +175,10 @@ def test_cycle_persists_snapshot(tiny_universe_yaml, primed_cache, tmp_state) ->
 
 def test_cycle_writes_heartbeat(tiny_universe_yaml, primed_cache, tmp_state) -> None:
     cfg = RunnerConfig(
-        universe=tiny_universe_yaml, strategies=["donchian"],
-        auto_refresh=False, history_bars=200,
+        universe=tiny_universe_yaml,
+        strategies=["donchian"],
+        auto_refresh=False,
+        history_bars=200,
     )
     cycle, _, _ = _make_cycle(cfg, primed_cache, tmp_state)
     cycle.run_cycle()
@@ -177,14 +187,21 @@ def test_cycle_writes_heartbeat(tiny_universe_yaml, primed_cache, tmp_state) -> 
 
 
 def test_cycle_records_halt_when_risk_manager_halted(
-    tiny_universe_yaml, primed_cache, tmp_state,
+    tiny_universe_yaml,
+    primed_cache,
+    tmp_state,
 ) -> None:
     cfg = RunnerConfig(
-        universe=tiny_universe_yaml, strategies=["donchian"],
-        auto_refresh=False, history_bars=200,
+        universe=tiny_universe_yaml,
+        strategies=["donchian"],
+        auto_refresh=False,
+        history_bars=200,
     )
     cycle, _, alerts = _make_cycle(
-        cfg, primed_cache, tmp_state, halted_reason="manual test halt",
+        cfg,
+        primed_cache,
+        tmp_state,
+        halted_reason="manual test halt",
     )
     report = cycle.run_cycle()
     assert report.status == "halted"
@@ -196,9 +213,11 @@ def test_cycle_records_halt_when_risk_manager_halted(
 def test_cycle_error_is_caught(tiny_universe_yaml, primed_cache, tmp_state) -> None:
     """A misconfigured strategy params dict surfaces as ``error``, not a raise."""
     cfg = RunnerConfig(
-        universe=tiny_universe_yaml, strategies=["donchian"],
-        strategy_params={"donchian": {"lookback": -1}},   # invalid; will raise on Params
-        auto_refresh=False, history_bars=200,
+        universe=tiny_universe_yaml,
+        strategies=["donchian"],
+        strategy_params={"donchian": {"lookback": -1}},  # invalid; will raise on Params
+        auto_refresh=False,
+        history_bars=200,
     )
     cycle, _, alerts = _make_cycle(cfg, primed_cache, tmp_state)
     report = cycle.run_cycle()
@@ -208,21 +227,27 @@ def test_cycle_error_is_caught(tiny_universe_yaml, primed_cache, tmp_state) -> N
 
 
 def test_cycle_handles_short_history_gracefully(
-    tiny_universe_yaml, tmp_path: Path,
+    tiny_universe_yaml,
+    tmp_path: Path,
 ) -> None:
     # Empty cache (no parquet writes) → cycle must report no_orders and not crash.
     cache = ParquetCache(tmp_path / "parquet_empty")
     cfg = RunnerConfig(
-        universe=tiny_universe_yaml, strategies=["donchian"],
-        auto_refresh=False, history_bars=200,
+        universe=tiny_universe_yaml,
+        strategies=["donchian"],
+        auto_refresh=False,
+        history_bars=200,
     )
     broker = Simulator(initial_cash=cfg.initial_cash)
     broker.connect()
     # No step → broker.get_account would raise; cycle catches that into the fallback.
     rm = RiskManager(RiskLimits(), halt_state_path=tmp_path / "halt.json")
     cycle = Cycle(
-        cfg, cache=cache, source_factory=_NullSourceFactory(),
-        broker=broker, risk_manager=rm,
+        cfg,
+        cache=cache,
+        source_factory=_NullSourceFactory(),
+        broker=broker,
+        risk_manager=rm,
         order_store=OrderStore(tmp_path / "orders.db"),
         runner_store=RunnerStore(tmp_path / "runner.db"),
         alerts=NullAlerts(),

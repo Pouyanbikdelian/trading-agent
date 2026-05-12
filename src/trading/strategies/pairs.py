@@ -51,7 +51,7 @@ class PairsParams(StrategyParams):
     beta_hedge: bool = False
 
     @model_validator(mode="after")
-    def _exit_lt_entry(self) -> "PairsParams":
+    def _exit_lt_entry(self) -> PairsParams:
         if self.exit_z >= self.entry_z:
             raise ValueError("exit_z must be < entry_z")
         return self
@@ -80,7 +80,7 @@ class Pairs(Strategy):
             return zero_weights
 
         if p.require_cointegration:
-            from statsmodels.tsa.stattools import coint   # lazy import
+            from statsmodels.tsa.stattools import coint  # lazy import
 
             head_y = y.iloc[: p.fit_window].dropna()
             head_x = x.iloc[: p.fit_window].dropna()

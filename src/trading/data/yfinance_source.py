@@ -32,7 +32,7 @@ _FREQ_TO_YF: dict[Frequency, str] = {
     "15min": "15m",
     "30min": "30m",
     "1h": "1h",
-    "4h": "1h",      # yfinance has no 4h; caller must resample.
+    "4h": "1h",  # yfinance has no 4h; caller must resample.
     "1D": "1d",
     "1W": "1wk",
 }
@@ -51,6 +51,7 @@ class YFinanceSource:
     def _yf(self) -> object:
         if self._downloader is None:
             import yfinance as yf  # local import keeps cold-start cost off importing trading
+
             self._downloader = yf
         return self._downloader
 

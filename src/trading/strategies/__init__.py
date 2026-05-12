@@ -17,6 +17,14 @@ Built-in strategies::
 
 from __future__ import annotations
 
+# Side-effect imports: each module registers its class on import.
+from trading.strategies import donchian as _donchian  # noqa: F401
+from trading.strategies import ema_cross as _ema_cross  # noqa: F401
+from trading.strategies import pairs as _pairs  # noqa: F401
+from trading.strategies import risk_parity as _rp  # noqa: F401
+from trading.strategies import rsi2 as _rsi2  # noqa: F401
+from trading.strategies import xsec_momentum as _xsec  # noqa: F401
+from trading.strategies import zscore_meanrev as _zscore  # noqa: F401
 from trading.strategies.base import (
     STRATEGY_REGISTRY,
     Strategy,
@@ -25,16 +33,6 @@ from trading.strategies.base import (
     get_strategy,
     register,
 )
-
-# Side-effect imports: each module registers its class on import.
-from trading.strategies import donchian as _donchian       # noqa: F401
-from trading.strategies import ema_cross as _ema_cross     # noqa: F401
-from trading.strategies import xsec_momentum as _xsec      # noqa: F401
-from trading.strategies import rsi2 as _rsi2               # noqa: F401
-from trading.strategies import zscore_meanrev as _zscore   # noqa: F401
-from trading.strategies import risk_parity as _rp          # noqa: F401
-from trading.strategies import pairs as _pairs             # noqa: F401
-
 from trading.strategies.donchian import Donchian, DonchianParams
 from trading.strategies.ema_cross import EmaCross, EmaCrossParams
 from trading.strategies.pairs import Pairs, PairsParams
@@ -45,8 +43,6 @@ from trading.strategies.zscore_meanrev import ZScoreMeanRev, ZScoreMeanRevParams
 
 __all__ = [
     "STRATEGY_REGISTRY",
-    "Strategy",
-    "StrategyParams",
     "Donchian",
     "DonchianParams",
     "EmaCross",
@@ -57,6 +53,8 @@ __all__ = [
     "RiskParityParams",
     "Rsi2",
     "Rsi2Params",
+    "Strategy",
+    "StrategyParams",
     "XSecMomentum",
     "XSecMomentumParams",
     "ZScoreMeanRev",

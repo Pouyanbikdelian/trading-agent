@@ -85,7 +85,17 @@ select = [
     "RUF",              # ruff-specific
     "N",                # pep8-naming
 ]
-ignore = ["E501"]       # line length handled by formatter
+ignore = [
+    "E501",     # line length — formatter handles it
+    "B008",     # typer.Option() in argument defaults is the prescribed typer pattern
+    "B017",     # pytest.raises(Exception) is fine when we're testing pydantic's varied validation errors
+    "RUF002",   # ambiguous unicode in docstrings — math notation (σ, γ, ε) is intentional
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can reach into private attrs / use Hungarian-cased names matching the
+# vendor SDKs they're faking; that's the whole point of the fake.
+"tests/**" = ["N802", "N803", "N806", "N815", "RUF012"]
 
 [tool.ruff.format]
 quote-style = "double"

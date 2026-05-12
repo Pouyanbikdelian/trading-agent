@@ -20,7 +20,6 @@ from trading.strategies import (
     ZScoreMeanRev,
 )
 
-
 # ---------------------------------------------------------------- Donchian ----
 
 
@@ -44,8 +43,8 @@ def test_donchian_shorts_on_downside_if_allowed(idx_300d: pd.DatetimeIndex) -> N
     )
     s = Donchian(lookback=10, allow_short=True)
     w = s.generate(p)
-    assert w["A"].iloc[35] == pytest.approx(1.0)        # long after upside break
-    assert w["A"].iloc[70] == pytest.approx(-1.0)       # flipped short
+    assert w["A"].iloc[35] == pytest.approx(1.0)  # long after upside break
+    assert w["A"].iloc[70] == pytest.approx(-1.0)  # flipped short
 
 
 def test_donchian_flat_default_after_downside(idx_300d: pd.DatetimeIndex) -> None:
@@ -106,11 +105,16 @@ def test_xsec_momentum_longs_winners_shorts_losers(idx_300d: pd.DatetimeIndex) -
 
 def test_xsec_momentum_long_only(idx_300d: pd.DatetimeIndex) -> None:
     prices = pd.DataFrame(
-        {"A": np.linspace(100, 200, 300), "B": np.full(300, 100.0), "C": np.linspace(200, 100, 300)},
+        {
+            "A": np.linspace(100, 200, 300),
+            "B": np.full(300, 100.0),
+            "C": np.linspace(200, 100, 300),
+        },
         index=idx_300d,
     )
-    s = XSecMomentum(lookback=63, skip=5, rebalance=21, top_frac=1 / 3,
-                     bottom_frac=1 / 3, long_only=True)
+    s = XSecMomentum(
+        lookback=63, skip=5, rebalance=21, top_frac=1 / 3, bottom_frac=1 / 3, long_only=True
+    )
     w = s.generate(prices)
     # No shorts anywhere.
     assert (w >= 0).all().all()
@@ -129,7 +133,7 @@ def test_rsi2_entry_on_oversold_in_uptrend(idx_300d: pd.DatetimeIndex) -> None:
     # Steep trend gives SMA50 enough slack that a small one-bar dip can push
     # RSI(2) below the entry threshold without breaking the regime filter.
     p = np.linspace(100.0, 300.0, 300)
-    p[-2] = p[-3] * 0.98          # mild single-bar dip
+    p[-2] = p[-3] * 0.98  # mild single-bar dip
     prices = pd.DataFrame({"A": p}, index=idx_300d)
     s = Rsi2(rsi_period=2, regime_sma=50, entry_threshold=20.0, exit_sma=5)
     w = s.generate(prices)

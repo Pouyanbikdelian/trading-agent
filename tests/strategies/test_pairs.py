@@ -53,8 +53,9 @@ def test_pairs_trades_when_cointegrated() -> None:
 
 def test_pairs_skips_unrelated_series() -> None:
     prices = _unrelated_pair(seed=7)
-    s = Pairs(fit_window=200, beta_window=60, z_window=60, coint_pvalue=0.01,
-              require_cointegration=True)
+    s = Pairs(
+        fit_window=200, beta_window=60, z_window=60, coint_pvalue=0.01, require_cointegration=True
+    )
     w = s.generate(prices)
     # Cointegration test should reject → all-zero weights.
     assert w.values.sum() == pytest.approx(0.0)
@@ -62,8 +63,14 @@ def test_pairs_skips_unrelated_series() -> None:
 
 def test_pairs_can_skip_coint_check() -> None:
     prices = _unrelated_pair(seed=7)
-    s = Pairs(fit_window=200, beta_window=60, z_window=60,
-              require_cointegration=False, entry_z=1.0, exit_z=0.2)
+    s = Pairs(
+        fit_window=200,
+        beta_window=60,
+        z_window=60,
+        require_cointegration=False,
+        entry_z=1.0,
+        exit_z=0.2,
+    )
     w = s.generate(prices)
     # With the check disabled, the strategy still produces signals from the spread.
     assert (w["a"] != 0).any() or (w["b"] != 0).any()
@@ -84,10 +91,24 @@ def test_pairs_validates_exit_lt_entry() -> None:
 
 def test_pairs_beta_hedge_uses_lagged_beta() -> None:
     prices = _cointegrated_pair()
-    s_unhedged = Pairs(fit_window=200, beta_window=60, z_window=60, entry_z=1.5,
-                       exit_z=0.3, beta_hedge=False, weight_per_leg=0.5)
-    s_hedged = Pairs(fit_window=200, beta_window=60, z_window=60, entry_z=1.5,
-                     exit_z=0.3, beta_hedge=True, weight_per_leg=0.5)
+    s_unhedged = Pairs(
+        fit_window=200,
+        beta_window=60,
+        z_window=60,
+        entry_z=1.5,
+        exit_z=0.3,
+        beta_hedge=False,
+        weight_per_leg=0.5,
+    )
+    s_hedged = Pairs(
+        fit_window=200,
+        beta_window=60,
+        z_window=60,
+        entry_z=1.5,
+        exit_z=0.3,
+        beta_hedge=True,
+        weight_per_leg=0.5,
+    )
     w_unhedged = s_unhedged.generate(prices)
     w_hedged = s_hedged.generate(prices)
     # On bars where the position is active, the unhedged x-weight has |w|=0.5,

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import pytest
 
+from tests.data.conftest import make_bars
 from trading.core.types import AssetClass, Instrument
 from trading.data.base import (
     BAR_COLUMNS,
@@ -15,7 +16,6 @@ from trading.data.base import (
     empty_bars_frame,
     validate_bars_frame,
 )
-from tests.data.conftest import make_bars
 
 
 def test_empty_frame_has_canonical_schema() -> None:

@@ -44,8 +44,10 @@ def test_cagr_compounds_correctly() -> None:
     # 252 daily returns of exactly 10% total: CAGR ≈ 10% per year.
     eq = _equity([1.0] + [1.0] * 251 + [1.1])
     # 252 periods means exactly 1.0 year of returns.
-    eq = pd.Series(np.linspace(1.0, 1.1, 253),
-                   index=pd.date_range("2024-01-01", periods=253, freq="1D", tz="UTC"))
+    eq = pd.Series(
+        np.linspace(1.0, 1.1, 253),
+        index=pd.date_range("2024-01-01", periods=253, freq="1D", tz="UTC"),
+    )
     out = cagr(eq, periods_per_year=252)
     assert out == pytest.approx(0.1, rel=0.05)
 
@@ -128,9 +130,17 @@ def test_compute_metrics_returns_full_bundle() -> None:
     m = compute_metrics(r, periods_per_year=252)
     # Every advertised metric is present.
     for key in (
-        "total_return", "cagr", "ann_vol", "sharpe", "sortino",
-        "max_drawdown", "calmar", "hit_rate", "avg_turnover",
-        "avg_exposure", "n_trades",
+        "total_return",
+        "cagr",
+        "ann_vol",
+        "sharpe",
+        "sortino",
+        "max_drawdown",
+        "calmar",
+        "hit_rate",
+        "avg_turnover",
+        "avg_exposure",
+        "n_trades",
     ):
         assert key in m
         assert isinstance(m[key], float)

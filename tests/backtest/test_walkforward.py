@@ -35,8 +35,12 @@ def prices_50d() -> pd.DataFrame:
 
 def test_expanding_produces_expected_fold_count(prices_50d: pd.DataFrame) -> None:
     folds, _ = expanding(
-        prices_50d, _always_long,
-        train_size=20, test_size=5, step=5, costs=ZERO_COSTS,
+        prices_50d,
+        _always_long,
+        train_size=20,
+        test_size=5,
+        step=5,
+        costs=ZERO_COSTS,
     )
     # 50 bars total, 20 train, 5 test, step 5
     # Fold 0: train 0..19, test 20..24
@@ -51,9 +55,13 @@ def test_expanding_produces_expected_fold_count(prices_50d: pd.DataFrame) -> Non
 
 
 def test_expanding_concatenates_oos_results(prices_50d: pd.DataFrame) -> None:
-    folds, result = expanding(
-        prices_50d, _always_long,
-        train_size=20, test_size=5, step=5, costs=ZERO_COSTS,
+    _, result = expanding(
+        prices_50d,
+        _always_long,
+        train_size=20,
+        test_size=5,
+        step=5,
+        costs=ZERO_COSTS,
     )
     # 30 OOS bars: indices 20..49.
     assert len(result.equity) == 30
@@ -63,10 +71,19 @@ def test_expanding_concatenates_oos_results(prices_50d: pd.DataFrame) -> None:
 
 def test_expanding_default_step_equals_test_size(prices_50d: pd.DataFrame) -> None:
     folds_default, _ = expanding(
-        prices_50d, _always_long, train_size=20, test_size=5, costs=ZERO_COSTS,
+        prices_50d,
+        _always_long,
+        train_size=20,
+        test_size=5,
+        costs=ZERO_COSTS,
     )
     folds_explicit, _ = expanding(
-        prices_50d, _always_long, train_size=20, test_size=5, step=5, costs=ZERO_COSTS,
+        prices_50d,
+        _always_long,
+        train_size=20,
+        test_size=5,
+        step=5,
+        costs=ZERO_COSTS,
     )
     assert len(folds_default) == len(folds_explicit)
 
@@ -85,9 +102,12 @@ def test_expanding_passes_growing_train_window(prices_50d: pd.DataFrame) -> None
 
 def test_signal_fn_using_train_data_works(prices_50d: pd.DataFrame) -> None:
     # Both symbols trend up, so the strategy stays long for every OOS window.
-    folds, result = expanding(
-        prices_50d, _last_train_mean_signal,
-        train_size=20, test_size=10, costs=ZERO_COSTS,
+    _, result = expanding(
+        prices_50d,
+        _last_train_mean_signal,
+        train_size=20,
+        test_size=10,
+        costs=ZERO_COSTS,
     )
     assert result.total_return > 0
 

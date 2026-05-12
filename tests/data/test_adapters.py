@@ -14,12 +14,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tests.data.conftest import make_bars
 from trading.core.types import AssetClass, Instrument
 from trading.data.base import BAR_COLUMNS, validate_bars_frame
 from trading.data.ccxt_source import CcxtSource
 from trading.data.yfinance_source import YFinanceSource
-from tests.data.conftest import make_bars
-
 
 # ---------------------------------------------------------------- yfinance ----
 
@@ -31,7 +30,7 @@ class _FakeYf:
         self.raw = raw
         self.last_kwargs: dict[str, Any] = {}
 
-    def download(self, **kwargs: Any) -> pd.DataFrame:  # noqa: D401
+    def download(self, **kwargs: Any) -> pd.DataFrame:
         self.last_kwargs = kwargs
         return self.raw
 
@@ -127,7 +126,7 @@ def test_yfinance_passes_through_intraday_tz(aapl: Instrument) -> None:
 class _FakeCcxt:
     """Mimics the ``fetch_ohlcv`` method of a ccxt exchange."""
 
-    rateLimit = 0  # adapter sleeps for client.rateLimit / 1000s — keep it 0
+    rateLimit = 0
 
     def __init__(self, rows: list[list[float]], page_size: int = 1000) -> None:
         self._rows = rows
@@ -141,7 +140,9 @@ class _FakeCcxt:
         since: int,
         limit: int,
     ) -> list[list[float]]:
-        self.calls.append({"symbol": symbol, "timeframe": timeframe, "since": since, "limit": limit})
+        self.calls.append(
+            {"symbol": symbol, "timeframe": timeframe, "since": since, "limit": limit}
+        )
         page = [r for r in self._rows if r[0] >= since][: self._page_size]
         return page
 
@@ -155,7 +156,7 @@ def _ohlcv_rows(periods: int, step_ms: int, start_ms: int) -> list[list[float]]:
 
 def test_ccxt_paginates_until_end(btc: Instrument) -> None:
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    end = datetime(2024, 1, 6, tzinfo=timezone.utc)   # 5 daily bars wanted
+    end = datetime(2024, 1, 6, tzinfo=timezone.utc)  # 5 daily bars wanted
     start_ms = int(start.timestamp() * 1000)
     step_ms = 24 * 3600 * 1000
     rows = _ohlcv_rows(periods=5, step_ms=step_ms, start_ms=start_ms)
@@ -201,7 +202,7 @@ def test_ccxt_breaks_on_non_advancing_page(btc: Instrument) -> None:
 
 def test_ccxt_trims_to_end(btc: Instrument) -> None:
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    end = datetime(2024, 1, 3, tzinfo=timezone.utc)   # ask for 3 days
+    end = datetime(2024, 1, 3, tzinfo=timezone.utc)  # ask for 3 days
     start_ms = int(start.timestamp() * 1000)
     step_ms = 24 * 3600 * 1000
     # Exchange returns 10 rows; only 3 are within the inclusive end.

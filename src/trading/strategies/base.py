@@ -102,6 +102,7 @@ class Strategy(ABC):
         # Local import keeps the strategies module decoupled from the
         # regime module's import order.
         from trading.regime.base import regime_scale
+
         return regime_scale(weights, regime, self.regime_scale_map)
 
     def __repr__(self) -> str:

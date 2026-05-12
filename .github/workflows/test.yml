@@ -1,0 +1,58 @@
+# Continuous integration: ruff lint + pytest on every push and PR to main.
+#
+# We deliberately do NOT gate on mypy yet — the strict-typed annotations need
+# cleanup before they pass cleanly; gating now would either freeze progress or
+# train people to ignore failed runs. Run `make typecheck` locally; we'll
+# tighten this once the backlog clears.
+#
+# Network-free: every test marked @pytest.mark.slow or @pytest.mark.live is
+# skipped here because CI doesn't have an IB Gateway or outbound yfinance.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ruff + pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # uv handles Python install + dep resolution from uv.lock. The action
+      # caches both the uv-managed Python and the resolved venv.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies (frozen)
+        run: uv sync --frozen --all-extras
+
+      - name: Ruff lint
+        run: uv run ruff check src tests
+
+      - name: Ruff format (check only)
+        run: uv run ruff format --check src tests
+
+      - name: Pytest
+        run: uv run pytest -q -m "not slow and not live"

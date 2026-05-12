@@ -66,9 +66,15 @@ def make_order(
     )
 
 
-def make_bar(ts: datetime, *, open: float, close: float | None = None,
-             high: float | None = None, low: float | None = None,
-             volume: float = 1_000.0) -> Bar:
+def make_bar(
+    ts: datetime,
+    *,
+    open: float,
+    close: float | None = None,
+    high: float | None = None,
+    low: float | None = None,
+    volume: float = 1_000.0,
+) -> Bar:
     return Bar(
         ts=ts,
         open=open,

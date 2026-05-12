@@ -32,7 +32,7 @@ class ZScoreMeanRevParams(StrategyParams):
     weight_per_asset: float = Field(default=1.0, gt=0.0)
 
     @model_validator(mode="after")
-    def _exit_lt_entry(self) -> "ZScoreMeanRevParams":
+    def _exit_lt_entry(self) -> ZScoreMeanRevParams:
         if self.exit_z >= self.entry_z:
             raise ValueError("exit_z must be < entry_z")
         return self
@@ -67,4 +67,6 @@ class ZScoreMeanRev(Strategy):
             event = event.ffill().fillna(0.0)
             weights[:, j] = event.values
 
-        return pd.DataFrame(weights, index=prices.index, columns=prices.columns) * p.weight_per_asset
+        return (
+            pd.DataFrame(weights, index=prices.index, columns=prices.columns) * p.weight_per_asset
+        )

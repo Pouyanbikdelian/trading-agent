@@ -50,6 +50,7 @@ class CcxtSource:
     def _exchange(self) -> Any:
         if self._client is None:
             import ccxt  # lazy import
+
             cls = getattr(ccxt, self.exchange_id)
             self._client = cls({"enableRateLimit": True})
         return self._client

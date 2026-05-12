@@ -32,8 +32,13 @@ def test_write_then_read(tmp_path: Path) -> None:
 
 def test_write_with_extra_fields(tmp_path: Path) -> None:
     path = tmp_path / "hb.json"
-    write_heartbeat(path, ts=datetime.now(timezone.utc), status="ok",
-                    cycle_no=1, extra={"orders": 7, "fills": 7})
+    write_heartbeat(
+        path,
+        ts=datetime.now(timezone.utc),
+        status="ok",
+        cycle_no=1,
+        extra={"orders": 7, "fills": 7},
+    )
     out = read_heartbeat(path)
     assert out is not None
     assert out["orders"] == 7
@@ -48,7 +53,7 @@ def test_age_seconds_present(tmp_path: Path) -> None:
     write_heartbeat(path, ts=datetime.now(timezone.utc), status="ok", cycle_no=1)
     age = heartbeat_age_seconds(path)
     assert age is not None
-    assert 0 <= age < 5.0   # generous bound for slow CI
+    assert 0 <= age < 5.0  # generous bound for slow CI
 
 
 def test_age_seconds_missing(tmp_path: Path) -> None:
@@ -89,5 +94,4 @@ def test_atomic_write_overwrites(tmp_path: Path) -> None:
 
 def test_write_rejects_naive_datetime(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
-        write_heartbeat(tmp_path / "hb.json", ts=datetime(2024, 1, 1),
-                        status="ok", cycle_no=1)
+        write_heartbeat(tmp_path / "hb.json", ts=datetime(2024, 1, 1), status="ok", cycle_no=1)

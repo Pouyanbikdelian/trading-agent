@@ -16,8 +16,12 @@ from trading.strategies.base import Strategy, StrategyParams, register
 
 def test_registry_lists_all_builtins() -> None:
     for name in (
-        "donchian", "ema_cross", "xsec_momentum",
-        "rsi2", "zscore_meanrev", "risk_parity",
+        "donchian",
+        "ema_cross",
+        "xsec_momentum",
+        "rsi2",
+        "zscore_meanrev",
+        "risk_parity",
     ):
         assert name in available_strategies()
 
@@ -33,7 +37,7 @@ def test_get_strategy_unknown_raises() -> None:
 
 
 def test_kwargs_or_params_but_not_both() -> None:
-    Donchian(lookback=10)                     # kwargs path
+    Donchian(lookback=10)  # kwargs path
     Donchian(params=DonchianParams(lookback=10))  # params path
     with pytest.raises(TypeError, match="either"):
         Donchian(params=DonchianParams(lookback=10), lookback=10)
@@ -55,7 +59,7 @@ def test_register_rejects_duplicate_name() -> None:
         pass
 
     class FakeStrat(Strategy):
-        name = "donchian"   # already registered
+        name = "donchian"  # already registered
         Params = FakeParams
 
         def generate(self, prices: pd.DataFrame) -> pd.DataFrame:

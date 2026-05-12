@@ -40,7 +40,6 @@ from trading.core.types import (
     TimeInForce,
 )
 
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS orders (
     client_order_id     TEXT PRIMARY KEY,

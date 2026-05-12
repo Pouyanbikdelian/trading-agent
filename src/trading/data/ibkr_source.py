@@ -63,8 +63,13 @@ class IbkrSource:
 
     name = "ibkr"
 
-    def __init__(self, ib: Any | None = None, host: str | None = None, port: int | None = None,
-                 client_id: int | None = None) -> None:
+    def __init__(
+        self,
+        ib: Any | None = None,
+        host: str | None = None,
+        port: int | None = None,
+        client_id: int | None = None,
+    ) -> None:
         self._ib = ib
         self._host = host or settings.ibkr_host
         self._port = port or settings.ibkr_port
@@ -73,6 +78,7 @@ class IbkrSource:
     async def _ensure_connected(self) -> Any:
         if self._ib is None:
             from ib_async import IB  # lazy import — heavy
+
             self._ib = IB()
         if not self._ib.isConnected():
             await self._ib.connectAsync(self._host, self._port, clientId=self._client_id)
@@ -114,7 +120,7 @@ class IbkrSource:
             barSizeSetting=bar_size,
             whatToShow=what_to_show,
             useRTH=False,
-            formatDate=2,         # UTC seconds since epoch
+            formatDate=2,  # UTC seconds since epoch
         )
         if not bars:
             return empty_bars_frame()
@@ -122,8 +128,9 @@ class IbkrSource:
         df = pd.DataFrame(
             [
                 {
-                    "ts": pd.Timestamp(b.date, tz="UTC") if not isinstance(b.date, pd.Timestamp)
-                          else (b.date.tz_convert("UTC") if b.date.tzinfo else b.date.tz_localize("UTC")),
+                    "ts": pd.Timestamp(b.date, tz="UTC")
+                    if not isinstance(b.date, pd.Timestamp)
+                    else (b.date.tz_convert("UTC") if b.date.tzinfo else b.date.tz_localize("UTC")),
                     "open": b.open,
                     "high": b.high,
                     "low": b.low,

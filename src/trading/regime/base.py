@@ -36,7 +36,7 @@ class RegimeClassifier(Protocol):
 
     n_states: int
 
-    def fit(self, returns: pd.Series) -> "RegimeClassifier": ...
+    def fit(self, returns: pd.Series) -> RegimeClassifier: ...
 
     def predict(self, returns: pd.Series) -> pd.Series:
         """Return an integer ``Series`` aligned to ``returns.index`` with

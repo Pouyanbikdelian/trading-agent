@@ -17,7 +17,6 @@ Behavior
 
 from __future__ import annotations
 
-import json
 import urllib.parse
 import urllib.request
 from typing import Literal
@@ -42,7 +41,7 @@ class TelegramAlerts:
         self.chat_id = chat_id
         self.timeout = timeout
         self.enabled = bool(enabled and token and chat_id)
-        self._sent: list[tuple[Level, str]] = []   # in-memory log for tests
+        self._sent: list[tuple[Level, str]] = []  # in-memory log for tests
 
     def info(self, msg: str) -> None:
         self._send("info", msg)
@@ -67,10 +66,12 @@ class TelegramAlerts:
         if not self.enabled:
             return
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        data = urllib.parse.urlencode({
-            "chat_id": str(self.chat_id),
-            "text": msg,
-        }).encode("utf-8")
+        data = urllib.parse.urlencode(
+            {
+                "chat_id": str(self.chat_id),
+                "text": msg,
+            }
+        ).encode("utf-8")
         try:
             req = urllib.request.Request(url, data=data, method="POST")
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -79,7 +80,7 @@ class TelegramAlerts:
                     logger.bind(component="alerts").warning(
                         f"telegram returned status={resp.status} body={body}"
                     )
-        except Exception as e:  # noqa: BLE001 — alerts must not raise
+        except Exception as e:
             logger.bind(component="alerts").exception(f"telegram send failed: {e!r}")
 
 

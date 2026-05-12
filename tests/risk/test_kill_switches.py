@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-
-import pytest
+from datetime import timedelta
 
 from trading.core.types import AccountSnapshot
-from trading.risk import RiskLimits, RiskManager
 
 
 def test_daily_loss_kill_switch_fires(mgr, account_100k, t0) -> None:
@@ -33,7 +30,7 @@ def test_drawdown_kill_switch_fires(mgr, t0) -> None:
     # Start with high equity to establish HWM.
     high = AccountSnapshot(ts=t0, cash=200_000.0, equity=200_000.0)
     mgr.start_of_day(high)
-    mgr.evaluate_intraday(high)        # records HWM
+    mgr.evaluate_intraday(high)  # records HWM
     # Now drop 16% from peak.
     low = AccountSnapshot(ts=t0 + timedelta(days=30), cash=168_000.0, equity=168_000.0)
     mgr.start_of_day(low)

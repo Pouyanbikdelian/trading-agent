@@ -30,8 +30,8 @@ on review.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Callable, Iterator
 
 import pandas as pd
 
@@ -63,8 +63,7 @@ def _folds(
         raise ValueError("train_size, test_size, step must all be positive")
     if train_size + test_size > n:
         raise ValueError(
-            f"need at least train_size+test_size={train_size + test_size} "
-            f"bars; got {n}"
+            f"need at least train_size+test_size={train_size + test_size} bars; got {n}"
         )
 
     fold = 0

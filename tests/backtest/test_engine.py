@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from trading.backtest import CostModel, ZERO_COSTS, run_vectorized
+from trading.backtest import ZERO_COSTS, CostModel, run_vectorized
 
 
 def test_zero_weights_yields_flat_equity(linear_prices: pd.DataFrame) -> None:
@@ -36,7 +36,7 @@ def test_costs_drag_on_flat_market(flat_prices: pd.DataFrame) -> None:
     """Flat prices + 100% weight all the time: returns are 0, but the
     initial entry at t=0 costs ``total_bps * |weight|`` once."""
     w = pd.DataFrame({"A": [1.0] * 30}, index=flat_prices.index)
-    costs = CostModel(commission_bps=5.0, slippage_bps=5.0)   # 10 bps total
+    costs = CostModel(commission_bps=5.0, slippage_bps=5.0)  # 10 bps total
     r = run_vectorized(flat_prices, w, costs=costs)
     # Only one trade (the initial 0->1 entry), so total cost drag = 10 bps.
     assert r.total_return == pytest.approx(-10 / 1e4, abs=1e-12)
@@ -53,7 +53,7 @@ def test_short_position_profits_on_drop() -> None:
     pcts = prices["A"].pct_change().fillna(0.0).iloc[1:]
     expected = float((1.0 + (-1.0) * pcts).prod() - 1.0)
     assert r.total_return == pytest.approx(expected, rel=1e-12)
-    assert r.total_return > 0   # short profited as price fell
+    assert r.total_return > 0  # short profited as price fell
 
 
 def test_no_lookahead_first_bar_has_zero_return(linear_prices: pd.DataFrame) -> None:
@@ -74,7 +74,8 @@ def test_rebalance_emits_two_trades() -> None:
     idx = pd.date_range("2024-01-01", periods=4, freq="1D", tz="UTC")
     prices = pd.DataFrame(
         {"A": [100, 100, 100, 100], "B": [50, 50, 50, 50]},
-        index=idx, dtype=float,
+        index=idx,
+        dtype=float,
     )
     weights = pd.DataFrame(
         {
@@ -92,8 +93,7 @@ def test_rebalance_emits_two_trades() -> None:
 
 def test_misaligned_columns_use_intersection() -> None:
     idx = pd.date_range("2024-01-01", periods=5, freq="1D", tz="UTC")
-    prices = pd.DataFrame({"A": [100, 101, 102, 103, 104], "B": [50] * 5},
-                          index=idx, dtype=float)
+    prices = pd.DataFrame({"A": [100, 101, 102, 103, 104], "B": [50] * 5}, index=idx, dtype=float)
     weights = pd.DataFrame({"A": [1.0] * 5, "C": [1.0] * 5}, index=idx)
     r = run_vectorized(prices, weights, costs=ZERO_COSTS)
     # Only "A" survives the intersection.
@@ -101,8 +101,7 @@ def test_misaligned_columns_use_intersection() -> None:
 
 
 def test_nan_weights_treated_as_zero(linear_prices: pd.DataFrame) -> None:
-    w = pd.DataFrame({"A": [np.nan] + [1.0] * 29, "B": [0.0] * 30},
-                     index=linear_prices.index)
+    w = pd.DataFrame({"A": [np.nan] + [1.0] * 29, "B": [0.0] * 30}, index=linear_prices.index)
     r = run_vectorized(linear_prices, w, costs=ZERO_COSTS)
     # t=0 weight is NaN -> 0. t=1 enters at 1.0. So first "real" trade is at t=1.
     assert r.trades.iloc[0]["ts"] == linear_prices.index[1]

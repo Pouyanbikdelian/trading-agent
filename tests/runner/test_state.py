@@ -34,8 +34,11 @@ def snapshot(aapl: Instrument) -> AccountSnapshot:
         equity=100_000.0,
         positions={
             "equity:AAPL": Position(
-                instrument=aapl, quantity=10.0, avg_price=150.0,
-                realized_pnl=5.0, unrealized_pnl=0.0,
+                instrument=aapl,
+                quantity=10.0,
+                avg_price=150.0,
+                realized_pnl=5.0,
+                unrealized_pnl=0.0,
             ),
         },
     )
@@ -58,10 +61,12 @@ def test_latest_when_empty(store: RunnerStore) -> None:
 
 
 def test_latest_returns_most_recent(store: RunnerStore, snapshot: AccountSnapshot) -> None:
-    later = snapshot.model_copy(update={
-        "ts": snapshot.ts + timedelta(days=1),
-        "equity": 102_000.0,
-    })
+    later = snapshot.model_copy(
+        update={
+            "ts": snapshot.ts + timedelta(days=1),
+            "equity": 102_000.0,
+        }
+    )
     store.save_snapshot(snapshot)
     store.save_snapshot(later)
     out = store.latest_snapshot()
@@ -70,10 +75,14 @@ def test_latest_returns_most_recent(store: RunnerStore, snapshot: AccountSnapsho
 
 
 def test_equity_curve_ordered_ascending(store: RunnerStore, snapshot: AccountSnapshot) -> None:
-    store.save_snapshot(snapshot.model_copy(update={
-        "ts": snapshot.ts + timedelta(days=2),
-        "equity": 101_000.0,
-    }))
+    store.save_snapshot(
+        snapshot.model_copy(
+            update={
+                "ts": snapshot.ts + timedelta(days=2),
+                "equity": 101_000.0,
+            }
+        )
+    )
     store.save_snapshot(snapshot)
     curve = store.equity_curve()
     assert [e for _, e in curve] == [100_000.0, 101_000.0]
@@ -102,19 +111,25 @@ def test_save_cycle_round_trips(store: RunnerStore) -> None:
 def test_recent_cycles_limit_and_order(store: RunnerStore) -> None:
     base_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
     for i in range(5):
-        store.save_cycle(CycleReport(
-            ts=base_ts + timedelta(hours=i),
-            status="ok", orders_submitted=i, fills_received=0,
-            decisions=[],
-        ))
+        store.save_cycle(
+            CycleReport(
+                ts=base_ts + timedelta(hours=i),
+                status="ok",
+                orders_submitted=i,
+                fills_received=0,
+                decisions=[],
+            )
+        )
     out = store.recent_cycles(limit=3)
     assert [r["orders_submitted"] for r in out] == [4, 3, 2]  # DESC by ts
 
 
 def test_save_rejects_naive_datetime(store: RunnerStore, aapl: Instrument) -> None:
     naive_snap = AccountSnapshot.model_construct(
-        ts=datetime(2024, 1, 1),    # bypass pydantic's validator
-        cash=0.0, equity=0.0, positions={},
+        ts=datetime(2024, 1, 1),  # bypass pydantic's validator
+        cash=0.0,
+        equity=0.0,
+        positions={},
     )
     with pytest.raises(ValueError, match="timezone-aware"):
         store.save_snapshot(naive_snap)

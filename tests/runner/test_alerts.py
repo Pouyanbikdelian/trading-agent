@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from trading.runner import NullAlerts, TelegramAlerts
 
 
@@ -53,6 +51,7 @@ def test_send_swallows_network_errors(monkeypatch) -> None:
         raise OSError("no route to host")
 
     import urllib.request as _ur
+
     monkeypatch.setattr(_ur, "urlopen", boom)
     # Should NOT raise — only logs.
     a.error("hello")

@@ -63,5 +63,7 @@ class Donchian(Strategy):
             event = event.ffill().fillna(0.0)
             state[:, j] = event.values
 
-        weights = pd.DataFrame(state, index=prices.index, columns=prices.columns) * p.weight_per_asset
+        weights = (
+            pd.DataFrame(state, index=prices.index, columns=prices.columns) * p.weight_per_asset
+        )
         return weights

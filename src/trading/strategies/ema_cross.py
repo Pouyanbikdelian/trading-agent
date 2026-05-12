@@ -27,7 +27,7 @@ class EmaCrossParams(StrategyParams):
     weight_per_asset: float = Field(default=1.0, gt=0.0)
 
     @model_validator(mode="after")
-    def _fast_lt_slow(self) -> "EmaCrossParams":
+    def _fast_lt_slow(self) -> EmaCrossParams:
         if self.fast_span >= self.slow_span:
             raise ValueError("fast_span must be < slow_span")
         return self

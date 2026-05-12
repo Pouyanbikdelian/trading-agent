@@ -18,7 +18,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from trading.data.base import CANONICAL_FREQUENCIES, Frequency
 
-
 CombinerName = Literal["equal_weight", "inverse_vol", "min_variance"]
 
 

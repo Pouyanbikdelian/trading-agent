@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import pytest
 
-from trading.core.types import AccountSnapshot, Instrument, Position, Side
 from tests.risk.conftest import instruments_dict, signal_from
+from trading.core.types import AccountSnapshot, Position, Side
 
 
 def test_per_position_cap_scales_only_offenders(mgr, aapl, msft, account_100k, t0) -> None:
     sig = signal_from(t0, {"equity:AAPL": 0.25, "equity:MSFT": 0.05})
     prices = {"equity:AAPL": 100.0, "equity:MSFT": 100.0}
     orders, decisions = mgr.signal_to_orders(
-        sig, account=account_100k, last_prices=prices,
+        sig,
+        account=account_100k,
+        last_prices=prices,
         instruments=instruments_dict(aapl, msft),
     )
     by_sym = {o.instrument.symbol: o for o in orders}
@@ -37,7 +39,8 @@ def test_gross_exposure_scales_everything(mgr, aapl, msft, account_100k, t0) -> 
     mgr.limits = mgr.limits.model_copy(update={"max_gross_exposure": 0.10})
     sig = signal_from(t0, {"equity:AAPL": 0.10, "equity:MSFT": 0.05})
     orders, decisions = mgr.signal_to_orders(
-        sig, account=account_100k,
+        sig,
+        account=account_100k,
         last_prices={"equity:AAPL": 100.0, "equity:MSFT": 100.0},
         instruments=instruments_dict(aapl, msft),
     )
@@ -48,14 +51,17 @@ def test_gross_exposure_scales_everything(mgr, aapl, msft, account_100k, t0) -> 
 
 
 def test_net_exposure_scales_everything(mgr, aapl, msft, account_100k, t0) -> None:
-    mgr.limits = mgr.limits.model_copy(update={
-        "max_position_pct": 1.0,
-        "max_gross_exposure": 10.0,
-        "max_net_exposure": 0.20,
-    })
+    mgr.limits = mgr.limits.model_copy(
+        update={
+            "max_position_pct": 1.0,
+            "max_gross_exposure": 10.0,
+            "max_net_exposure": 0.20,
+        }
+    )
     sig = signal_from(t0, {"equity:AAPL": 0.30, "equity:MSFT": 0.30})  # net 0.60
     orders, decisions = mgr.signal_to_orders(
-        sig, account=account_100k,
+        sig,
+        account=account_100k,
         last_prices={"equity:AAPL": 100.0, "equity:MSFT": 100.0},
         instruments=instruments_dict(aapl, msft),
     )
@@ -71,7 +77,8 @@ def test_sector_cap_scales_only_that_sector(mgr, aapl, msft, xom, account_100k, 
     sig = signal_from(t0, {"equity:AAPL": 0.20, "equity:MSFT": 0.20, "equity:XOM": 0.10})
     sector_map = {"equity:AAPL": "tech", "equity:MSFT": "tech", "equity:XOM": "energy"}
     orders, decisions = mgr.signal_to_orders(
-        sig, account=account_100k,
+        sig,
+        account=account_100k,
         last_prices={"equity:AAPL": 100.0, "equity:MSFT": 100.0, "equity:XOM": 100.0},
         instruments=instruments_dict(aapl, msft, xom),
         sector_map=sector_map,
@@ -90,9 +97,11 @@ def test_delta_against_existing_position(mgr, aapl, account_100k, t0) -> None:
     # Already long 50 shares; target weight asks for 100 shares.
     pos = Position(instrument=aapl, quantity=50.0, avg_price=100.0)
     account = account_100k.model_copy(update={"positions": {"equity:AAPL": pos}})
-    sig = signal_from(t0, {"equity:AAPL": 0.10})   # 100 shares at $100 = $10k
+    sig = signal_from(t0, {"equity:AAPL": 0.10})  # 100 shares at $100 = $10k
     orders, _ = mgr.signal_to_orders(
-        sig, account=account, last_prices={"equity:AAPL": 100.0},
+        sig,
+        account=account,
+        last_prices={"equity:AAPL": 100.0},
         instruments={"equity:AAPL": aapl},
     )
     assert len(orders) == 1
@@ -103,9 +112,11 @@ def test_delta_against_existing_position(mgr, aapl, account_100k, t0) -> None:
 def test_delta_flips_long_to_short(mgr, aapl, account_100k, t0) -> None:
     pos = Position(instrument=aapl, quantity=100.0, avg_price=100.0)
     account = account_100k.model_copy(update={"positions": {"equity:AAPL": pos}})
-    sig = signal_from(t0, {"equity:AAPL": -0.05})   # -50 shares
+    sig = signal_from(t0, {"equity:AAPL": -0.05})  # -50 shares
     orders, _ = mgr.signal_to_orders(
-        sig, account=account, last_prices={"equity:AAPL": 100.0},
+        sig,
+        account=account,
+        last_prices={"equity:AAPL": 100.0},
         instruments={"equity:AAPL": aapl},
     )
     # Must sell 150 shares: close 100 long + open 50 short.
@@ -118,7 +129,9 @@ def test_no_trade_when_already_at_target(mgr, aapl, account_100k, t0) -> None:
     account = account_100k.model_copy(update={"positions": {"equity:AAPL": pos}})
     sig = signal_from(t0, {"equity:AAPL": 0.10})
     orders, _ = mgr.signal_to_orders(
-        sig, account=account, last_prices={"equity:AAPL": 100.0},
+        sig,
+        account=account,
+        last_prices={"equity:AAPL": 100.0},
         instruments={"equity:AAPL": aapl},
     )
     assert orders == []
@@ -127,7 +140,9 @@ def test_no_trade_when_already_at_target(mgr, aapl, account_100k, t0) -> None:
 def test_missing_instrument_rejected(mgr, aapl, account_100k, t0) -> None:
     sig = signal_from(t0, {"equity:UNKNOWN": 0.05})
     orders, decisions = mgr.signal_to_orders(
-        sig, account=account_100k, last_prices={"equity:UNKNOWN": 100.0},
+        sig,
+        account=account_100k,
+        last_prices={"equity:UNKNOWN": 100.0},
         instruments={"equity:AAPL": aapl},
     )
     assert orders == []
@@ -137,7 +152,9 @@ def test_missing_instrument_rejected(mgr, aapl, account_100k, t0) -> None:
 def test_missing_or_zero_price_rejected(mgr, aapl, account_100k, t0) -> None:
     sig = signal_from(t0, {"equity:AAPL": 0.05})
     orders, decisions = mgr.signal_to_orders(
-        sig, account=account_100k, last_prices={"equity:AAPL": 0.0},
+        sig,
+        account=account_100k,
+        last_prices={"equity:AAPL": 0.0},
         instruments={"equity:AAPL": aapl},
     )
     assert orders == []
@@ -148,7 +165,9 @@ def test_non_positive_equity_rejected(mgr, aapl, t0) -> None:
     account = AccountSnapshot(ts=t0, cash=0.0, equity=0.0)
     sig = signal_from(t0, {"equity:AAPL": 0.05})
     orders, decisions = mgr.signal_to_orders(
-        sig, account=account, last_prices={"equity:AAPL": 100.0},
+        sig,
+        account=account,
+        last_prices={"equity:AAPL": 100.0},
         instruments={"equity:AAPL": aapl},
     )
     assert orders == []
@@ -159,7 +178,9 @@ def test_halted_manager_produces_no_orders(mgr, aapl, account_100k, t0) -> None:
     mgr.halt("manual test halt")
     sig = signal_from(t0, {"equity:AAPL": 0.05})
     orders, decisions = mgr.signal_to_orders(
-        sig, account=account_100k, last_prices={"equity:AAPL": 100.0},
+        sig,
+        account=account_100k,
+        last_prices={"equity:AAPL": 100.0},
         instruments={"equity:AAPL": aapl},
     )
     assert orders == []

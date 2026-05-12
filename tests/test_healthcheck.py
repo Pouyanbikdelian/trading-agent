@@ -14,9 +14,7 @@ from pathlib import Path
 
 import pytest
 
-_HEALTHCHECK_PATH = (
-    Path(__file__).resolve().parents[1] / "docker" / "healthcheck.py"
-)
+_HEALTHCHECK_PATH = Path(__file__).resolve().parents[1] / "docker" / "healthcheck.py"
 
 
 @pytest.fixture(scope="module")

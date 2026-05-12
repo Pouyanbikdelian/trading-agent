@@ -52,7 +52,7 @@ def configure_logging(level: str = "INFO") -> None:
         compression="zip",
         backtrace=True,
         diagnose=False,
-        enqueue=True,    # process-safe; survives crashes mid-write
+        enqueue=True,  # process-safe; survives crashes mid-write
     )
 
     _CONFIGURED = True

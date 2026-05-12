@@ -12,10 +12,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from trading.core.types import AssetClass, Instrument
+from tests.data.conftest import make_bars
+from trading.core.types import Instrument
 from trading.data.base import BAR_COLUMNS, Frequency
 from trading.data.cache import ParquetCache, _merge, _slice_inclusive
-from tests.data.conftest import make_bars
 
 
 class _StubSource:
@@ -119,7 +119,7 @@ def test_get_bars_extends_suffix_only(
     out = cache.get_bars(source, aapl, s1, e1, "1D")
     assert len(source.calls) == 1
     call_start, call_end, _ = source.calls[0]
-    assert call_start == e0   # suffix begins at cached_max
+    assert call_start == e0  # suffix begins at cached_max
     assert call_end == e1
     assert len(out) == 41
 
@@ -138,7 +138,7 @@ def test_get_bars_extends_prefix_only(
     assert len(source.calls) == 1
     call_start, call_end, _ = source.calls[0]
     assert call_start == s1
-    assert call_end == s0     # prefix ends at cached_min
+    assert call_end == s0  # prefix ends at cached_min
     assert len(out) == 36
 
 

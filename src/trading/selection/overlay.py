@@ -54,7 +54,9 @@ def vol_target(
 
     asset_ret = p.pct_change().fillna(0.0)
     port_ret = (w.shift(1).fillna(0.0) * asset_ret).sum(axis=1)
-    realized_vol = port_ret.rolling(lookback, min_periods=lookback).std(ddof=1) * np.sqrt(periods_per_year)
+    realized_vol = port_ret.rolling(lookback, min_periods=lookback).std(ddof=1) * np.sqrt(
+        periods_per_year
+    )
 
     # Per-bar scale factor — shift so today's weights use yesterday's measurement.
     scale = (target_vol / realized_vol).replace([np.inf, -np.inf], np.nan)

@@ -45,7 +45,7 @@ class RiskLimits(BaseModel):
     """Halt when equity <= (1 - max_drawdown_pct) * equity_high_watermark."""
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "RiskLimits":
+    def from_settings(cls, settings: Settings) -> RiskLimits:
         """Default factory honoring values from ``.env``."""
         return cls(
             max_position_pct=settings.max_position_pct,
@@ -73,5 +73,5 @@ class HaltState(BaseModel):
     daily_equity_open: float = 0.0
     last_day: date | None = None
 
-    def replace(self, **fields: Any) -> "HaltState":
+    def replace(self, **fields: Any) -> HaltState:
         return self.model_copy(update=fields)

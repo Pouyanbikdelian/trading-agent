@@ -27,9 +27,10 @@ Hard-coded design choices (and why)
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
@@ -114,7 +115,7 @@ class Cycle:
         self._cycle_count += 1
         try:
             report = self._run_inner(ts_start)
-        except Exception as e:  # noqa: BLE001 — runner must keep running
+        except Exception as e:
             logger.bind(component="cycle").exception("cycle failed")
             self.alerts.critical(f"cycle failed: {e!r}")
             report = CycleReport(
@@ -129,7 +130,7 @@ class Cycle:
         # Always persist + heartbeat, even on error.
         try:
             self.runner_store.save_cycle(report)
-        except Exception:   # noqa: BLE001 — persistence failure shouldn't crash
+        except Exception:
             logger.bind(component="cycle").exception("save_cycle failed")
         if self.heartbeat_path is not None:
             try:
@@ -138,10 +139,12 @@ class Cycle:
                     ts=self._clock(),
                     status=report.status,
                     cycle_no=self._cycle_count,
-                    extra={"orders_submitted": report.orders_submitted,
-                           "fills_received": report.fills_received},
+                    extra={
+                        "orders_submitted": report.orders_submitted,
+                        "fills_received": report.fills_received,
+                    },
                 )
-            except Exception:   # noqa: BLE001
+            except Exception:
                 logger.bind(component="cycle").exception("heartbeat write failed")
         return report
 
@@ -158,8 +161,11 @@ class Cycle:
         if prices.empty or len(prices) < 2:
             self.alerts.warning(f"insufficient price history for {cfg.universe}")
             return CycleReport(
-                ts=ts_start, status="no_orders",
-                orders_submitted=0, fills_received=0, decisions=[],
+                ts=ts_start,
+                status="no_orders",
+                orders_submitted=0,
+                fills_received=0,
+                decisions=[],
                 duration_ms=self._elapsed_ms(ts_start),
             )
 
@@ -171,8 +177,10 @@ class Cycle:
         if intraday.action == "halt":
             self.alerts.critical(f"HALT: {intraday.reason}")
             return CycleReport(
-                ts=ts_start, status="halted",
-                orders_submitted=0, fills_received=0,
+                ts=ts_start,
+                status="halted",
+                orders_submitted=0,
+                fills_received=0,
                 decisions=[intraday],
                 duration_ms=self._elapsed_ms(ts_start),
             )
@@ -183,7 +191,8 @@ class Cycle:
         # 6. Optional vol-target overlay.
         if cfg.vol_target is not None:
             weights = vol_target(
-                weights, prices,
+                weights,
+                prices,
                 target_vol=cfg.vol_target,
                 lookback=cfg.vol_lookback,
                 periods_per_year=cfg.periods_per_year,
@@ -202,8 +211,7 @@ class Cycle:
             last_prices=last_prices,
             instruments=instruments_by_key,
             sector_map=cfg.sector_map or None,
-            **({"order_id_factory": self._order_id_factory}
-               if self._order_id_factory else {}),
+            **({"order_id_factory": self._order_id_factory} if self._order_id_factory else {}),
         )
 
         # 9. Submit each order. The cycle stops at first hard failure to
@@ -215,7 +223,7 @@ class Cycle:
                 self.broker.submit_order(order)
                 self.order_store.update_status(order.client_order_id, OrderStatus.SUBMITTED)
                 orders_submitted += 1
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.bind(component="cycle").exception(
                     f"submit failed for {order.client_order_id}"
                 )
@@ -228,19 +236,20 @@ class Cycle:
             try:
                 self.order_store.save_fill(fill, client_order_id=fill.order_id)
                 self.order_store.update_status(fill.order_id, OrderStatus.FILLED)
-            except Exception:   # noqa: BLE001
+            except Exception:
                 logger.bind(component="cycle").exception("save_fill failed")
 
         # 11. Persist the post-trade snapshot.
         try:
             post_snap = self.broker.get_account()
             self.runner_store.save_snapshot(post_snap)
-        except Exception:   # noqa: BLE001
+        except Exception:
             logger.bind(component="cycle").exception("snapshot persistence failed")
 
         status: CycleStatus = "ok" if orders_submitted > 0 else "no_orders"
         return CycleReport(
-            ts=ts_start, status=status,
+            ts=ts_start,
+            status=status,
             orders_submitted=orders_submitted,
             fills_received=len(fills),
             decisions=decisions,
@@ -256,10 +265,10 @@ class Cycle:
         """Read each instrument's price column from the cache, optionally
         fetching fresh bars first. Returns a wide-format DataFrame aligned
         on the inner intersection of dates."""
-        freq: Frequency = self.config.freq        # type: ignore[assignment]
+        freq: Frequency = self.config.freq  # type: ignore[assignment]
         # Choose a generous start: we want at least `history_bars` rows. The
         # cache returns whatever it has; downstream code handles short series.
-        start = ts.replace(year=ts.year - 5)   # 5 years back is more than enough
+        start = ts.replace(year=ts.year - 5)  # 5 years back is more than enough
         end = ts
 
         series: dict[str, pd.Series] = {}
@@ -269,7 +278,7 @@ class Cycle:
                 try:
                     source = self.source_factory(ins)
                     df = self.cache.get_bars(source, ins, start, end, freq)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.bind(symbol=ins.symbol).exception(
                         "refresh failed; falling back to cache"
                     )
@@ -279,7 +288,7 @@ class Cycle:
                 continue
             s = df[self.config.price_column].dropna()
             if not s.empty:
-                series[ins.symbol] = s.iloc[-self.config.history_bars:]
+                series[ins.symbol] = s.iloc[-self.config.history_bars :]
 
         if not series:
             return pd.DataFrame()
@@ -292,11 +301,12 @@ class Cycle:
         ``Runner.before_cycle``; here we just ask."""
         try:
             return self.broker.get_account()
-        except Exception:   # noqa: BLE001
+        except Exception:
             # Fall back to a fresh zero-position snapshot. This is mostly for
             # the very first cycle after process start.
-            return AccountSnapshot(ts=ts, cash=self.config.initial_cash,
-                                    equity=self.config.initial_cash)
+            return AccountSnapshot(
+                ts=ts, cash=self.config.initial_cash, equity=self.config.initial_cash
+            )
 
     def _generate_combined_weights(self, prices: pd.DataFrame) -> pd.DataFrame:
         """Run each configured strategy on ``prices`` and combine the
@@ -321,6 +331,7 @@ class Cycle:
                 "use equal_weight"
             )
         from trading.selection.combine import equal_weight
+
         return equal_weight(weights_by_strategy)
 
     def _weights_to_signal(
@@ -333,9 +344,7 @@ class Cycle:
         # Match column names to instrument.symbol -> instrument.key.
         sym_to_key = {ins.symbol: ins.key for ins in instruments}
         target_weights = {
-            sym_to_key[sym]: float(last_row[sym])
-            for sym in last_row.index
-            if sym in sym_to_key
+            sym_to_key[sym]: float(last_row[sym]) for sym in last_row.index if sym in sym_to_key
         }
         return Signal(
             ts=ts,

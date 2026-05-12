@@ -34,13 +34,11 @@ from trading.core.types import (
     Fill,
     Instrument,
     Order,
-    OrderStatus,
     OrderType,
     Position,
     Side,
 )
 from trading.execution.base import Broker, BrokerError, NotConnectedError
-
 
 # Map our enums to ib-async strings. Centralizing here means a vendor change
 # only touches this file.
@@ -83,7 +81,8 @@ class IbkrBroker(Broker):
 
     def connect(self) -> None:
         if self._ib is None:
-            from ib_async import IB   # lazy import
+            from ib_async import IB  # lazy import
+
             self._ib = IB()
         if not self._ib.isConnected():
             self._run(self._ib.connectAsync(self._host, self._port, clientId=self._client_id))
@@ -114,7 +113,7 @@ class IbkrBroker(Broker):
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
     def _contract(self, instrument: Instrument) -> Any:
-        from ib_async import Crypto, Forex, Future, Stock   # lazy import
+        from ib_async import Crypto, Forex, Future, Stock  # lazy import
 
         if instrument.asset_class == AssetClass.FX:
             return Forex(instrument.symbol)
@@ -137,7 +136,7 @@ class IbkrBroker(Broker):
         )
 
     def _build_ib_order(self, order: Order) -> Any:
-        from ib_async import Order as IbOrder   # lazy import
+        from ib_async import Order as IbOrder  # lazy import
 
         ib_order = IbOrder()
         ib_order.action = _OUR_TO_IBKR_ACTION[order.side]
@@ -158,7 +157,7 @@ class IbkrBroker(Broker):
         self._ensure_connected()
         contract = self._contract(order.instrument)
         ib_order = self._build_ib_order(order)
-        trade = self._ib.placeOrder(contract, ib_order)
+        self._ib.placeOrder(contract, ib_order)
         logger.bind(broker=self.name, symbol=order.instrument.symbol).info(
             f"submitted {order.side.value} {order.quantity} {order.instrument.symbol} "
             f"as {order.order_type.value}"
@@ -175,8 +174,7 @@ class IbkrBroker(Broker):
                 return
         # Already terminal or never seen — non-fatal.
         logger.bind(broker=self.name).warning(
-            f"no open trade matches client_order_id={client_order_id!r}; "
-            "treating cancel as a no-op"
+            f"no open trade matches client_order_id={client_order_id!r}; treating cancel as a no-op"
         )
 
     # ------------------------------------------------------------- state
@@ -241,9 +239,14 @@ def _ibkr_contract_to_instrument(contract: Any) -> Instrument:
     """Best-effort reverse mapping; the runner uses this to keep the broker's
     position view inside our type system."""
     sec_type = getattr(contract, "secType", "STK")
-    asset_class_map = {"STK": AssetClass.EQUITY, "ETF": AssetClass.ETF,
-                       "CASH": AssetClass.FX, "CRYPTO": AssetClass.CRYPTO,
-                       "FUT": AssetClass.FUTURE, "OPT": AssetClass.OPTION}
+    asset_class_map = {
+        "STK": AssetClass.EQUITY,
+        "ETF": AssetClass.ETF,
+        "CASH": AssetClass.FX,
+        "CRYPTO": AssetClass.CRYPTO,
+        "FUT": AssetClass.FUTURE,
+        "OPT": AssetClass.OPTION,
+    }
     asset_class = asset_class_map.get(sec_type, AssetClass.EQUITY)
     return Instrument(
         symbol=contract.symbol if sec_type != "CASH" else f"{contract.symbol}{contract.currency}",

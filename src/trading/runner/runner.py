@@ -18,10 +18,11 @@ sane defaults from ``settings``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
-from datetime import datetime, timezone
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from trading.core.config import settings
 from trading.core.logging import logger
@@ -33,7 +34,7 @@ from trading.execution.simulator import Simulator
 from trading.execution.store import OrderStore
 from trading.risk.limits import RiskLimits
 from trading.risk.manager import RiskManager
-from trading.runner.alerts import NullAlerts, TelegramAlerts
+from trading.runner.alerts import TelegramAlerts
 from trading.runner.config import RunnerConfig
 from trading.runner.cycle import Cycle, CycleReport
 from trading.runner.state import RunnerStore
@@ -45,12 +46,15 @@ def _default_source_factory(instrument: Instrument) -> DataSource:
     cls = instrument.asset_class
     if cls in (AssetClass.EQUITY, AssetClass.ETF):
         from trading.data.yfinance_source import YFinanceSource
+
         return YFinanceSource()
     if cls == AssetClass.CRYPTO:
         from trading.data.ccxt_source import CcxtSource
+
         return CcxtSource(exchange_id=instrument.exchange or "binance")
     if cls == AssetClass.FX:
         from trading.data.ibkr_source import IbkrSource
+
         return IbkrSource()
     raise ValueError(f"no DataSource configured for asset_class={cls.value}")
 
@@ -83,7 +87,7 @@ class Runner:
         broker: Broker | None = None,
         alerts: TelegramAlerts | None = None,
         source_factory: Callable[[Instrument], DataSource] | None = None,
-    ) -> "Runner":
+    ) -> Runner:
         settings.ensure_dirs()
         state_dir = settings.state_dir
 
@@ -140,8 +144,7 @@ class Runner:
             self.config.schedule_cron,
             timezone=self.config.schedule_tz,
         )
-        self._scheduler.add_job(self._run_cycle_async, trigger,
-                                 id="cycle", replace_existing=True)
+        self._scheduler.add_job(self._run_cycle_async, trigger, id="cycle", replace_existing=True)
         self._scheduler.start()
         self.alerts.info(
             f"runner started — universe={self.config.universe} "
@@ -155,10 +158,8 @@ class Runner:
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
+            with contextlib.suppress(NotImplementedError):  # Windows / restricted env
                 loop.add_signal_handler(sig, stop_event.set)
-            except NotImplementedError:   # Windows / restricted env
-                pass
         try:
             await stop_event.wait()
         finally:
@@ -180,5 +181,5 @@ class Runner:
         logger.bind(component="runner").info("scheduler stopped")
         try:
             self.broker.disconnect()
-        except Exception:   # noqa: BLE001
+        except Exception:
             logger.bind(component="runner").exception("broker disconnect failed")

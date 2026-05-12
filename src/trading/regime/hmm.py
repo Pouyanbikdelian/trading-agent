@@ -52,15 +52,15 @@ class HmmRegime:
         self._state_order: np.ndarray | None = None
 
     @classmethod
-    def from_fitted(cls, model: Any, n_states: int) -> "HmmRegime":
+    def from_fitted(cls, model: Any, n_states: int) -> HmmRegime:
         """Wrap a pre-fit ``GaussianHMM`` (or compatible) without re-training."""
         inst = cls(HmmParams(n_states=n_states))
         inst._model = model
         inst._state_order = _rank_states_by_mean(model)
         return inst
 
-    def fit(self, returns: pd.Series) -> "HmmRegime":
-        from hmmlearn.hmm import GaussianHMM   # lazy import — heavy
+    def fit(self, returns: pd.Series) -> HmmRegime:
+        from hmmlearn.hmm import GaussianHMM  # lazy import — heavy
 
         r = _ensure_returns(returns)
         x = r.values.reshape(-1, 1)

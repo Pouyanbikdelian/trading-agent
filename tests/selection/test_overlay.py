@@ -68,14 +68,14 @@ def test_vol_target_no_lookahead(daily_idx: pd.DatetimeIndex) -> None:
     spiked.iloc[-1, 0] *= 5.0
 
     w = pd.DataFrame({"A": np.ones(400)}, index=daily_idx)
-    out_clean = vol_target(w, no_spike, target_vol=0.10, lookback=20,
-                           periods_per_year=252, max_leverage=5.0)
-    out_spiked = vol_target(w, spiked, target_vol=0.10, lookback=20,
-                            periods_per_year=252, max_leverage=5.0)
-    # Every bar before the last must be unaffected by the future spike.
-    pd.testing.assert_series_equal(
-        out_clean["A"].iloc[:-1], out_spiked["A"].iloc[:-1]
+    out_clean = vol_target(
+        w, no_spike, target_vol=0.10, lookback=20, periods_per_year=252, max_leverage=5.0
     )
+    out_spiked = vol_target(
+        w, spiked, target_vol=0.10, lookback=20, periods_per_year=252, max_leverage=5.0
+    )
+    # Every bar before the last must be unaffected by the future spike.
+    pd.testing.assert_series_equal(out_clean["A"].iloc[:-1], out_spiked["A"].iloc[:-1])
 
 
 def test_vol_target_rejects_bad_parameters(daily_idx: pd.DatetimeIndex) -> None:
@@ -93,9 +93,13 @@ def test_vol_target_annualization_consistent() -> None:
     idx = pd.date_range("2022-01-01", periods=300, freq="1D", tz="UTC")
     # Construct prices so per-bar returns are alternating ±1% — deterministic vol.
     ret = np.tile([0.01, -0.01], 150)
-    prices = pd.DataFrame({"A": np.concatenate([[100.0], 100.0 * np.cumprod(1 + ret)[:-1]])}, index=idx)
+    prices = pd.DataFrame(
+        {"A": np.concatenate([[100.0], 100.0 * np.cumprod(1 + ret)[:-1]])}, index=idx
+    )
     w = pd.DataFrame({"A": np.ones(300)}, index=idx)
     # Per-bar return alternates exactly ±0.01, so std with ddof=1 ≈ 0.01.
-    out = vol_target(w, prices, target_vol=0.10, lookback=200, periods_per_year=252, max_leverage=10.0)
+    out = vol_target(
+        w, prices, target_vol=0.10, lookback=200, periods_per_year=252, max_leverage=10.0
+    )
     expected_scale = 0.10 / (0.01 * math.sqrt(252))
     assert out["A"].iloc[-1] == pytest.approx(expected_scale, rel=5e-2)

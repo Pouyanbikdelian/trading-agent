@@ -55,7 +55,7 @@ class Rsi2(Strategy):
         exit_band = prices > prices.rolling(p.exit_sma, min_periods=p.exit_sma).mean()
 
         entry = (rsi < p.entry_threshold) & regime  # True on bars where we want to *be* long
-        exit_ = exit_band                            # True on bars where we want to be flat
+        exit_ = exit_band  # True on bars where we want to be flat
 
         # State machine: enter on True, exit on True-exit. Implement vectorized with ffill.
         # Encode: +1 on entry, 0 on exit, NaN otherwise, then ffill.
@@ -71,4 +71,6 @@ class Rsi2(Strategy):
             event = event.ffill().fillna(0.0)
             weights[:, j] = event.values
 
-        return pd.DataFrame(weights, index=prices.index, columns=prices.columns) * p.weight_per_asset
+        return (
+            pd.DataFrame(weights, index=prices.index, columns=prices.columns) * p.weight_per_asset
+        )

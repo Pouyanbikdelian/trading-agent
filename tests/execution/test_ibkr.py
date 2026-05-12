@@ -39,25 +39,26 @@ class _FakeIb:
         self._account_summary: list[object] = []
 
     # connection
-    def isConnected(self) -> bool: return self._connected
+    def isConnected(self) -> bool:
+        return self._connected
 
-    async def connectAsync(self, host: str, port: int, clientId: int) -> None:   # noqa: N802,N803
+    async def connectAsync(self, host: str, port: int, clientId: int) -> None:
         self._connected = True
 
     def disconnect(self) -> None:
         self._connected = False
 
     # orders
-    def placeOrder(self, contract: object, order: object) -> object:  # noqa: N802
+    def placeOrder(self, contract: object, order: object) -> object:
         self.placed.append((contract, order))
         trade = SimpleNamespace(order=order, contract=contract)
         self._open_trades.append(trade)
         return trade
 
-    def cancelOrder(self, order: object) -> None:   # noqa: N802
+    def cancelOrder(self, order: object) -> None:
         self.cancelled.append(order)
 
-    def openTrades(self) -> list[object]:           # noqa: N802
+    def openTrades(self) -> list[object]:
         return list(self._open_trades)
 
     # state
@@ -67,7 +68,7 @@ class _FakeIb:
     def fills(self) -> list[object]:
         return list(self._fills)
 
-    def accountSummary(self) -> list[object]:      # noqa: N802
+    def accountSummary(self) -> list[object]:
         return list(self._account_summary)
 
 
@@ -89,22 +90,33 @@ def broker(fake_ib: _FakeIb) -> IbkrBroker:
 
 
 def test_requires_connect(fake_ib: _FakeIb, aapl: Instrument) -> None:
-    b = IbkrBroker(ib=fake_ib)   # not connected
-    order = Order(client_order_id=new_client_order_id(), instrument=aapl,
-                  side=Side.BUY, quantity=1,
-                  created_at=datetime(2024, 1, 1, tzinfo=timezone.utc))
+    b = IbkrBroker(ib=fake_ib)  # not connected
+    order = Order(
+        client_order_id=new_client_order_id(),
+        instrument=aapl,
+        side=Side.BUY,
+        quantity=1,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
     with pytest.raises(NotConnectedError):
         b.submit_order(order)
 
 
-def test_submit_market_order_calls_place_order(broker: IbkrBroker, fake_ib: _FakeIb,
-                                                aapl: Instrument) -> None:
-    order = Order(client_order_id="cid-1", instrument=aapl, side=Side.BUY,
-                  quantity=10, order_type=OrderType.MARKET, tif=TimeInForce.DAY,
-                  created_at=datetime(2024, 1, 1, tzinfo=timezone.utc))
+def test_submit_market_order_calls_place_order(
+    broker: IbkrBroker, fake_ib: _FakeIb, aapl: Instrument
+) -> None:
+    order = Order(
+        client_order_id="cid-1",
+        instrument=aapl,
+        side=Side.BUY,
+        quantity=10,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
     broker.submit_order(order)
     assert len(fake_ib.placed) == 1
-    contract, ib_order = fake_ib.placed[0]
+    _, ib_order = fake_ib.placed[0]
     assert ib_order.action == "BUY"
     assert ib_order.orderType == "MKT"
     assert ib_order.totalQuantity == 10
@@ -112,12 +124,17 @@ def test_submit_market_order_calls_place_order(broker: IbkrBroker, fake_ib: _Fak
     assert ib_order.orderRef == "cid-1"
 
 
-def test_limit_order_translation(broker: IbkrBroker, fake_ib: _FakeIb,
-                                  aapl: Instrument) -> None:
-    order = Order(client_order_id="cid-2", instrument=aapl, side=Side.SELL,
-                  quantity=5, order_type=OrderType.LIMIT, limit_price=150.0,
-                  tif=TimeInForce.GTC,
-                  created_at=datetime(2024, 1, 1, tzinfo=timezone.utc))
+def test_limit_order_translation(broker: IbkrBroker, fake_ib: _FakeIb, aapl: Instrument) -> None:
+    order = Order(
+        client_order_id="cid-2",
+        instrument=aapl,
+        side=Side.SELL,
+        quantity=5,
+        order_type=OrderType.LIMIT,
+        limit_price=150.0,
+        tif=TimeInForce.GTC,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
     broker.submit_order(order)
     _, ib_order = fake_ib.placed[0]
     assert ib_order.orderType == "LMT"
@@ -131,8 +148,13 @@ def test_contract_for_fx_uses_forex() -> None:
     b = IbkrBroker(ib=fake)
     b.connect()
     eurusd = Instrument(symbol="EURUSD", asset_class=AssetClass.FX)
-    o = Order(client_order_id="fx-1", instrument=eurusd, side=Side.BUY, quantity=10_000,
-              created_at=datetime(2024, 1, 1, tzinfo=timezone.utc))
+    o = Order(
+        client_order_id="fx-1",
+        instrument=eurusd,
+        side=Side.BUY,
+        quantity=10_000,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
     b.submit_order(o)
     contract, _ = fake.placed[0]
     # ib_async.Forex has a ``pair()`` method or stores `symbol` as the base currency.
@@ -140,24 +162,31 @@ def test_contract_for_fx_uses_forex() -> None:
     assert hasattr(contract, "secType") or hasattr(contract, "symbol")
 
 
-def test_cancel_finds_order_by_orderref(broker: IbkrBroker, fake_ib: _FakeIb,
-                                         aapl: Instrument) -> None:
-    o = Order(client_order_id="cid-cancel", instrument=aapl, side=Side.BUY,
-              quantity=1, created_at=datetime(2024, 1, 1, tzinfo=timezone.utc))
+def test_cancel_finds_order_by_orderref(
+    broker: IbkrBroker, fake_ib: _FakeIb, aapl: Instrument
+) -> None:
+    o = Order(
+        client_order_id="cid-cancel",
+        instrument=aapl,
+        side=Side.BUY,
+        quantity=1,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
     broker.submit_order(o)
     broker.cancel_order("cid-cancel")
     assert len(fake_ib.cancelled) == 1
 
 
 def test_cancel_unknown_is_no_op(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
-    broker.cancel_order("never-placed")   # warns, doesn't raise
+    broker.cancel_order("never-placed")  # warns, doesn't raise
     assert fake_ib.cancelled == []
 
 
 def test_get_positions_maps_to_our_types(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
     """Inject a fake IBKR position record and confirm we map it correctly."""
-    contract = SimpleNamespace(symbol="AAPL", secType="STK", exchange="SMART",
-                                currency="USD", multiplier=None)
+    contract = SimpleNamespace(
+        symbol="AAPL", secType="STK", exchange="SMART", currency="USD", multiplier=None
+    )
     fake_ib._positions = [SimpleNamespace(contract=contract, position=10, avgCost=150.0)]
     out = broker.get_positions()
     assert len(out) == 1
@@ -172,7 +201,7 @@ def test_get_account_reads_summary(broker: IbkrBroker, fake_ib: _FakeIb) -> None
     fake_ib._account_summary = [
         SimpleNamespace(tag="TotalCashValue", value="50000"),
         SimpleNamespace(tag="NetLiquidation", value="125000"),
-        SimpleNamespace(tag="GrossPositionValue", value="75000"),    # ignored
+        SimpleNamespace(tag="GrossPositionValue", value="75000"),  # ignored
     ]
     snap = broker.get_account()
     assert snap.cash == 50_000
@@ -180,16 +209,30 @@ def test_get_account_reads_summary(broker: IbkrBroker, fake_ib: _FakeIb) -> None
 
 
 def test_get_fills_filters_by_since(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
-    exec1 = SimpleNamespace(time=datetime(2024, 1, 1, tzinfo=timezone.utc),
-                            shares=5, price=100.0, exchange="SMART", orderId=1)
-    exec2 = SimpleNamespace(time=datetime(2024, 1, 3, tzinfo=timezone.utc),
-                            shares=5, price=101.0, exchange="SMART", orderId=2)
-    fill1 = SimpleNamespace(execution=exec1,
-                            order=SimpleNamespace(orderRef="ref-1"),
-                            commissionReport=SimpleNamespace(commission=0.1))
-    fill2 = SimpleNamespace(execution=exec2,
-                            order=SimpleNamespace(orderRef="ref-2"),
-                            commissionReport=SimpleNamespace(commission=0.1))
+    exec1 = SimpleNamespace(
+        time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        shares=5,
+        price=100.0,
+        exchange="SMART",
+        orderId=1,
+    )
+    exec2 = SimpleNamespace(
+        time=datetime(2024, 1, 3, tzinfo=timezone.utc),
+        shares=5,
+        price=101.0,
+        exchange="SMART",
+        orderId=2,
+    )
+    fill1 = SimpleNamespace(
+        execution=exec1,
+        order=SimpleNamespace(orderRef="ref-1"),
+        commissionReport=SimpleNamespace(commission=0.1),
+    )
+    fill2 = SimpleNamespace(
+        execution=exec2,
+        order=SimpleNamespace(orderRef="ref-2"),
+        commissionReport=SimpleNamespace(commission=0.1),
+    )
     fake_ib._fills = [fill1, fill2]
     out = broker.get_fills(since=datetime(2024, 1, 2, tzinfo=timezone.utc))
     assert len(out) == 1
@@ -198,4 +241,4 @@ def test_get_fills_filters_by_since(broker: IbkrBroker, fake_ib: _FakeIb) -> Non
 
 def test_disconnect_safe_to_call_twice(broker: IbkrBroker) -> None:
     broker.disconnect()
-    broker.disconnect()   # second call must be a no-op
+    broker.disconnect()  # second call must be a no-op

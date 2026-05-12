@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
-from trading.regime.base import RegimeClassifier, _ensure_returns
+from trading.regime.base import _ensure_returns
 
 
 class RealizedVolParams(BaseModel):
@@ -37,7 +37,7 @@ class RealizedVolRegime:
         self.n_states = params.n_states
         self._edges: np.ndarray | None = None
 
-    def fit(self, returns: pd.Series) -> "RealizedVolRegime":
+    def fit(self, returns: pd.Series) -> RealizedVolRegime:
         r = _ensure_returns(returns)
         rv = r.rolling(self.params.window, min_periods=self.params.window).std(ddof=1)
         rv = rv.dropna()

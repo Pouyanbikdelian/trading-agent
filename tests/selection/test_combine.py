@@ -15,18 +15,16 @@ def idx() -> pd.DatetimeIndex:
 
 
 @pytest.fixture
-def three_strategies(idx: pd.DatetimeIndex) -> tuple[
-    dict[str, pd.DataFrame], dict[str, pd.Series]
-]:
+def three_strategies(idx: pd.DatetimeIndex) -> tuple[dict[str, pd.DataFrame], dict[str, pd.Series]]:
     rng = np.random.default_rng(0)
     weights = {
         "alpha": pd.DataFrame({"A": np.ones(200), "B": np.zeros(200)}, index=idx),
-        "beta":  pd.DataFrame({"A": np.full(200, 0.5), "B": np.full(200, 0.5)}, index=idx),
+        "beta": pd.DataFrame({"A": np.full(200, 0.5), "B": np.full(200, 0.5)}, index=idx),
         "gamma": pd.DataFrame({"A": np.zeros(200), "B": np.ones(200)}, index=idx),
     }
     returns = {
         "alpha": pd.Series(rng.normal(0, 0.005, 200), index=idx),
-        "beta":  pd.Series(rng.normal(0, 0.010, 200), index=idx),
+        "beta": pd.Series(rng.normal(0, 0.010, 200), index=idx),
         "gamma": pd.Series(rng.normal(0, 0.020, 200), index=idx),
     }
     return weights, returns
@@ -117,7 +115,10 @@ def test_min_variance_outputs_sum_to_blended_weights() -> None:
 
 def test_min_variance_short_series_rejected() -> None:
     idx = pd.date_range("2022-01-01", periods=1, freq="1D", tz="UTC")
-    weights = {"a": pd.DataFrame({"X": [1.0]}, index=idx), "b": pd.DataFrame({"X": [1.0]}, index=idx)}
+    weights = {
+        "a": pd.DataFrame({"X": [1.0]}, index=idx),
+        "b": pd.DataFrame({"X": [1.0]}, index=idx),
+    }
     returns = {"a": pd.Series([0.01], index=idx), "b": pd.Series([0.02], index=idx)}
     with pytest.raises(ValueError, match="at least 2"):
         min_variance(weights, returns)

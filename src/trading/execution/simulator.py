@@ -34,7 +34,6 @@ one shot and has no concept of order-by-order lifecycle.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from trading.core.logging import logger
 from trading.core.types import (
@@ -203,17 +202,14 @@ class Simulator(Broker):
             # Realized PnL = closing_qty * (exit_price - avg_price) — signed properly.
             realized = existing.realized_pnl + closing * (price - existing.avg_price)
             # If we flipped past flat, the residual side's avg_price is this fill's.
-            if abs(signed_qty) > abs(existing.quantity):
-                avg = price
-            else:
-                avg = existing.avg_price
+            avg = price if abs(signed_qty) > abs(existing.quantity) else existing.avg_price
 
         self._positions[key] = Position(
             instrument=instrument,
             quantity=new_qty,
             avg_price=avg,
             realized_pnl=realized,
-            unrealized_pnl=0.0,   # filled in by _mark_to_market
+            unrealized_pnl=0.0,  # filled in by _mark_to_market
         )
 
     def _mark_to_market(self) -> None:

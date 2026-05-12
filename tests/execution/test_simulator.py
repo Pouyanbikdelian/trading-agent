@@ -4,20 +4,19 @@ from __future__ import annotations
 
 import pytest
 
+from tests.execution.conftest import make_bar, make_order
 from trading.core.types import (
-    AssetClass,
-    Instrument,
     OrderStatus,
     OrderType,
     Side,
 )
 from trading.execution import BrokerError, Simulator
-from tests.execution.conftest import make_bar, make_order
 
 
 def test_protocol_isinstance() -> None:
     """Simulator satisfies the Broker Protocol at runtime."""
     from trading.execution.base import Broker
+
     s = Simulator()
     assert isinstance(s, Broker)
 
@@ -45,7 +44,7 @@ def test_market_sell_fills_at_open_minus_slippage(sim, aapl, t0, t1) -> None:
     sim.submit_order(order)
     fills = sim.step(t1, {"AAPL": make_bar(t1, open=100.0, close=102.0)})
     assert fills[0].price == pytest.approx(99.98, rel=1e-9)
-    assert fills[0].quantity == -10   # negative for sells
+    assert fills[0].quantity == -10  # negative for sells
 
 
 def test_position_updates_after_fill(sim, aapl, t0, t1) -> None:
@@ -121,8 +120,7 @@ def test_cancel_unknown_order_raises(sim) -> None:
 
 
 def test_non_market_order_stays_pending(sim, aapl, t0, t1) -> None:
-    o = make_order(aapl, Side.BUY, 10, created_at=t0,
-                   order_type=OrderType.LIMIT, limit_price=99.0)
+    o = make_order(aapl, Side.BUY, 10, created_at=t0, order_type=OrderType.LIMIT, limit_price=99.0)
     sim.submit_order(o)
     fills = sim.step(t1, {"AAPL": make_bar(t1, open=100.0, close=100.0)})
     assert fills == []

@@ -79,8 +79,8 @@ def sortino(returns: pd.Series, periods_per_year: int, rf: float = 0.0) -> float
     excess = returns - rf_per_period
     downside = excess[excess < 0]
     if len(downside) == 0:
-        return float("inf")          # no losses ever recorded
-    dd_std = np.sqrt(np.mean(downside ** 2))
+        return float("inf")  # no losses ever recorded
+    dd_std = np.sqrt(np.mean(downside**2))
     if dd_std == 0:
         return 0.0
     return float(excess.mean() / dd_std * np.sqrt(periods_per_year))
@@ -125,7 +125,9 @@ def average_exposure(weights: pd.DataFrame) -> float:
     return float(weights.abs().sum(axis=1).mean())
 
 
-def compute_metrics(result: BacktestResult, periods_per_year: int, rf: float = 0.0) -> dict[str, float]:
+def compute_metrics(
+    result: BacktestResult, periods_per_year: int, rf: float = 0.0
+) -> dict[str, float]:
     """Bundle of headline metrics — what you'd print in a backtest summary."""
     return {
         "total_return": total_return(result.equity),

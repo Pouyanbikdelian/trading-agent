@@ -130,7 +130,7 @@ class RunnerStore:
 
     # ----------------------------------------------------------- cycles
 
-    def save_cycle(self, report: "CycleReport") -> None:
+    def save_cycle(self, report: CycleReport) -> None:
         self.conn.execute(
             """
             INSERT INTO cycles (ts, status, orders_submitted, fills_received,

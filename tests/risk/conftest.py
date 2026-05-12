@@ -10,7 +10,6 @@ from trading.core.types import (
     AccountSnapshot,
     AssetClass,
     Instrument,
-    Position,
     Signal,
 )
 from trading.risk import RiskLimits, RiskManager

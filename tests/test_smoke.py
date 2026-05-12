@@ -37,7 +37,10 @@ def test_bar_requires_timezone() -> None:
 def test_bar_is_immutable() -> None:
     bar = Bar(
         ts=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        open=100, high=101, low=99, close=100.5,
+        open=100,
+        high=101,
+        low=99,
+        close=100.5,
     )
     with pytest.raises(Exception):  # pydantic raises ValidationError for frozen
         bar.close = 200  # type: ignore[misc]

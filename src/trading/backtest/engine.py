@@ -41,13 +41,13 @@ class BacktestResult(BaseModel):
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    equity: pd.Series           # equity curve, indexed by ts
-    returns: pd.Series          # per-bar net portfolio return
-    gross_returns: pd.Series    # before costs
-    costs: pd.Series            # per-bar cost drag (positive number)
-    turnover: pd.Series         # per-bar sum of |delta_weight|
-    weights: pd.DataFrame       # the input weights, aligned
-    trades: pd.DataFrame        # long-form ledger: ts, symbol, delta_w, price
+    equity: pd.Series  # equity curve, indexed by ts
+    returns: pd.Series  # per-bar net portfolio return
+    gross_returns: pd.Series  # before costs
+    costs: pd.Series  # per-bar cost drag (positive number)
+    turnover: pd.Series  # per-bar sum of |delta_weight|
+    weights: pd.DataFrame  # the input weights, aligned
+    trades: pd.DataFrame  # long-form ledger: ts, symbol, delta_w, price
     initial_equity: float
 
     @property

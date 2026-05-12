@@ -31,16 +31,15 @@ CLAUDE.md hard rules honored:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 
 from trading.core.logging import logger
 from trading.core.types import (
     AccountSnapshot,
     Instrument,
     Order,
-    OrderStatus,
     OrderType,
     Position,
     RiskDecision,
@@ -91,7 +90,9 @@ class RiskManager:
 
     def halt(self, reason: str) -> None:
         self._state = self._state.replace(
-            halted=True, reason=reason, halted_at=datetime.now(timezone.utc),
+            halted=True,
+            reason=reason,
+            halted_at=datetime.now(timezone.utc),
         )
         self._save_state()
         logger.bind(component="risk").warning(f"HALTED — {reason}")
@@ -139,7 +140,9 @@ class RiskManager:
 
         # Daily-loss kill.
         if self._state.daily_equity_open > 0:
-            day_pnl = (account.equity - self._state.daily_equity_open) / self._state.daily_equity_open
+            day_pnl = (
+                account.equity - self._state.daily_equity_open
+            ) / self._state.daily_equity_open
             if day_pnl <= -self.limits.max_daily_loss_pct:
                 self.halt(
                     f"daily loss {day_pnl:.2%} breaches limit -{self.limits.max_daily_loss_pct:.2%}"
@@ -148,11 +151,11 @@ class RiskManager:
 
         # Peak drawdown halt.
         if self._state.equity_high_watermark > 0:
-            dd = (account.equity - self._state.equity_high_watermark) / self._state.equity_high_watermark
+            dd = (
+                account.equity - self._state.equity_high_watermark
+            ) / self._state.equity_high_watermark
             if dd <= -self.limits.max_drawdown_pct:
-                self.halt(
-                    f"drawdown {dd:.2%} breaches limit -{self.limits.max_drawdown_pct:.2%}"
-                )
+                self.halt(f"drawdown {dd:.2%} breaches limit -{self.limits.max_drawdown_pct:.2%}")
                 return RiskDecision(action="halt", reason=self._state.reason)
 
         return RiskDecision(action="allow", reason="intraday checks passed")
@@ -189,11 +192,13 @@ class RiskManager:
             if abs(w) > self.limits.max_position_pct:
                 scale = self.limits.max_position_pct / abs(w)
                 weights[key] = w * scale
-                decisions.append(RiskDecision(
-                    action="scale",
-                    reason=f"per-position cap on {key}",
-                    scale_factor=scale,
-                ))
+                decisions.append(
+                    RiskDecision(
+                        action="scale",
+                        reason=f"per-position cap on {key}",
+                        scale_factor=scale,
+                    )
+                )
 
         # --- 2. Sector cap (scale each sector's members together).
         if sector_map:
@@ -208,69 +213,79 @@ class RiskManager:
                     scale = self.limits.max_sector_exposure / exposure
                     for k in keys:
                         weights[k] *= scale
-                    decisions.append(RiskDecision(
-                        action="scale",
-                        reason=f"sector cap on {sec}",
-                        scale_factor=scale,
-                    ))
+                    decisions.append(
+                        RiskDecision(
+                            action="scale",
+                            reason=f"sector cap on {sec}",
+                            scale_factor=scale,
+                        )
+                    )
 
         # --- 3. Gross exposure cap.
         gross = sum(abs(w) for w in weights.values())
         if gross > self.limits.max_gross_exposure:
             scale = self.limits.max_gross_exposure / gross
             weights = {k: w * scale for k, w in weights.items()}
-            decisions.append(RiskDecision(
-                action="scale",
-                reason="gross exposure cap",
-                scale_factor=scale,
-            ))
+            decisions.append(
+                RiskDecision(
+                    action="scale",
+                    reason="gross exposure cap",
+                    scale_factor=scale,
+                )
+            )
 
         # --- 4. Net exposure cap.
         net = sum(weights.values())
         if abs(net) > self.limits.max_net_exposure:
             scale = self.limits.max_net_exposure / abs(net)
             weights = {k: w * scale for k, w in weights.items()}
-            decisions.append(RiskDecision(
-                action="scale",
-                reason="net exposure cap",
-                scale_factor=scale,
-            ))
+            decisions.append(
+                RiskDecision(
+                    action="scale",
+                    reason="net exposure cap",
+                    scale_factor=scale,
+                )
+            )
 
         # --- 5. Build delta-quantity orders.
         orders: list[Order] = []
         for key, target_w in weights.items():
             if key not in instruments:
-                decisions.append(RiskDecision(action="reject",
-                                              reason=f"no instrument metadata for {key}"))
+                decisions.append(
+                    RiskDecision(action="reject", reason=f"no instrument metadata for {key}")
+                )
                 continue
             if key not in last_prices or last_prices[key] <= 0:
-                decisions.append(RiskDecision(action="reject",
-                                              reason=f"no positive last_price for {key}"))
+                decisions.append(
+                    RiskDecision(action="reject", reason=f"no positive last_price for {key}")
+                )
                 continue
 
             target_value = target_w * account.equity
             target_qty = target_value / last_prices[key]
-            current_qty = (
-                account.positions[key].quantity if key in account.positions else 0.0
-            )
+            current_qty = account.positions[key].quantity if key in account.positions else 0.0
             delta = target_qty - current_qty
             if abs(delta) < _EPS_QTY:
                 continue
 
-            orders.append(Order(
-                client_order_id=order_id_factory(),
-                instrument=instruments[key],
-                side=Side.BUY if delta > 0 else Side.SELL,
-                quantity=abs(delta),
-                order_type=OrderType.MARKET,
-                tif=TimeInForce.DAY,
-                created_at=signal.ts,
-            ))
+            orders.append(
+                Order(
+                    client_order_id=order_id_factory(),
+                    instrument=instruments[key],
+                    side=Side.BUY if delta > 0 else Side.SELL,
+                    quantity=abs(delta),
+                    order_type=OrderType.MARKET,
+                    tif=TimeInForce.DAY,
+                    created_at=signal.ts,
+                )
+            )
 
-        decisions.append(RiskDecision(
-            action="allow",
-            reason=f"generated {len(orders)} orders",
-        ))
+        decisions.append(
+            RiskDecision(
+                action="allow",
+                reason=f"generated {len(orders)} orders",
+            )
+        )
         return orders, decisions
 
     # ------------------------------------------------------ force flatten
@@ -290,13 +305,15 @@ class RiskManager:
         for pos in positions:
             if abs(pos.quantity) < _EPS_QTY:
                 continue
-            orders.append(Order(
-                client_order_id=order_id_factory(),
-                instrument=pos.instrument,
-                side=Side.SELL if pos.quantity > 0 else Side.BUY,
-                quantity=abs(pos.quantity),
-                order_type=OrderType.MARKET,
-                tif=TimeInForce.DAY,
-                created_at=ts,
-            ))
+            orders.append(
+                Order(
+                    client_order_id=order_id_factory(),
+                    instrument=pos.instrument,
+                    side=Side.SELL if pos.quantity > 0 else Side.BUY,
+                    quantity=abs(pos.quantity),
+                    order_type=OrderType.MARKET,
+                    tif=TimeInForce.DAY,
+                    created_at=ts,
+                )
+            )
         return orders

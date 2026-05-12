@@ -41,7 +41,7 @@ class XSecMomentumParams(StrategyParams):
     long_only: bool = False
 
     @model_validator(mode="after")
-    def _fracs_valid(self) -> "XSecMomentumParams":
+    def _fracs_valid(self) -> XSecMomentumParams:
         if self.top_frac + self.bottom_frac > 1.0:
             raise ValueError("top_frac + bottom_frac must be <= 1.0")
         return self
@@ -66,8 +66,8 @@ class XSecMomentum(Strategy):
         formation = prices.shift(p.skip).pct_change(eff_lookback)
 
         # Compute the target weight cross-section at every bar, then apply rebalance gating.
-        n_top = max(1, int(round(n_symbols * p.top_frac)))
-        n_bot = max(0 if p.long_only else 1, int(round(n_symbols * p.bottom_frac)))
+        n_top = max(1, round(n_symbols * p.top_frac))
+        n_bot = max(0 if p.long_only else 1, round(n_symbols * p.bottom_frac))
 
         weights = np.zeros(prices.shape, dtype=float)
         for i in range(len(prices)):

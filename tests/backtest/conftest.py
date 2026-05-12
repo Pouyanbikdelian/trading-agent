@@ -21,8 +21,8 @@ def linear_prices(idx_30d: pd.DatetimeIndex) -> pd.DataFrame:
     """Two symbols, both rising linearly. Useful for exact-math tests."""
     return pd.DataFrame(
         {
-            "A": np.linspace(100.0, 129.0, 30),    # +29 over 30 bars
-            "B": np.linspace(50.0, 79.0, 30),      # +29 over 30 bars
+            "A": np.linspace(100.0, 129.0, 30),  # +29 over 30 bars
+            "B": np.linspace(50.0, 79.0, 30),  # +29 over 30 bars
         },
         index=idx_30d,
     )

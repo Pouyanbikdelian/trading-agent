@@ -51,7 +51,7 @@ def _align_frames(weights_by_strategy: dict[str, pd.DataFrame]) -> dict[str, pd.
 def equal_weight(weights_by_strategy: dict[str, pd.DataFrame]) -> pd.DataFrame:
     aligned = _align_frames(weights_by_strategy)
     n = len(aligned)
-    return sum(aligned.values()) / n   # type: ignore[no-any-return]
+    return sum(aligned.values()) / n  # type: ignore[no-any-return]
 
 
 def _scalar_blend(
@@ -120,9 +120,6 @@ def min_variance(
         raise ValueError(f"covariance matrix is singular: {e}") from e
     w = x / x.sum() if x.sum() != 0 else ones / len(names)
     w = np.clip(w, 0.0, None)
-    if w.sum() == 0:
-        w = ones / len(names)
-    else:
-        w = w / w.sum()
-    scalars = dict(zip(names, w.tolist()))
+    w = ones / len(names) if w.sum() == 0 else w / w.sum()
+    scalars = dict(zip(names, w.tolist(), strict=True))
     return _scalar_blend(aligned, scalars)
