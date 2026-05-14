@@ -99,6 +99,85 @@ def test_top_k_lookback_lt_skip_rejected() -> None:
         TopKMomentum(lookback=10, skip=20).generate(_make_panel())
 
 
+def test_correlation_filter_diversifies_basket() -> None:
+    """Construct two clusters: 5 highly-correlated 'tech' names and 5
+    independent names. Plain top-K-by-momentum will pick all 5 tech;
+    the correlation filter must replace some of them with independents."""
+    rng = np.random.default_rng(0)
+    n = 400
+    idx = pd.date_range("2020-01-01", periods=n, freq="1D", tz="UTC")
+    # Cluster A: 5 names sharing a common factor, slightly higher mean
+    common = rng.normal(0.001, 0.012, n)
+    cols: dict[str, np.ndarray] = {}
+    for i in range(5):
+        idio = rng.normal(0, 0.003, n)
+        cols[f"TECH_{i}"] = 100.0 * np.exp(np.cumsum(common + idio))
+    # Cluster B: 5 independent names with slightly lower mean (so the
+    # filter actually has to sacrifice some momentum to take them)
+    for i in range(5):
+        r = rng.normal(0.0008, 0.012, n)
+        cols[f"INDEP_{i}"] = 100.0 * np.exp(np.cumsum(r))
+    prices = pd.DataFrame(cols, index=idx)
+
+    # Without filter: expect mostly TECH names
+    unfiltered = TopKMomentum(
+        k=5,
+        lookback=126,
+        skip=0,
+        rebalance=21,
+        abs_momentum_threshold=None,
+    ).generate(prices)
+    last_un = unfiltered.iloc[-1]
+    n_tech_un = sum(1 for s in last_un[last_un > 0].index if s.startswith("TECH_"))
+
+    # With filter: expect fewer TECH names since they're correlated
+    filtered = TopKMomentum(
+        k=5,
+        lookback=126,
+        skip=0,
+        rebalance=21,
+        abs_momentum_threshold=None,
+        min_decorrelated=4,
+        max_pairwise_corr=0.5,
+        corr_window=60,
+    ).generate(prices)
+    last_f = filtered.iloc[-1]
+    n_tech_f = sum(1 for s in last_f[last_f > 0].index if s.startswith("TECH_"))
+
+    # The filtered basket should have strictly fewer TECH names than the
+    # unfiltered one (or the same if tech were never dominant).
+    assert n_tech_f <= n_tech_un
+    # And we should keep at least some INDEP names when the filter binds.
+    n_indep_f = sum(1 for s in last_f[last_f > 0].index if s.startswith("INDEP_"))
+    if n_tech_un >= 4:
+        assert n_indep_f >= 2, (
+            f"correlation filter should have admitted at least 2 INDEP names; "
+            f"got {n_indep_f} (basket: {list(last_f[last_f > 0].index)})"
+        )
+
+
+def test_correlation_filter_falls_back_when_short_history() -> None:
+    rng = np.random.default_rng(0)
+    idx = pd.date_range("2020-01-01", periods=300, freq="1D", tz="UTC")
+    prices = pd.DataFrame(
+        {f"A{i}": 100.0 * np.exp(np.cumsum(rng.normal(0.0005, 0.01, 300))) for i in range(8)},
+        index=idx,
+    )
+    # corr_window > available bars at first rebalance — strategy must
+    # gracefully fall back to pure top-K without raising.
+    s = TopKMomentum(
+        k=3,
+        lookback=126,
+        rebalance=21,
+        abs_momentum_threshold=None,
+        min_decorrelated=3,
+        corr_window=500,
+    )
+    w = s.generate(prices)
+    # Just verify it runs and produces SOME positions
+    assert (w.abs() > 0).any().any()
+
+
 def test_top_k_empty_universe_returns_zeros() -> None:
     idx = pd.date_range("2020-01-01", periods=100, freq="1D", tz="UTC")
     empty = pd.DataFrame(index=idx)

@@ -86,6 +86,19 @@ class TopKMomentumParams(StrategyParams):
     target_gross: float = Field(default=1.0, gt=0.0)
     max_per_position: float = Field(default=0.20, gt=0.0, le=1.0)
 
+    # --- correlation diversification --------------------------------------
+    corr_window: int = Field(default=63, ge=5)
+    """Bars of daily-return history used to estimate the correlation matrix."""
+
+    max_pairwise_corr: float = Field(default=0.70, gt=0.0, le=1.0)
+    """Absolute pairwise correlation threshold below which a candidate is
+    considered 'decorrelated' from an already-selected name."""
+
+    min_decorrelated: int = Field(default=0, ge=0)
+    """At least this many of the K selected names must mutually clear the
+    pairwise-correlation threshold. 0 disables the filter and recovers
+    pure top-K-by-momentum behaviour."""
+
 
 @register
 class TopKMomentum(Strategy):
@@ -108,6 +121,9 @@ class TopKMomentum(Strategy):
         # --- realised vol for inverse-vol sizing -------------------------
         log_ret = np.log(prices).diff()
         vol = log_ret.rolling(p.vol_lookback, min_periods=p.vol_lookback).std(ddof=1)
+
+        # Daily returns for the correlation filter, when enabled.
+        ret_for_corr = prices.pct_change() if p.min_decorrelated > 0 else None
 
         weights = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
 
@@ -136,8 +152,18 @@ class TopKMomentum(Strategy):
                 weights.iloc[i] = current_w
                 continue
 
-            # Top-K by formation return among the gated names
-            keep = valid.nlargest(p.k).index
+            # Top-K by formation return, optionally diversified
+            if p.min_decorrelated > 0 and ret_for_corr is not None:
+                window = ret_for_corr.iloc[max(0, i - p.corr_window + 1) : i + 1]
+                keep = _decorrelated_topk(
+                    valid,
+                    window,
+                    k=p.k,
+                    min_decorrelated=p.min_decorrelated,
+                    max_pairwise_corr=p.max_pairwise_corr,
+                )
+            else:
+                keep = list(valid.nlargest(p.k).index)
 
             # Inverse-vol weighting of kept names
             sig_k = sigma.reindex(keep).replace([np.inf, -np.inf], np.nan).dropna()
@@ -153,17 +179,83 @@ class TopKMomentum(Strategy):
             current_w.loc[sized.index] = sized.values
             weights.iloc[i] = current_w
 
-        # Forward-fill between rebalances. Pandas .ffill respects NaN
-        # explicitly, so we use a sentinel: zero rows in `weights` at
-        # non-rebalance bars get filled by the most recent rebalance row.
+        # Forward-fill between rebalances using pandas' vectorised ffill.
+        # Non-rebalance rows are zero (the default) — we mark them NaN
+        # first so ffill carries the most recent rebalance row forward.
         on_rebal = np.zeros(n_t, dtype=bool)
         on_rebal[rebal_idx] = True
-        idx_series = pd.Series(np.where(on_rebal)[0], dtype=int)
-        for i in range(n_t):
-            if not on_rebal[i]:
-                # find the most recent rebalance bar at or before i
-                last = idx_series[idx_series <= i]
-                if last.empty:
-                    continue
-                weights.iloc[i] = weights.iloc[int(last.iloc[-1])].values
+        non_rebal_mask = ~on_rebal
+        if non_rebal_mask.any():
+            # weights.values can be read-only on newer pandas; iloc-assignment
+            # always writes back through the BlockManager safely.
+            weights.iloc[non_rebal_mask] = np.nan
+            weights = weights.ffill()
+        weights = weights.fillna(0.0)
         return weights
+
+
+def _decorrelated_topk(
+    candidates: pd.Series,
+    returns_window: pd.DataFrame,
+    *,
+    k: int,
+    min_decorrelated: int,
+    max_pairwise_corr: float,
+) -> list[str]:
+    r"""Greedy correlation-diversified top-K selection.
+
+    Candidates are sorted by ``candidates`` (formation return) descending.
+    We then walk the list and admit names in two phases:
+
+    *Phase 1* — fill up to ``min_decorrelated`` slots. A candidate is
+    admitted only if its maximum absolute correlation with the already-
+    admitted set is below ``max_pairwise_corr``.
+
+    *Phase 2* — fill remaining slots up to ``k`` with the next-best-
+    momentum names regardless of correlation.
+
+    This guarantees at least ``min_decorrelated`` of the final basket are
+    pairwise low-correlation, while still allocating most capital to the
+    strongest trends. If too few candidates can pass Phase 1 we fall back
+    to pure momentum order; this is non-fatal — the system still trades.
+    """
+    sorted_candidates = candidates.sort_values(ascending=False).index.tolist()
+    if not sorted_candidates or k <= 0:
+        return []
+    if min_decorrelated <= 0 or len(returns_window) < 5:
+        return sorted_candidates[:k]
+
+    # Performance: the greedy algorithm only ever looks down to the top-K
+    # bracket plus enough overflow to fill phase-2. A pool of 5K candidates
+    # is conservative; computing the corr matrix over more is wasted work
+    # (O(N^2) per rebalance times thousands of rebalances). On a sp500
+    # universe this caps the corr matrix at ~50 x 50 instead of 500 x 500.
+    pool_size = min(len(sorted_candidates), max(k * 5, 30))
+    pool = sorted_candidates[:pool_size]
+    common = [s for s in pool if s in returns_window.columns]
+    if not common:
+        return sorted_candidates[:k]
+    corr = returns_window[common].corr().abs()
+
+    decorrelated: list[str] = [common[0]]
+    overflow: list[str] = []
+
+    for sym in common[1:]:
+        if len(decorrelated) >= min_decorrelated:
+            overflow.append(sym)
+            continue
+        if sym not in corr.index:
+            overflow.append(sym)
+            continue
+        # Max absolute correlation with already-admitted set
+        cmax = float(corr.loc[sym, decorrelated].max())
+        if not np.isfinite(cmax):
+            # NaN correlation (e.g. constant returns) — treat as zero
+            cmax = 0.0
+        if cmax < max_pairwise_corr:
+            decorrelated.append(sym)
+        else:
+            overflow.append(sym)
+
+    combined = decorrelated + overflow
+    return combined[:k]

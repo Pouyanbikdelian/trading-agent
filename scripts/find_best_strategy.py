@@ -52,7 +52,6 @@ from trading.core.universes import load_universe
 from trading.data.cache import ParquetCache
 from trading.strategies import TopKMomentum, TopKMomentumParams
 
-
 START = datetime(2018, 1, 1, tzinfo=timezone.utc)
 END = datetime(2026, 5, 13, tzinfo=timezone.utc)
 INITIAL = 100_000.0
@@ -105,13 +104,16 @@ def _benchmark_metrics(symbol: str, idx: pd.DatetimeIndex) -> dict:
 
 
 def _grid_iter() -> list[dict]:
+    # Focused grid: hold at least 8 names (user constraint), only the
+    # informative axes. 96 configurations.
     grid = {
         "universe": ["nasdaq100", "sp500"],
-        "k": [5, 8, 10, 15, 20, 30],
-        "lookback": [126, 189, 252, 378],
-        "skip": [0, 21],
-        "rebalance": [5, 21, 63],
-        "abs_momentum_threshold": [0.0, 0.05, None],
+        "k": [8, 10, 15, 20],
+        "lookback": [126, 252],
+        "skip": [21],  # classic 12-1 only
+        "rebalance": [21, 63],  # monthly or quarterly
+        "abs_momentum_threshold": [0.0, None],  # dual-momentum on/off
+        "min_decorrelated": [0, 3, 5],  # corr filter quotas
     }
     keys = list(grid)
     combos = list(itertools.product(*[grid[k] for k in keys]))
@@ -129,6 +131,9 @@ def _backtest_config(prices: pd.DataFrame, cfg: dict, costs: CostModel) -> dict 
             abs_momentum_threshold=cfg["abs_momentum_threshold"],
             target_gross=1.0,
             max_per_position=0.20,
+            min_decorrelated=cfg.get("min_decorrelated", 0),
+            max_pairwise_corr=0.70,
+            corr_window=63,
         )
     except Exception:
         return None
@@ -176,6 +181,9 @@ def _walk_forward_check(prices: pd.DataFrame, cfg: dict, costs: CostModel) -> di
             abs_momentum_threshold=cfg["abs_momentum_threshold"],
             target_gross=1.0,
             max_per_position=0.20,
+            min_decorrelated=cfg.get("min_decorrelated", 0),
+            max_pairwise_corr=0.70,
+            corr_window=63,
         )
         return TopKMomentum(params=params).generate(full).reindex(test.index).fillna(0.0)
 
@@ -255,7 +263,7 @@ def _plot_holdings_turnover(winner: dict, path: Path) -> None:
     on = (w.abs() > 1e-6).astype(int)
     monthly = on.resample("ME").max()
     fig, ax = plt.subplots(figsize=(14, 8))
-    im = ax.imshow(monthly.T.values, aspect="auto", cmap="binary", interpolation="nearest")
+    ax.imshow(monthly.T.values, aspect="auto", cmap="binary", interpolation="nearest")
     ax.set_yticks(range(len(monthly.columns)))
     ax.set_yticklabels(monthly.columns, fontsize=6)
     n = len(monthly)
@@ -338,7 +346,10 @@ def main() -> int:
     if not prices_by_universe:
         return 1
 
-    costs = CostModel(commission_bps=1.0, slippage_bps=2.0)
+    # Realistic IBKR Tiered + retail-size slippage on liquid US equity at
+    # daily close: ~3 bps commission + ~7 bps slippage per side = 10 bps
+    # one-way, 20 bps round-trip. The previous 3 bps figure was optimistic.
+    costs = CostModel(commission_bps=3.0, slippage_bps=7.0)
 
     # Benchmark constraints derived from QQQ.
     qqq = _benchmark_metrics("QQQ", prices_by_universe["nasdaq100"].index)
@@ -382,7 +393,8 @@ def main() -> int:
 
     print("\nTop 10 by Calmar:")
     print(
-        f"  {'#':>2} {'universe':10s}  k  {'L':>4} s {'R':>3} {'abs':>6}  "
+        f"  {'#':>2} {'universe':10s} {'k':>2} {'L':>4} {'s':>2} {'R':>3} "
+        f"{'abs':>6} {'dec':>3}  "
         f"{'$100k -> $':>13}  {'CAGR':>8} {'Sharpe':>7} {'MaxDD':>8} {'Calmar':>7}"
     )
     for i, r in enumerate(ranked[:10], 1):
@@ -391,7 +403,8 @@ def main() -> int:
         )
         print(
             f"  {i:>2} {r['universe']:10s} {r['k']:>2} {r['lookback']:>4} "
-            f"{r['skip']:>1} {r['rebalance']:>3} {abs_str:>6}  "
+            f"{r['skip']:>2} {r['rebalance']:>3} "
+            f"{abs_str:>6} {r.get('min_decorrelated', 0):>3}  "
             f"{r['final_equity']:>13,.0f}  "
             f"{r['cagr']:>8.2%} {r['sharpe']:>7.3f} {r['max_drawdown']:>8.2%} "
             f"{r['calmar']:>7.3f}"
@@ -403,7 +416,8 @@ def main() -> int:
     print(
         f"  universe={winner['universe']}  k={winner['k']}  L={winner['lookback']}  "
         f"skip={winner['skip']}  rebalance={winner['rebalance']}  "
-        f"abs_momentum_threshold={winner['abs_momentum_threshold']}"
+        f"abs_momentum_threshold={winner['abs_momentum_threshold']}  "
+        f"min_decorrelated={winner.get('min_decorrelated', 0)}"
     )
     print(
         f"  IN-SAMPLE:  CAGR={winner['cagr']:.2%}  Sharpe={winner['sharpe']:.3f}  "
