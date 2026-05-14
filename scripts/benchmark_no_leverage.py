@@ -43,7 +43,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from trading.backtest import CostModel, compute_metrics, run_vectorized
+from trading.backtest import CostModel, run_vectorized
 from trading.core.config import settings
 from trading.core.types import AssetClass, Instrument
 from trading.core.universes import load_universe
@@ -51,7 +51,6 @@ from trading.data.cache import ParquetCache
 from trading.selection.combine import inverse_vol
 from trading.selection.overlay import vol_target
 from trading.strategies import get_strategy
-
 
 START = datetime(2018, 1, 1, tzinfo=timezone.utc)
 END = datetime(2026, 5, 13, tzinfo=timezone.utc)

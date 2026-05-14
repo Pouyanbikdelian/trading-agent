@@ -11,7 +11,13 @@ Public surface::
 
 from __future__ import annotations
 
-from trading.selection.combine import dsr_weighted, equal_weight, inverse_vol, min_variance
+from trading.selection.combine import (
+    dsr_weighted,
+    equal_weight,
+    inverse_vol,
+    min_variance,
+    sharpe_weighted,
+)
 from trading.selection.overlay import vol_target
 from trading.selection.rank import rank_strategies
 from trading.selection.scores import (
@@ -49,5 +55,6 @@ __all__ = [
     "quality_screen",
     "rank_strategies",
     "sector_momentum_screen",
+    "sharpe_weighted",
     "vol_target",
 ]

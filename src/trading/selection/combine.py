@@ -165,3 +165,43 @@ def dsr_weighted(
     # might be missing from `ranked` if rank_strategies returned NaN scores).
     scalars = {name: float(scalars.get(name, 0.0)) for name in aligned}
     return _scalar_blend(aligned, scalars)
+
+
+def sharpe_weighted(
+    weights_by_strategy: dict[str, pd.DataFrame],
+    returns_by_strategy: dict[str, pd.Series],
+    *,
+    lookback: int | None = None,
+    floor: float = 0.0,
+) -> pd.DataFrame:
+    r"""Blend strategies in proportion to their realised Sharpe.
+
+    Unlike ``inverse_vol``, which assumes high-vol = bad and down-weights
+    accordingly, this combiner asks the right question: *which strategy has
+    actually been compensating its risk with return?* Each strategy gets a
+    weight :math:`\propto \max(0, \text{Sharpe}_i - \text{floor})` over the
+    trailing ``lookback`` window. Strategies below the floor get zero;
+    if all of them are, we fall back to equal-weight.
+
+    Concretely, when one strategy has been delivering 1.5 Sharpe and another
+    0.5 Sharpe over the last 60 days, this combiner allocates 75% / 25%
+    instead of inverse-vol's "give the volatile one less capital regardless
+    of whether the volatility was rewarded."
+    """
+    aligned = _align_frames(weights_by_strategy)
+    scalars: dict[str, float] = {}
+    for name in aligned:
+        r = returns_by_strategy[name].dropna()
+        if lookback is not None:
+            r = r.iloc[-lookback:]
+        std = float(r.std(ddof=1))
+        if std <= 0 or len(r) < 2:
+            scalars[name] = 0.0
+            continue
+        sharpe_ann = float(r.mean() / std * (252**0.5))
+        scalars[name] = max(0.0, sharpe_ann - floor)
+    total = sum(scalars.values())
+    if total <= 0:
+        return equal_weight(weights_by_strategy)
+    scalars = {k: v / total for k, v in scalars.items()}
+    return _scalar_blend(aligned, scalars)

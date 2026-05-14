@@ -36,7 +36,6 @@ from trading.selection.combine import inverse_vol
 from trading.selection.overlay import vol_target
 from trading.strategies import get_strategy
 
-
 START = datetime(2020, 1, 1, tzinfo=timezone.utc)
 END = datetime(2026, 5, 13, tzinfo=timezone.utc)
 INITIAL = 100_000.0
