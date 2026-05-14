@@ -98,6 +98,11 @@ ignore = [
 # Tests can reach into private attrs / use Hungarian-cased names matching the
 # vendor SDKs they're faking; that's the whole point of the fake.
 "tests/**" = ["N802", "N803", "N806", "N815", "RUF012"]
+# Math-heavy modules use single-letter Greek/quant notation (V, P, W, K, U, Σ).
+# PEP-8 capitalisation rules don't apply to mathematical conventions.
+"src/trading/strategies/pairs_kalman.py" = ["N806"]
+"src/trading/strategies/pca_residual.py" = ["N806"]
+"src/trading/regime/hmm_macro.py" = ["N806"]
 
 [tool.ruff.format]
 quote-style = "double"
