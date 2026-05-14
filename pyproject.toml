@@ -90,6 +90,7 @@ ignore = [
     "E501",     # line length — formatter handles it
     "B008",     # typer.Option() in argument defaults is the prescribed typer pattern
     "B017",     # pytest.raises(Exception) is fine when we're testing pydantic's varied validation errors
+    "RUF001",   # ambiguous unicode in strings    — math notation (σ, γ, ε) is intentional
     "RUF002",   # ambiguous unicode in docstrings — math notation (σ, γ, ε) is intentional
 ]
 

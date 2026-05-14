@@ -226,6 +226,30 @@ def test_cycle_error_is_caught(tiny_universe_yaml, primed_cache, tmp_state) -> N
     assert any(level == "critical" for level, _ in alerts.sent)
 
 
+def test_cycle_with_smart_combiner_runs_end_to_end(
+    tiny_universe_yaml, primed_cache, tmp_state
+) -> None:
+    """Multi-strategy cycle through a risk-aware combiner must complete
+    without raising. We don't pin numerical output here — the strategies
+    themselves are already covered in their own tests."""
+    cfg = RunnerConfig(
+        universe=tiny_universe_yaml,
+        strategies=["donchian", "ema_cross"],
+        combiner="dsr_weighted",
+        strategy_params={
+            "donchian": {"lookback": 20},
+            "ema_cross": {"fast_span": 5, "slow_span": 20},
+        },
+        auto_refresh=False,
+        history_bars=200,
+        initial_cash=100_000.0,
+    )
+    cycle, _, _ = _make_cycle(cfg, primed_cache, tmp_state)
+    report = cycle.run_cycle()
+    assert report.status in {"ok", "no_orders"}
+    assert report.error is None
+
+
 def test_cycle_handles_short_history_gracefully(
     tiny_universe_yaml,
     tmp_path: Path,

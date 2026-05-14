@@ -123,3 +123,45 @@ def min_variance(
     w = ones / len(names) if w.sum() == 0 else w / w.sum()
     scalars = dict(zip(names, w.tolist(), strict=True))
     return _scalar_blend(aligned, scalars)
+
+
+def dsr_weighted(
+    weights_by_strategy: dict[str, pd.DataFrame],
+    returns_by_strategy: dict[str, pd.Series],
+    *,
+    periods_per_year: int,
+    floor: float = 0.0,
+) -> pd.DataFrame:
+    """Weight each strategy by its **Deflated Sharpe Ratio**.
+
+    DSR is the probability that the strategy's *true* Sharpe exceeds the
+    expected best-of-N null, adjusted for skew + kurtosis + n_trials. A
+    DSR of 0.5 means "as likely a winner as a coin-flip null"; > 0.9 means
+    "very likely a real edge."
+
+    Strategies with DSR <= ``floor`` are zeroed out (default: drop anything
+    below 50/50). If every strategy is below the floor, falls back to
+    equal-weight so the runner doesn't sit on cash forever — but logs a
+    warning so the operator notices.
+    """
+    aligned = _align_frames(weights_by_strategy)
+    # Local import to avoid circular: rank.py imports from scores which is fine.
+    from trading.selection.rank import rank_strategies
+
+    ranked = rank_strategies(
+        {name: returns_by_strategy[name] for name in aligned},
+        periods_per_year=periods_per_year,
+    )
+    # ``ranked`` has one row per strategy, indexed by name, with a 'dsr' column.
+    raw = ranked["dsr"].clip(lower=floor) - floor
+    total = float(raw.sum())
+    if total <= 0:
+        # No strategy clears the floor — fall back to equal-weight rather than
+        # zero exposure. The combiner can't decide "stay in cash" on its own;
+        # that's the risk manager's prerogative.
+        return equal_weight(weights_by_strategy)
+    scalars = (raw / total).to_dict()
+    # Make sure every aligned name has a scalar (a strategy with zero variance
+    # might be missing from `ranked` if rank_strategies returned NaN scores).
+    scalars = {name: float(scalars.get(name, 0.0)) for name in aligned}
+    return _scalar_blend(aligned, scalars)

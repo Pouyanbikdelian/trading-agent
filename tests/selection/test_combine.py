@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from trading.selection import equal_weight, inverse_vol, min_variance
+from trading.selection import dsr_weighted, equal_weight, inverse_vol, min_variance
 
 
 @pytest.fixture
@@ -122,3 +122,58 @@ def test_min_variance_short_series_rejected() -> None:
     returns = {"a": pd.Series([0.01], index=idx), "b": pd.Series([0.02], index=idx)}
     with pytest.raises(ValueError, match="at least 2"):
         min_variance(weights, returns)
+
+
+# ----------------------------------------------------------- dsr_weighted ----
+
+
+def test_dsr_weighted_favors_winners(idx: pd.DatetimeIndex) -> None:
+    """The strategy with a clear positive Sharpe gets the lion's share."""
+    rng = np.random.default_rng(0)
+    weights = {
+        "winner": pd.DataFrame({"A": np.ones(200), "B": np.zeros(200)}, index=idx),
+        "loser": pd.DataFrame({"A": np.zeros(200), "B": np.ones(200)}, index=idx),
+    }
+    returns = {
+        "winner": pd.Series(rng.normal(0.001, 0.005, 200), index=idx),  # +Sharpe
+        "loser": pd.Series(rng.normal(-0.001, 0.005, 200), index=idx),  # -Sharpe
+    }
+    out = dsr_weighted(weights, returns, periods_per_year=252)
+    # winner's frame puts everything in A → blended A weight should dominate B.
+    assert out["A"].iloc[-1] > out["B"].iloc[-1]
+
+
+def test_dsr_weighted_falls_back_to_equal_when_all_below_floor(
+    idx: pd.DatetimeIndex,
+) -> None:
+    rng = np.random.default_rng(0)
+    weights = {
+        "a": pd.DataFrame({"X": [1.0] * 200, "Y": [0.0] * 200}, index=idx),
+        "b": pd.DataFrame({"X": [0.0] * 200, "Y": [1.0] * 200}, index=idx),
+    }
+    # Both strategies produce noisy zero-mean returns → DSR close to 0.5,
+    # below a floor of 0.9 → fallback to equal weight, 50/50 blend.
+    returns = {
+        "a": pd.Series(rng.normal(0, 0.01, 200), index=idx),
+        "b": pd.Series(rng.normal(0, 0.01, 200), index=idx),
+    }
+    out = dsr_weighted(weights, returns, periods_per_year=252, floor=0.9)
+    assert out["X"].iloc[-1] == pytest.approx(0.5, abs=1e-9)
+    assert out["Y"].iloc[-1] == pytest.approx(0.5, abs=1e-9)
+
+
+def test_dsr_weighted_zeroes_below_floor(idx: pd.DatetimeIndex) -> None:
+    """A strategy below the floor contributes nothing; the rest absorb its share."""
+    rng = np.random.default_rng(0)
+    weights = {
+        "good": pd.DataFrame({"A": [1.0] * 200, "B": [0.0] * 200}, index=idx),
+        "bad": pd.DataFrame({"A": [0.0] * 200, "B": [1.0] * 200}, index=idx),
+    }
+    returns = {
+        "good": pd.Series(rng.normal(0.002, 0.003, 200), index=idx),  # strong +Sharpe
+        "bad": pd.Series(rng.normal(0.0, 0.01, 200), index=idx),  # ~0 Sharpe
+    }
+    out = dsr_weighted(weights, returns, periods_per_year=252, floor=0.7)
+    # With bad strategy zeroed, blended frame == good's frame.
+    assert out["A"].iloc[-1] == pytest.approx(1.0, abs=1e-9)
+    assert out["B"].iloc[-1] == pytest.approx(0.0, abs=1e-9)

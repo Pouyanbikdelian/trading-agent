@@ -310,7 +310,22 @@ class Cycle:
 
     def _generate_combined_weights(self, prices: pd.DataFrame) -> pd.DataFrame:
         """Run each configured strategy on ``prices`` and combine the
-        per-strategy weight frames."""
+        per-strategy weight frames.
+
+        For risk-aware combiners (inverse_vol, min_variance, dsr_weighted),
+        we also compute each strategy's recent OOS returns by running an
+        in-process backtest on the same price history. That's cheap (~ms
+        per strategy on a 252-bar daily frame) and avoids carrying a
+        separate per-strategy returns table.
+        """
+        from trading.backtest import ZERO_COSTS, run_vectorized
+        from trading.selection.combine import (
+            dsr_weighted,
+            equal_weight,
+            inverse_vol,
+            min_variance,
+        )
+
         weights_by_strategy: dict[str, pd.DataFrame] = {}
         for name in self.config.strategies:
             cls = get_strategy(name)
@@ -321,18 +336,29 @@ class Cycle:
         if len(weights_by_strategy) == 1:
             return next(iter(weights_by_strategy.values()))
 
-        # Only equal_weight is safe in the live runner — other combiners
-        # need historical per-strategy returns we don't track. The config
-        # field type already constrains this; the runtime check is belt-
-        # and-suspenders.
-        if self.config.combiner != "equal_weight":
-            raise NotImplementedError(
-                f"combiner={self.config.combiner!r} not supported in the live runner; "
-                "use equal_weight"
-            )
-        from trading.selection.combine import equal_weight
+        combiner = self.config.combiner
+        if combiner == "equal_weight":
+            return equal_weight(weights_by_strategy)
 
-        return equal_weight(weights_by_strategy)
+        # Risk-aware combiners need per-strategy returns; compute them with
+        # the vectorized engine on the same price frame.
+        returns_by_strategy: dict[str, pd.Series] = {}
+        for name, w in weights_by_strategy.items():
+            result = run_vectorized(prices, w, costs=ZERO_COSTS)
+            returns_by_strategy[name] = result.returns
+
+        lookback = self.config.combiner_lookback
+        if combiner == "inverse_vol":
+            return inverse_vol(weights_by_strategy, returns_by_strategy, lookback=lookback)
+        if combiner == "min_variance":
+            return min_variance(weights_by_strategy, returns_by_strategy, lookback=lookback)
+        if combiner == "dsr_weighted":
+            return dsr_weighted(
+                weights_by_strategy,
+                returns_by_strategy,
+                periods_per_year=self.config.periods_per_year,
+            )
+        raise ValueError(f"unknown combiner={combiner!r}")
 
     def _weights_to_signal(
         self,

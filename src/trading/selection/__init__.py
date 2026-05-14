@@ -11,7 +11,7 @@ Public surface::
 
 from __future__ import annotations
 
-from trading.selection.combine import equal_weight, inverse_vol, min_variance
+from trading.selection.combine import dsr_weighted, equal_weight, inverse_vol, min_variance
 from trading.selection.overlay import vol_target
 from trading.selection.rank import rank_strategies
 from trading.selection.scores import (
@@ -26,6 +26,7 @@ from trading.selection.scores import (
 __all__ = [
     "annualize_sharpe",
     "deflated_sharpe",
+    "dsr_weighted",
     "equal_weight",
     "expected_max_sharpe",
     "inverse_vol",

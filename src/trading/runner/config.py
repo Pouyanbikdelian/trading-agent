@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from trading.data.base import CANONICAL_FREQUENCIES, Frequency
 
-CombinerName = Literal["equal_weight", "inverse_vol", "min_variance"]
+CombinerName = Literal["equal_weight", "inverse_vol", "min_variance", "dsr_weighted"]
 
 
 class RunnerConfig(BaseModel):
@@ -37,10 +37,18 @@ class RunnerConfig(BaseModel):
     """Per-strategy overrides keyed by strategy name."""
 
     combiner: CombinerName = "equal_weight"
-    """How to blend multi-strategy weights. Only ``equal_weight`` is robust
-    in the live runner; ``inverse_vol`` / ``min_variance`` need historical
-    per-strategy returns which the runner doesn't track yet (Phase 5 callers
-    pass them in directly)."""
+    """How to blend multi-strategy weights.
+
+    * ``equal_weight``  — uniform 1/N. Safest baseline.
+    * ``inverse_vol``   — weight ∝ 1/σ of each strategy's recent returns.
+    * ``min_variance``  — closed-form minimum-variance over strategy returns.
+    * ``dsr_weighted``  — weight ∝ Deflated Sharpe; strategies below DSR
+      floor get zero. Falls back to equal-weight if all are below floor.
+    """
+
+    combiner_lookback: int = Field(default=60, ge=10)
+    """Bars of per-strategy returns history fed to risk-aware combiners.
+    60 daily bars ≈ 3 trading months. Ignored by ``equal_weight``."""
 
     # --- Data ------------------------------------------------------------
     freq: Frequency = "1D"
