@@ -184,6 +184,75 @@ def _data_fetch(
 # ---------------------------------------------------------------------------
 
 
+@app.command("signals")
+def _signals(
+    universe: str = typer.Argument(..., help="Universe from config/universes.yaml."),
+    strategy: list[str] = typer.Option(
+        ["donchian"],
+        "--strategy",
+        "-s",
+        help="Strategy name(s); repeat for multi-strategy view.",
+    ),
+    freq: str = typer.Option("1D", "--freq"),
+    history_bars: int = typer.Option(
+        252, "--bars", help="Bars of price history to feed the strategies."
+    ),
+    price_column: str = typer.Option("adj_close", "--price-column"),
+    show_flat: bool = typer.Option(
+        False, "--show-flat", help="Also print symbols the strategies want to leave flat."
+    ),
+) -> None:
+    """Read-only: print what each strategy WOULD buy/sell today. No broker, no state.
+
+    Useful as a sanity check before letting a runner go autonomous, or to
+    compare what multiple strategies want on the same universe at the
+    same instant.
+    """
+    if freq not in CANONICAL_FREQUENCIES:
+        raise typer.BadParameter(f"freq={freq!r} not in {list(CANONICAL_FREQUENCIES)}")
+
+    instruments = load_universe(universe)
+    cache = ParquetCache(settings.data_dir)
+    series: dict[str, pd.Series] = {}
+    for ins in instruments:
+        df = cache.read(ins, freq)  # type: ignore[arg-type]
+        if df.empty or price_column not in df.columns:
+            continue
+        s = df[price_column].dropna()
+        if not s.empty:
+            series[ins.symbol] = s.iloc[-history_bars:]
+    if not series:
+        raise typer.BadParameter(f"no cached bars for {universe!r}; run `trading data fetch` first")
+    prices = pd.DataFrame(series).sort_index().dropna(how="any")
+    if prices.empty:
+        raise typer.BadParameter("inner-join on dates produced an empty frame")
+
+    for name in strategy:
+        cls = get_strategy(name)
+        s = cls()
+        w = s.generate(prices)
+        last = w.iloc[-1]
+        longs = sorted([(sym, float(v)) for sym, v in last.items() if v > 0], key=lambda x: -x[1])
+        shorts = sorted([(sym, float(v)) for sym, v in last.items() if v < 0], key=lambda x: x[1])
+        flats = [sym for sym, v in last.items() if v == 0]
+
+        t = Table(title=f"{name} on {universe} @ {prices.index[-1].date()}")
+        t.add_column("symbol", style="cyan")
+        t.add_column("side", style="green")
+        t.add_column("weight", justify="right")
+        for sym, v in longs:
+            t.add_row(sym, "long", f"{v:+.3f}")
+        for sym, v in shorts:
+            t.add_row(sym, "short", f"{v:+.3f}")
+        if show_flat:
+            for sym in flats:
+                t.add_row(sym, "flat", "0.000")
+        console.print(t)
+        console.print(
+            f"  {len(longs)} long, {len(shorts)} short, {len(flats)} flat (total: {len(last)})"
+        )
+
+
 @backtest_app.command("strategies")
 def _backtest_strategies() -> None:
     """List built-in strategies."""
