@@ -158,6 +158,28 @@ def test_cycle_produces_orders(tiny_universe_yaml, primed_cache, tmp_state) -> N
     assert report.error is None
 
 
+def test_cycle_ticks_simulator_and_fills_match_submissions(
+    tiny_universe_yaml, primed_cache, tmp_state
+) -> None:
+    """The cycle must drive the Simulator's clock so paper-trade fills
+    materialize in the same cycle they were submitted in. Regression for
+    the original bug where Simulator orders stayed in PENDING forever."""
+    cfg = RunnerConfig(
+        universe=tiny_universe_yaml,
+        strategies=["risk_parity"],
+        strategy_params={"risk_parity": {"vol_lookback": 30, "rebalance": 1}},
+        auto_refresh=False,
+        history_bars=200,
+        initial_cash=100_000.0,
+    )
+    cycle, _, _ = _make_cycle(cfg, primed_cache, tmp_state)
+    report = cycle.run_cycle()
+    assert report.status == "ok"
+    assert report.orders_submitted > 0
+    # Every submitted order must have a matching fill — no orphan PENDINGs.
+    assert report.fills_received == report.orders_submitted
+
+
 def test_cycle_persists_snapshot(tiny_universe_yaml, primed_cache, tmp_state) -> None:
     cfg = RunnerConfig(
         universe=tiny_universe_yaml,

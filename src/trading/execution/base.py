@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from trading.core.types import AccountSnapshot, Fill, Order, Position
+from trading.core.types import AccountSnapshot, Bar, Fill, Order, Position
 
 
 @runtime_checkable
@@ -55,6 +55,19 @@ class Broker(Protocol):
         """All fills the broker has reported, optionally filtered by time.
 
         ``since`` is inclusive of its own bar (``>= since``)."""
+
+    def tick(self, ts: datetime, bars: dict[str, Bar]) -> list[Fill]:
+        """Advance the broker's internal clock by one bar (if it has one).
+
+        IBKR doesn't need this — its fills arrive asynchronously from the
+        gateway — so the adapter implements it as a no-op. The in-memory
+        Simulator overrides it to fill queued market orders against the
+        new bar. The runner calls ``tick()`` once per cycle after submitting
+        orders so paper-trade fills materialize in the same cycle they were
+        submitted in.
+
+        Default: return ``[]`` (no fills produced)."""
+        return []
 
 
 class BrokerError(RuntimeError):

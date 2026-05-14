@@ -339,6 +339,15 @@ class Cycle:
                 self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
                 self.alerts.error(f"order submit failed: {e!r}")
 
+        # 9b. Drive the broker's internal clock so paper-trade fills
+        # materialize in the same cycle they were submitted in. No-op for
+        # IbkrBroker; the Simulator uses this to fill at the next bar's open.
+        latest_bars = self._build_latest_bars(prices, ts_start)
+        try:
+            self.broker.tick(ts_start, latest_bars)
+        except Exception:
+            logger.bind(component="cycle").exception("broker tick failed")
+
         # 10. Reconcile fills since the start of this cycle.
         fills = self.broker.get_fills(since=ts_start)
         for fill in fills:
@@ -491,6 +500,36 @@ class Cycle:
         if not series:
             return pd.DataFrame()
         return pd.DataFrame(series).sort_index().dropna(how="all")
+
+    def _build_latest_bars(self, prices: pd.DataFrame, ts: datetime) -> dict[str, Any]:
+        """Build the {symbol: Bar} snapshot the Simulator needs to fill orders.
+
+        We only have the close column in ``prices`` (the cycle reads one
+        column to keep memory small); the cache has the rest. Fall back to
+        the close for open/high/low when the cache is unreadable — fills
+        will execute at close instead of next bar's open, which is a slight
+        bias but never crashes."""
+        from trading.core.types import AssetClass, Bar, Instrument
+
+        freq: Frequency = self.config.freq  # type: ignore[assignment]
+        bars: dict[str, Any] = {}
+        for sym in prices.columns:
+            close = float(prices[sym].iloc[-1])
+            ins = Instrument(symbol=sym, asset_class=AssetClass.EQUITY)
+            try:
+                df = self.cache.read(ins, freq)
+                row = df.iloc[-1]
+                bars[sym] = Bar(
+                    ts=ts,
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=float(row.get("volume", 0.0) or 0.0),
+                )
+            except Exception:
+                bars[sym] = Bar(ts=ts, open=close, high=close, low=close, close=close, volume=0.0)
+        return bars
 
     def _fetch_account(self, ts: datetime) -> AccountSnapshot:
         """Get the broker's account view. For brokers that need a step()

@@ -120,6 +120,10 @@ class Simulator(Broker):
 
     # ---------------------------------------------------------- step / clock
 
+    def tick(self, ts: datetime, bars: dict[str, Bar]) -> list[Fill]:
+        """Implementation of the Broker.tick() contract — delegates to step()."""
+        return self.step(ts, bars)
+
     def step(self, ts: datetime, bars: dict[str, Bar]) -> list[Fill]:
         """Advance the clock to ``ts`` with new bars. Returns fills produced
         on this bar (so the caller can react to them immediately)."""
