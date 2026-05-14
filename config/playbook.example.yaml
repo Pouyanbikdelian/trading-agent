@@ -1,0 +1,45 @@
+# Regime-driven playbook — copy to config/playbook.yaml and edit.
+#
+# The runner classifies the market regime once per cycle using the
+# `classifier` named here, looks up the matching rule, and overrides the
+# active strategies / universe / vol target before generating signals.
+#
+# Risk-manager limits (max_position_pct, max_gross_exposure, kill switches)
+# DO NOT change per regime — they're constant in config/risk.yaml. The
+# playbook is about *which trades to look for*, not how much risk to take.
+# To tighten risk in storms, also tighten config/risk.yaml.
+
+classifier: vix              # only 'vix' is wired today
+default_rule: mid_vol        # used during warm-up or for unknown labels
+
+rules:
+  # VIX in the bottom third of its trailing 252-day range = "calm".
+  # Trend + cross-sectional momentum work best in calm regimes.
+  low_vol:
+    strategies: [donchian, xsec_momentum]
+    universe: nasdaq100
+    vol_target: 0.15
+    strategy_params:
+      donchian: { lookback: 55 }
+      xsec_momentum: { lookback: 252, skip: 21, rebalance: 21 }
+
+  # Middle third — diversify across trend + risk-parity to smooth equity.
+  mid_vol:
+    strategies: [donchian, risk_parity]
+    universe: sp500
+    vol_target: 0.10
+
+  # Top third = stressed market. Drop equity-name strategies entirely;
+  # only risk-parity over a defensive ETF basket.
+  high_vol:
+    strategies: [risk_parity]
+    universe: us_macro_etfs
+    vol_target: 0.05
+
+  # Optional crisis rule — uncomment if you want a tripwire that empties
+  # the book entirely on extreme VIX. Triggering this needs a separate
+  # classifier (or a manual regime override) since VIX percentile alone
+  # is bounded at the top bucket.
+  # crisis:
+  #   strategies: []
+  #   force_flatten: true

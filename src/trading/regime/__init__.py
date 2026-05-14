@@ -15,12 +15,22 @@ from __future__ import annotations
 from trading.regime.base import RegimeClassifier, regime_scale
 from trading.regime.hmm import HmmParams, HmmRegime
 from trading.regime.realized_vol import RealizedVolParams, RealizedVolRegime
+from trading.regime.vix import (
+    DEFAULT_VIX_LABELS,
+    VixParams,
+    VixRegime,
+    fetch_vix_levels,
+)
 
 __all__ = [
+    "DEFAULT_VIX_LABELS",
     "HmmParams",
     "HmmRegime",
     "RealizedVolParams",
     "RealizedVolRegime",
     "RegimeClassifier",
+    "VixParams",
+    "VixRegime",
+    "fetch_vix_levels",
     "regime_scale",
 ]

@@ -77,6 +77,12 @@ class RunnerConfig(BaseModel):
     use_simulator: bool = True
     """Phase 8's CLI flips this; the runner itself is broker-agnostic."""
 
+    # --- Regime-driven playbook (optional) -------------------------------
+    playbook_path: str | None = None
+    """Path to a playbook YAML. When set, the runner classifies the regime
+    each cycle and overrides ``strategies`` / ``universe`` / ``vol_target``
+    according to the matching rule. See ``trading.runner.playbook``."""
+
     # --- Scheduling ------------------------------------------------------
     schedule_cron: str = "0 16 * * MON-FRI"
     """Crontab string for APScheduler. Default: weekdays at 16:00 ``schedule_tz``."""

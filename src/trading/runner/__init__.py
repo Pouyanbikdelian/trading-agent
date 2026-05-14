@@ -18,6 +18,7 @@ from trading.runner.heartbeat import (
     read_heartbeat,
     write_heartbeat,
 )
+from trading.runner.playbook import Playbook, PlaybookRule, load_playbook, rule_for
 from trading.runner.runner import Runner
 from trading.runner.state import RunnerStore
 
@@ -25,12 +26,16 @@ __all__ = [
     "Cycle",
     "CycleReport",
     "NullAlerts",
+    "Playbook",
+    "PlaybookRule",
     "Runner",
     "RunnerConfig",
     "RunnerStore",
     "TelegramAlerts",
     "heartbeat_age_seconds",
     "heartbeat_is_stale",
+    "load_playbook",
     "read_heartbeat",
+    "rule_for",
     "write_heartbeat",
 ]

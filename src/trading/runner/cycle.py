@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
@@ -92,6 +92,8 @@ class Cycle:
         heartbeat_path: Path | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         order_id_factory: Callable[[], str] | None = None,
+        playbook: Any = None,
+        regime_label_fn: Callable[[datetime], str] | None = None,
     ) -> None:
         self.config = config
         self.cache = cache
@@ -104,7 +106,10 @@ class Cycle:
         self.heartbeat_path = heartbeat_path
         self._clock = clock
         self._order_id_factory = order_id_factory
+        self._playbook = playbook
+        self._regime_label_fn = regime_label_fn
         self._cycle_count = 0
+        self._last_regime: str | None = None
 
     # ------------------------------------------------------- public API
 
@@ -150,8 +155,106 @@ class Cycle:
 
     # -------------------------------------------------------- internals
 
+    def _effective_config(self, ts: datetime) -> tuple[RunnerConfig, bool]:
+        """Apply the playbook (if configured) to derive this cycle's config.
+
+        Returns ``(cfg, force_flatten)``. If no playbook is wired or the
+        regime label doesn't resolve to a rule, the static config is returned
+        unchanged. The runner logs every regime transition so the operator
+        sees the system rotating between rules in the runner logs.
+        """
+        if self._playbook is None or self._regime_label_fn is None:
+            return self.config, False
+
+        try:
+            label = self._regime_label_fn(ts)
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "regime classifier failed; falling back to static config"
+            )
+            return self.config, False
+
+        # Local import to avoid coupling the cycle module to the playbook
+        # types when no playbook is in use.
+        from trading.runner.playbook import rule_for
+
+        rule = rule_for(self._playbook, label)
+        if rule is None:
+            return self.config, False
+
+        if label != self._last_regime:
+            logger.bind(component="cycle").info(
+                f"regime transition: {self._last_regime} -> {label}"
+            )
+            self.alerts.info(f"regime: {self._last_regime} -> {label}")
+            self._last_regime = label
+
+        # Merge: rule fields override; unset rule fields inherit. Frozen
+        # pydantic + model_copy keeps both objects immutable.
+        updates: dict[str, Any] = {}
+        if rule.strategies:
+            updates["strategies"] = list(rule.strategies)
+        if rule.universe is not None:
+            updates["universe"] = rule.universe
+        if rule.vol_target is not None:
+            updates["vol_target"] = rule.vol_target
+        if rule.strategy_params:
+            updates["strategy_params"] = dict(rule.strategy_params)
+        return self.config.model_copy(update=updates), bool(rule.force_flatten)
+
+    def _run_force_flatten(self, ts_start: datetime) -> CycleReport:
+        """Playbook said this regime = stay flat. Generate closing orders for
+        every open position, submit, and skip strategy generation entirely."""
+        account = self._fetch_account(ts_start)
+        positions = list(account.positions.values())
+        orders = self.risk_manager.force_flatten_orders(
+            positions,
+            ts=ts_start,
+            **({"order_id_factory": self._order_id_factory} if self._order_id_factory else {}),
+        )
+
+        orders_submitted = 0
+        for order in orders:
+            try:
+                self.order_store.save_order(order)
+                self.broker.submit_order(order)
+                self.order_store.update_status(order.client_order_id, OrderStatus.SUBMITTED)
+                orders_submitted += 1
+            except Exception as e:
+                logger.bind(component="cycle").exception(
+                    f"force-flatten submit failed for {order.client_order_id}"
+                )
+                self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
+                self.alerts.error(f"force-flatten submit failed: {e!r}")
+
+        fills = self.broker.get_fills(since=ts_start)
+        for fill in fills:
+            try:
+                self.order_store.save_fill(fill, client_order_id=fill.order_id)
+                self.order_store.update_status(fill.order_id, OrderStatus.FILLED)
+            except Exception:
+                logger.bind(component="cycle").exception("save_fill failed")
+        try:
+            self.runner_store.save_snapshot(self.broker.get_account())
+        except Exception:
+            logger.bind(component="cycle").exception("snapshot persistence failed")
+
+        return CycleReport(
+            ts=ts_start,
+            status="ok" if orders_submitted > 0 else "no_orders",
+            orders_submitted=orders_submitted,
+            fills_received=len(fills),
+            decisions=[],
+            duration_ms=self._elapsed_ms(ts_start),
+        )
+
     def _run_inner(self, ts_start: datetime) -> CycleReport:
-        cfg = self.config
+        # 0. Apply the regime playbook if one is configured. The playbook can
+        # swap the universe, strategies, vol target, and per-strategy params.
+        # `force_flatten: true` short-circuits to a flatten-everything cycle.
+        cfg, force_flatten = self._effective_config(ts_start)
+        if force_flatten:
+            return self._run_force_flatten(ts_start)
 
         # 1. Load instruments for the universe.
         instruments = load_universe(cfg.universe)
@@ -186,7 +289,7 @@ class Cycle:
             )
 
         # 5. Generate strategy weights and combine.
-        weights = self._generate_combined_weights(prices)
+        weights = self._generate_combined_weights(prices, cfg=cfg)
 
         # 6. Optional vol-target overlay.
         if cfg.vol_target is not None:
@@ -200,7 +303,7 @@ class Cycle:
             )
 
         # 7. Build the Signal from the last row of the weights frame.
-        signal = self._weights_to_signal(weights, instruments, ts_start)
+        signal = self._weights_to_signal(weights, instruments, ts_start, cfg=cfg)
         last_prices = self._last_prices(prices, instruments)
         instruments_by_key = {ins.key: ins for ins in instruments if ins.key in last_prices}
 
@@ -308,7 +411,12 @@ class Cycle:
                 ts=ts, cash=self.config.initial_cash, equity=self.config.initial_cash
             )
 
-    def _generate_combined_weights(self, prices: pd.DataFrame) -> pd.DataFrame:
+    def _generate_combined_weights(
+        self,
+        prices: pd.DataFrame,
+        *,
+        cfg: RunnerConfig | None = None,
+    ) -> pd.DataFrame:
         """Run each configured strategy on ``prices`` and combine the
         per-strategy weight frames.
 
@@ -326,17 +434,18 @@ class Cycle:
             min_variance,
         )
 
+        cfg = cfg or self.config
         weights_by_strategy: dict[str, pd.DataFrame] = {}
-        for name in self.config.strategies:
+        for name in cfg.strategies:
             cls = get_strategy(name)
-            params = cls.Params(**self.config.strategy_params.get(name, {}))
+            params = cls.Params(**cfg.strategy_params.get(name, {}))
             strat = cls(params=params)
             weights_by_strategy[name] = strat.generate(prices)
 
         if len(weights_by_strategy) == 1:
             return next(iter(weights_by_strategy.values()))
 
-        combiner = self.config.combiner
+        combiner = cfg.combiner
         if combiner == "equal_weight":
             return equal_weight(weights_by_strategy)
 
@@ -347,7 +456,7 @@ class Cycle:
             result = run_vectorized(prices, w, costs=ZERO_COSTS)
             returns_by_strategy[name] = result.returns
 
-        lookback = self.config.combiner_lookback
+        lookback = cfg.combiner_lookback
         if combiner == "inverse_vol":
             return inverse_vol(weights_by_strategy, returns_by_strategy, lookback=lookback)
         if combiner == "min_variance":
@@ -356,7 +465,7 @@ class Cycle:
             return dsr_weighted(
                 weights_by_strategy,
                 returns_by_strategy,
-                periods_per_year=self.config.periods_per_year,
+                periods_per_year=cfg.periods_per_year,
             )
         raise ValueError(f"unknown combiner={combiner!r}")
 
@@ -365,6 +474,8 @@ class Cycle:
         weights: pd.DataFrame,
         instruments: list[Instrument],
         ts: datetime,
+        *,
+        cfg: RunnerConfig | None = None,
     ) -> Signal:
         last_row = weights.iloc[-1]
         # Match column names to instrument.symbol -> instrument.key.
@@ -372,9 +483,10 @@ class Cycle:
         target_weights = {
             sym_to_key[sym]: float(last_row[sym]) for sym in last_row.index if sym in sym_to_key
         }
+        active = (cfg or self.config).strategies
         return Signal(
             ts=ts,
-            strategy="+".join(self.config.strategies),
+            strategy="+".join(active),
             target_weights=target_weights,
         )
 

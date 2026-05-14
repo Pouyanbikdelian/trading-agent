@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import signal
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,16 @@ class Runner:
 
         heartbeat_path = Path(config.heartbeat_path or (state_dir / "heartbeat.json"))
 
+        # Optional playbook: load the YAML and build a VIX-based regime
+        # provider. The cycle treats playbook == None as the static path.
+        playbook = None
+        regime_label_fn = None
+        if config.playbook_path:
+            from trading.runner.playbook import load_playbook
+
+            playbook = load_playbook(config.playbook_path)
+            regime_label_fn = _build_regime_label_fn(playbook)
+
         cycle = Cycle(
             config,
             cache=cache,
@@ -121,6 +132,8 @@ class Runner:
             runner_store=runner_store,
             alerts=alerts,
             heartbeat_path=heartbeat_path,
+            playbook=playbook,
+            regime_label_fn=regime_label_fn,
         )
         return cls(config, cycle=cycle, broker=broker, alerts=alerts)
 
@@ -183,3 +196,46 @@ class Runner:
             self.broker.disconnect()
         except Exception:
             logger.bind(component="runner").exception("broker disconnect failed")
+
+
+def _build_regime_label_fn(playbook: Any) -> Callable[[datetime], str]:
+    """Build a callable that returns the current regime label.
+
+    For ``classifier: vix``, we fit a VixRegime classifier once at runner
+    construction time, cache it, and re-use across cycles. The VIX history
+    is fetched lazily and re-fetched at most once per UTC day — yfinance
+    is rate-limited and we don't want a heavy call every 5-minute cycle.
+    """
+    if playbook.classifier == "vix":
+        return _vix_regime_label_fn()
+    raise ValueError(
+        f"playbook.classifier={playbook.classifier!r} not wired yet; only 'vix' is supported"
+    )
+
+
+def _vix_regime_label_fn() -> Callable[[datetime], str]:
+    """Closure around a lazily-fit VixRegime + a once-per-day refresh."""
+    from trading.regime.vix import DEFAULT_VIX_LABELS, VixRegime, fetch_vix_levels
+
+    state: dict[str, Any] = {"classifier": None, "last_refresh": None, "levels": None}
+
+    def _label(ts: datetime) -> str:
+        # Refresh at most once per UTC day.
+        today = ts.date()
+        if state["last_refresh"] != today or state["classifier"] is None:
+            levels = fetch_vix_levels(end=ts)
+            classifier = VixRegime().fit(levels)
+            state["classifier"] = classifier
+            state["levels"] = levels
+            state["last_refresh"] = today
+
+        # Predict on the latest VIX observation; fall back to "mid_vol" if
+        # the levels series happens to be empty (network blip, weekend).
+        levels = state["levels"]
+        if levels is None or len(levels) == 0:
+            return DEFAULT_VIX_LABELS[1]
+        labels = state["classifier"].predict(levels.iloc[-1:])
+        label_id = int(labels.iloc[-1])
+        return DEFAULT_VIX_LABELS.get(label_id, f"state_{label_id}")
+
+    return _label
