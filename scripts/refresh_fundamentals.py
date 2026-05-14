@@ -27,7 +27,6 @@ quality screen takes a dict, so the data plumbing is replaceable.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 from trading.core.config import settings
 from trading.core.universes import load_universe

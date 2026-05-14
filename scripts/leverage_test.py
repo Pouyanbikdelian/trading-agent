@@ -33,7 +33,6 @@ from trading.selection.combine import inverse_vol
 from trading.selection.overlay import vol_target
 from trading.strategies import get_strategy
 
-
 START = datetime(2018, 1, 1, tzinfo=timezone.utc)
 END = datetime(2026, 5, 13, tzinfo=timezone.utc)
 
@@ -110,12 +109,12 @@ def main() -> int:
     combined = inverse_vol(weights_by, returns_by, lookback=60)
 
     # --- 3. Three test configurations -----------------------------------
-    print(f"\nBenchmarks 2018-2026:")
+    print("\nBenchmarks 2018-2026:")
     qqq = benchmark("QQQ", prices)
     spy = benchmark("SPY", prices)
     rows = [spy, qqq]
 
-    print(f"\n=== Vol-targeting sweep ===")
+    print("\n=== Vol-targeting sweep ===")
     # No vol target (baseline)
     base = run_vectorized(prices, combined, costs=costs)
     m = compute_metrics(base, periods_per_year=252)

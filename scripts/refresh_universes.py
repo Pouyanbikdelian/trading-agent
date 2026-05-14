@@ -52,8 +52,7 @@ _NDX_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
 # Wikipedia blocks requests without a UA. They ask scripts to identify
 # themselves with a project name and a way to contact you if it misbehaves.
 _USER_AGENT = (
-    "trading-agent/0.1 (universe-refresh script; "
-    "https://github.com/your-user/trading-agent)"
+    "trading-agent/0.1 (universe-refresh script; https://github.com/your-user/trading-agent)"
 )
 
 _OUT = Path(__file__).resolve().parents[1] / "config" / "universes.generated.yaml"
@@ -105,7 +104,7 @@ def main() -> int:
     try:
         sp500 = fetch_sp500()
         ndx = fetch_nasdaq100()
-    except Exception as e:   # noqa: BLE001 — surface, don't write a half-baked file
+    except Exception as e:
         print(f"refresh failed: {e!r}", file=sys.stderr)
         return 1
 

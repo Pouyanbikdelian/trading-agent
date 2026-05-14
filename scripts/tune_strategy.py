@@ -128,7 +128,7 @@ def main(argv: list[str]) -> int:
         f"({prices.index[0].date()} -> {prices.index[-1].date()})"
     )
 
-    StratCls = get_strategy(args.strategy)
+    StratCls = get_strategy(args.strategy)  # noqa: N806 — Cls is conventional for class refs
     costs = CostModel(commission_bps=1.0, slippage_bps=2.0)
     n_symbols = prices.shape[1]
 
@@ -154,7 +154,7 @@ def main(argv: list[str]) -> int:
             # train/test split with the same params. The strategy is
             # deterministic given prices, so train data only matters for
             # warm-up of indicators.
-            def make_signal_fn(p: dict) -> Any:
+            def make_signal_fn(combo_params: dict) -> Any:
                 def signal_fn(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
                     full = pd.concat(
                         [
@@ -169,11 +169,12 @@ def main(argv: list[str]) -> int:
                             test,
                         ]
                     )
+                    p = dict(combo_params)
                     if (
                         "weight_per_asset" not in p
                         and "weight_per_asset" in StratCls.Params.model_fields
                     ):
-                        p = {**p, "weight_per_asset": 1.0 / test.shape[1]}
+                        p["weight_per_asset"] = 1.0 / test.shape[1]
                     s = StratCls(**p)
                     return s.generate(full).reindex(test.index).fillna(0.0)
 
@@ -203,8 +204,8 @@ def main(argv: list[str]) -> int:
         print("no successful runs", file=sys.stderr)
         return 1
 
-    sort_key = "sharpe" if args.mode == "full" else "sharpe"
-    leaderboard = sorted(rows, key=lambda r: r[sort_key], reverse=True)
+    # In walk-forward mode you might prefer DSR-sorting, but Sharpe correlates.
+    leaderboard = sorted(rows, key=lambda r: r["sharpe"], reverse=True)
 
     print(f"\n=== leaderboard ({args.mode}) — top 15 ===")
     cols = ("cagr", "sharpe", "sortino", "max_drawdown", "calmar")
