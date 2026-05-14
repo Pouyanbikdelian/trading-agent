@@ -5,6 +5,15 @@ consume; data backfills iterate one universe at a time. Keeping this in YAML
 (rather than env or code) means non-coders can curate symbol lists without
 touching Python.
 
+Two YAML files are read and merged:
+
+* ``config/universes.yaml``           — hand-curated, version-controlled.
+* ``config/universes.generated.yaml`` — machine-managed (sp500, nasdaq100
+  index constituents written by ``scripts/refresh_universes.py``).
+
+The hand-curated file wins on key collisions, so a manual override of an
+index universe is always possible by adding it to ``universes.yaml``.
+
 Example::
 
     from trading.core.universes import load_universe
@@ -25,18 +34,36 @@ from trading.core.config import PROJECT_ROOT
 from trading.core.types import AssetClass, Instrument
 
 DEFAULT_UNIVERSES_PATH = PROJECT_ROOT / "config" / "universes.yaml"
+GENERATED_UNIVERSES_PATH = PROJECT_ROOT / "config" / "universes.generated.yaml"
+
+
+def _load_single(path: Path) -> dict[str, dict]:
+    """Read one YAML file's ``universes:`` mapping; empty dict if absent."""
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    universes = raw.get("universes")
+    if universes is None:
+        return {}
+    if not isinstance(universes, dict):
+        raise ValueError(f"{path} must contain a top-level 'universes:' mapping")
+    return universes
 
 
 @lru_cache(maxsize=4)
 def _load_yaml(path: Path) -> dict[str, dict]:
-    if not path.exists():
-        raise FileNotFoundError(f"universes file not found: {path}")
-    with path.open("r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-    universes = raw.get("universes")
-    if not isinstance(universes, dict):
-        raise ValueError(f"{path} must contain a top-level 'universes:' mapping")
-    return universes
+    """Load the primary file plus the generated file. Primary wins on collision."""
+    primary = _load_single(path)
+    generated = _load_single(GENERATED_UNIVERSES_PATH)
+    # Hand-curated entries shadow generated ones — never the other way around.
+    # If neither file declares anything, that's a hard error: tests + the
+    # runner both rely on something being there.
+    if not primary and not generated:
+        raise FileNotFoundError(
+            f"no universes defined — checked {path} and {GENERATED_UNIVERSES_PATH}"
+        )
+    return {**generated, **primary}
 
 
 def available_universes(path: Path | None = None) -> list[str]:
