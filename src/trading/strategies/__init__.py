@@ -16,6 +16,8 @@ Built-in strategies::
     kalman_pairs      Dynamic-hedge-ratio pairs trade via Kalman filter.
     pca_residual      Statistical-arbitrage on rolling-PCA residuals
                       (Avellaneda-Lee 2010).
+    top_k_momentum    Antonacci dual-momentum: rank by trailing return,
+                      gate by absolute return, inverse-vol weight top K.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from trading.strategies import pairs_kalman as _pairs_kalman  # noqa: F401
 from trading.strategies import pca_residual as _pca_residual  # noqa: F401
 from trading.strategies import risk_parity as _rp  # noqa: F401
 from trading.strategies import rsi2 as _rsi2  # noqa: F401
+from trading.strategies import top_k_momentum as _top_k_momentum  # noqa: F401
 from trading.strategies import xsec_momentum as _xsec  # noqa: F401
 from trading.strategies import zscore_meanrev as _zscore  # noqa: F401
 from trading.strategies.base import (
@@ -45,6 +48,7 @@ from trading.strategies.pairs_kalman import KalmanPairs, KalmanPairsParams
 from trading.strategies.pca_residual import PCAResidual, PCAResidualParams
 from trading.strategies.risk_parity import RiskParity, RiskParityParams
 from trading.strategies.rsi2 import Rsi2, Rsi2Params
+from trading.strategies.top_k_momentum import TopKMomentum, TopKMomentumParams
 from trading.strategies.xsec_momentum import XSecMomentum, XSecMomentumParams
 from trading.strategies.zscore_meanrev import ZScoreMeanRev, ZScoreMeanRevParams
 
@@ -66,6 +70,8 @@ __all__ = [
     "Rsi2Params",
     "Strategy",
     "StrategyParams",
+    "TopKMomentum",
+    "TopKMomentumParams",
     "XSecMomentum",
     "XSecMomentumParams",
     "ZScoreMeanRev",
