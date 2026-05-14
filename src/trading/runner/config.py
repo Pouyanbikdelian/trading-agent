@@ -17,6 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from trading.data.base import CANONICAL_FREQUENCIES, Frequency
+from trading.selection.screens import ScreenConfig
 
 CombinerName = Literal["equal_weight", "inverse_vol", "min_variance", "dsr_weighted"]
 
@@ -104,6 +105,16 @@ class RunnerConfig(BaseModel):
     # --- Sectoring (optional) -------------------------------------------
     sector_map: dict[str, str] = Field(default_factory=dict)
     """``instrument.key -> sector_name``. Empty disables sector caps."""
+
+    # --- Pre-strategy universe screens (optional) ------------------------
+    screens: ScreenConfig | None = None
+    """Liquidity / quality / sector-momentum filters applied to the universe
+    before strategies see it. None = no filtering."""
+
+    fundamentals_path: str | None = None
+    """Path to a Parquet of cached fundamentals (one row per symbol).
+    Used by the quality + sector-momentum screens. None = no fundamentals,
+    those screens are silently skipped."""
 
     # ---- validation -----------------------------------------------------
 

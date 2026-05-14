@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
@@ -259,6 +259,12 @@ class Cycle:
         # 1. Load instruments for the universe.
         instruments = load_universe(cfg.universe)
 
+        # 1b. Pre-strategy screens (liquidity / quality / sector momentum).
+        # Cuts the universe before strategies and the price load do the
+        # heavy work, so the screen is essentially free.
+        if cfg.screens is not None:
+            instruments = self._apply_screens(instruments, cfg)
+
         # 2. Build wide-format price frame.
         prices = self._load_prices(instruments, ts_start)
         if prices.empty or len(prices) < 2:
@@ -397,6 +403,94 @@ class Cycle:
             return pd.DataFrame()
         wide = pd.DataFrame(series).sort_index().dropna(how="any")
         return wide
+
+    def _apply_screens(
+        self,
+        instruments: list[Instrument],
+        cfg: RunnerConfig,
+    ) -> list[Instrument]:
+        """Filter the universe with the configured screens. Each screen reads
+        only what it needs from the cache; missing data silently disables a
+        screen rather than crashing the cycle. Logs the reduction so the
+        operator can see how aggressive the filtering is in practice."""
+        from trading.selection.screens import apply_screens
+
+        original = len(instruments)
+        sc = cfg.screens
+        if sc is None:
+            return instruments
+
+        # Build closes + volumes from cached bars. Reads each Parquet once.
+        closes: dict[str, pd.Series] = {}
+        volumes: dict[str, pd.Series] = {}
+        freq: Frequency = cfg.freq  # type: ignore[assignment]
+        for ins in instruments:
+            df = self.cache.read(ins, freq)
+            if df.empty:
+                continue
+            if "close" in df.columns:
+                closes[ins.symbol] = df["close"]
+            if "volume" in df.columns:
+                volumes[ins.symbol] = df["volume"]
+        closes_df = pd.DataFrame(closes).sort_index() if closes else pd.DataFrame()
+        volumes_df = pd.DataFrame(volumes).sort_index() if volumes else pd.DataFrame()
+
+        # Optional fundamentals + sector prices.
+        fundamentals = None
+        if cfg.fundamentals_path:
+            from trading.data.fundamentals_source import read_fundamentals_cache
+
+            fundamentals = read_fundamentals_cache(Path(cfg.fundamentals_path))
+
+        sector_prices = None
+        if sc.top_n_sectors is not None:
+            sector_prices = self._load_sector_prices(freq)
+
+        filtered = apply_screens(
+            instruments,
+            sc,
+            closes=closes_df if not closes_df.empty else None,
+            volumes=volumes_df if not volumes_df.empty else None,
+            fundamentals=fundamentals,
+            sector_prices=sector_prices,
+        )
+
+        logger.bind(component="cycle").info(
+            f"screens reduced universe: {original} -> {len(filtered)} instruments"
+        )
+        return filtered
+
+    # SPDR sector ETFs keyed by yfinance's sector strings — used by the
+    # sector-momentum screen when the user has no custom sector_etf_map.
+    _DEFAULT_SECTOR_ETFS: ClassVar[dict[str, str]] = {
+        "Technology": "XLK",
+        "Financial Services": "XLF",
+        "Energy": "XLE",
+        "Healthcare": "XLV",
+        "Consumer Cyclical": "XLY",
+        "Consumer Defensive": "XLP",
+        "Industrials": "XLI",
+        "Utilities": "XLU",
+        "Basic Materials": "XLB",
+        "Real Estate": "XLRE",
+        "Communication Services": "XLC",
+    }
+
+    def _load_sector_prices(self, freq: Frequency) -> pd.DataFrame:
+        """Read sector-ETF closes from the cache and re-key by sector name
+        (not ETF symbol) so the screen can match against ``Fundamentals.sector``."""
+        from trading.core.types import AssetClass, Instrument
+
+        series: dict[str, pd.Series] = {}
+        for sector_name, etf in self._DEFAULT_SECTOR_ETFS.items():
+            ins = Instrument(symbol=etf, asset_class=AssetClass.ETF)
+            df = self.cache.read(ins, freq)
+            if df.empty or "close" not in df.columns:
+                continue
+            series[sector_name] = df["close"]
+        if not series:
+            return pd.DataFrame()
+        return pd.DataFrame(series).sort_index().dropna(how="all")
 
     def _fetch_account(self, ts: datetime) -> AccountSnapshot:
         """Get the broker's account view. For brokers that need a step()
