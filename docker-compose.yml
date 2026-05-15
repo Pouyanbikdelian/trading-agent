@@ -75,6 +75,24 @@ services:
     networks:
       - trading
 
+  # Telegram command bot. Long-poll only — no inbound ports. Reads/writes
+  # the same state/ volume as the runner so /halt and /resume are honoured
+  # by the next cycle. Optional: omit if TELEGRAM_BOT_TOKEN is unset.
+  bot:
+    image: trading-agent:latest
+    container_name: trader-bot
+    restart: unless-stopped
+    depends_on:
+      - trader
+    env_file:
+      - .env
+    volumes:
+      - state:/app/state
+      - logs:/app/logs
+    command: ["bot", "run"]
+    networks:
+      - trading
+
   # Live profile flips the command. Activate with `--profile live`.
   trader-live:
     profiles: ["live"]
