@@ -221,6 +221,47 @@ def gather_daily_report(
     )
 
 
+def gather_weekly_report(
+    *,
+    runner_db: Path | None = None,
+    orders_db: Path | None = None,
+    halt_state_path: Path | None = None,
+    heartbeat_path: Path | None = None,
+    as_of: datetime | None = None,
+    fetch_vix: bool = True,
+) -> DailyReport:
+    r"""Same payload as the daily report but with a 7-day trade window.
+
+    The DailyReport dataclass is reused — only the 'last_cycle_trades'
+    window differs (7 days vs 1). The renderer can use the WTD field to
+    pick the right headline number.
+    """
+    as_of = as_of or datetime.now(tz=timezone.utc)
+    report = gather_daily_report(
+        runner_db=runner_db,
+        orders_db=orders_db,
+        halt_state_path=halt_state_path,
+        heartbeat_path=heartbeat_path,
+        as_of=as_of,
+        fetch_vix=fetch_vix,
+    )
+    orders_db = orders_db or (settings.state_dir / "orders.db")
+    since = as_of - timedelta(days=7)
+    fills = OrderStore(orders_db).load_fills(since=since)
+    report.last_cycle_trades = [
+        {
+            "ts": f.ts,
+            "order_id": f.order_id,
+            "quantity": f.quantity,
+            "price": f.price,
+            "commission": f.commission,
+            "venue": f.venue,
+        }
+        for f in fills
+    ]
+    return report
+
+
 def _pnl_over(curve: pd.Series, *, days: int) -> float:
     """Dollar PnL over the last ``days`` business days from the curve."""
     if len(curve) < days + 1:

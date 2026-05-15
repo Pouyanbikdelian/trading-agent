@@ -19,6 +19,7 @@ from trading.reporting import (
     DailyReport,
     Headline,
     gather_daily_report,
+    gather_weekly_report,
     render_markdown,
     summarise,
 )
@@ -85,6 +86,35 @@ def test_gather_daily_report_pulls_from_persisted_state(tmp_path: Path) -> None:
     assert report.positions["AAPL"]["quantity"] == 10.0
     assert len(report.recent_cycles) == 0  # we didn't save any cycles
     assert report.halted is False
+
+
+def test_gather_weekly_report_widens_trade_window(tmp_path: Path) -> None:
+    runner_db, orders_db = _prime_state(tmp_path)
+    halt_path = tmp_path / "halt.json"
+    hb_path = tmp_path / "heartbeat.json"
+    halt_path.write_text('{"halted": false, "reason": ""}')
+
+    # The seeded fill is at 2026-05-10. The weekly window is 7 days, so
+    # an as_of of 2026-05-12 includes it; an as_of of 2026-05-20 does not.
+    report_recent = gather_weekly_report(
+        runner_db=runner_db,
+        orders_db=orders_db,
+        halt_state_path=halt_path,
+        heartbeat_path=hb_path,
+        fetch_vix=False,
+        as_of=datetime(2026, 5, 12, tzinfo=timezone.utc),
+    )
+    assert len(report_recent.last_cycle_trades) == 1
+
+    report_old = gather_weekly_report(
+        runner_db=runner_db,
+        orders_db=orders_db,
+        halt_state_path=halt_path,
+        heartbeat_path=hb_path,
+        fetch_vix=False,
+        as_of=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    assert len(report_old.last_cycle_trades) == 0
 
 
 def test_gather_daily_report_empty_state(tmp_path: Path) -> None:

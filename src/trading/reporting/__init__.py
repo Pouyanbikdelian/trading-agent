@@ -10,7 +10,11 @@ Three stages, each independently testable:
 
 from __future__ import annotations
 
-from trading.reporting.daily import DailyReport, gather_daily_report
+from trading.reporting.daily import (
+    DailyReport,
+    gather_daily_report,
+    gather_weekly_report,
+)
 from trading.reporting.executive_summary import summarise
 from trading.reporting.news import Headline, fetch_news_for_symbols, fetch_rss
 from trading.reporting.render import render_markdown
@@ -21,6 +25,7 @@ __all__ = [
     "fetch_news_for_symbols",
     "fetch_rss",
     "gather_daily_report",
+    "gather_weekly_report",
     "render_markdown",
     "summarise",
 ]

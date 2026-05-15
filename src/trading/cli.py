@@ -558,5 +558,44 @@ def _report_daily(
         console.print(md)
 
 
+@report_app.command("weekly")
+def _report_weekly(
+    output: str | None = typer.Option(
+        None, "--output", "-o", help="Write the Markdown report to this file."
+    ),
+    no_news: bool = typer.Option(False, "--no-news", help="Skip news fetching."),
+    no_summary: bool = typer.Option(False, "--no-summary", help="Skip the LLM executive summary."),
+    no_vix: bool = typer.Option(False, "--no-vix", help="Skip the VIX regime fetch."),
+) -> None:
+    """Generate the weekly report.
+
+    Same content as the daily report but the trade window is widened to
+    7 days and more news per symbol is included — better suited to a
+    slow-rebalance strategy where daily reports are mostly noise.
+    """
+    from pathlib import Path
+
+    from trading.reporting import (
+        fetch_news_for_symbols,
+        gather_weekly_report,
+        render_markdown,
+        summarise,
+    )
+
+    report = gather_weekly_report(fetch_vix=not no_vix)
+    if not no_news and report.positions:
+        report.news_by_symbol = fetch_news_for_symbols(
+            list(report.positions.keys()),
+            max_per_symbol=5,
+        )
+    summary = None if no_summary else summarise(report)
+    md = render_markdown(report, executive_summary=summary)
+    if output:
+        Path(output).write_text(md)
+        console.print(f"wrote {output}")
+    else:
+        console.print(md)
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()

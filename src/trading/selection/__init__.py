@@ -18,6 +18,8 @@ from trading.selection.combine import (
     min_variance,
     sharpe_weighted,
 )
+from trading.selection.dip_buy_overlay import dip_buy
+from trading.selection.hedge_overlay import beta_hedge
 from trading.selection.overlay import vol_target
 from trading.selection.rank import rank_strategies
 from trading.selection.scores import (
@@ -42,7 +44,9 @@ __all__ = [
     "ScreenConfig",
     "annualize_sharpe",
     "apply_screens",
+    "beta_hedge",
     "deflated_sharpe",
+    "dip_buy",
     "dsr_weighted",
     "equal_weight",
     "expected_max_sharpe",

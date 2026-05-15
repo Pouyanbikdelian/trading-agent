@@ -25,6 +25,7 @@ from __future__ import annotations
 # Side-effect imports: each module registers its class on import.
 from trading.strategies import donchian as _donchian  # noqa: F401
 from trading.strategies import ema_cross as _ema_cross  # noqa: F401
+from trading.strategies import long_term_momentum as _long_term_momentum  # noqa: F401
 from trading.strategies import pairs as _pairs  # noqa: F401
 from trading.strategies import pairs_kalman as _pairs_kalman  # noqa: F401
 from trading.strategies import pca_residual as _pca_residual  # noqa: F401
@@ -43,6 +44,10 @@ from trading.strategies.base import (
 )
 from trading.strategies.donchian import Donchian, DonchianParams
 from trading.strategies.ema_cross import EmaCross, EmaCrossParams
+from trading.strategies.long_term_momentum import (
+    LongTermMomentum,
+    LongTermMomentumParams,
+)
 from trading.strategies.pairs import Pairs, PairsParams
 from trading.strategies.pairs_kalman import KalmanPairs, KalmanPairsParams
 from trading.strategies.pca_residual import PCAResidual, PCAResidualParams
@@ -60,6 +65,8 @@ __all__ = [
     "EmaCrossParams",
     "KalmanPairs",
     "KalmanPairsParams",
+    "LongTermMomentum",
+    "LongTermMomentumParams",
     "PCAResidual",
     "PCAResidualParams",
     "Pairs",
