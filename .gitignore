@@ -26,6 +26,19 @@ venv/
 secrets/
 *.pem
 *.key
+# SSH private keys (any name) — never commit
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
+*.pub
+id_*
+Downloads
+Downloads.pub
+*_rsa
+*_ed25519
+*_ecdsa
+*_dsa
 
 # IBKR / broker state
 ib_settings/

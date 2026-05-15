@@ -22,6 +22,7 @@ from trading.selection.dip_buy_overlay import dip_buy
 from trading.selection.hedge_overlay import beta_hedge
 from trading.selection.overlay import vol_target
 from trading.selection.rank import rank_strategies
+from trading.selection.regime_derisk import regime_derisk
 from trading.selection.scores import (
     annualize_sharpe,
     deflated_sharpe,
@@ -58,6 +59,7 @@ __all__ = [
     "probabilistic_sharpe",
     "quality_screen",
     "rank_strategies",
+    "regime_derisk",
     "sector_momentum_screen",
     "sharpe_weighted",
     "vol_target",

@@ -597,5 +597,154 @@ def _report_weekly(
         console.print(md)
 
 
+# ---------------------------------------------------------------------------
+# Telegram bot
+# ---------------------------------------------------------------------------
+
+
+bot_app = typer.Typer(help="Telegram command bot (long-polling).")
+app.add_typer(bot_app, name="bot")
+
+
+@bot_app.command("run")
+def _bot_run() -> None:
+    """Run the Telegram bot in the foreground.
+
+    Requires ``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID`` in ``.env``.
+    Designed to be started under systemd alongside the trading runner.
+    """
+    import asyncio
+
+    from trading.bot import run_bot
+
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        console.print("[yellow]bot interrupted[/yellow]")
+
+
+@bot_app.command("test")
+def _bot_test(
+    message: str = typer.Argument("Hello from trading-agent.", help="Test message body."),
+) -> None:
+    """Send a one-shot test message via the configured bot.
+
+    Verifies that the token and chat ID in ``.env`` work end-to-end.
+    """
+    from trading.bot import send_message_sync
+
+    ok = send_message_sync(message)
+    if ok:
+        console.print("[green]sent[/green]")
+    else:
+        console.print("[red]failed[/red] — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env")
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# Hard kill — operator-facing halt / resume
+# ---------------------------------------------------------------------------
+
+
+@app.command("halt")
+def _halt(
+    reason: str = typer.Option(
+        "manual", "--reason", "-r", help="Free-text reason recorded in halt.json."
+    ),
+    flatten: bool = typer.Option(
+        True,
+        "--flatten/--no-flatten",
+        help="Also write a flatten flag so the next cycle force-closes positions.",
+    ),
+) -> None:
+    """Force the runner to halt on its next cycle.
+
+    Writes ``state/halt.json`` atomically — the risk manager reads this
+    file on every cycle and refuses to act when halted. Safe to call
+    while the runner is alive; safe to call when it isn't.
+    """
+    import json
+    import tempfile
+    from datetime import datetime, timezone
+
+    state_dir = settings.state_dir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    halt_path = state_dir / "halt.json"
+
+    payload = {
+        "halted": True,
+        "reason": reason,
+        "halted_at": datetime.now(tz=timezone.utc).isoformat(),
+        "flatten_on_next_cycle": flatten,
+    }
+    # Atomic write — partial files would be misread by the runner.
+    fd, tmp = tempfile.mkstemp(dir=state_dir, prefix="halt.", suffix=".json")
+    try:
+        with open(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+        import os
+
+        os.replace(tmp, halt_path)
+    except Exception:
+        import os
+
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+    console.print(f"[red bold]HALTED[/red bold] — reason: {reason}")
+    console.print(f"  wrote {halt_path}")
+    if flatten:
+        console.print("  next cycle will force-flatten all positions")
+    logger.bind(reason=reason).warning("operator halted runner")
+
+
+@app.command("resume")
+def _resume(
+    force: bool = typer.Option(
+        False, "--force", help="Resume even if no halt is currently set (no-op)."
+    ),
+) -> None:
+    """Clear the halt flag. Runner resumes on the next scheduled cycle.
+
+    Use only after you've understood *why* the halt fired. If the halt
+    came from the risk manager itself (daily-loss cap, drawdown cap),
+    clear the cause first — otherwise the same cycle will re-halt.
+    """
+    import json
+    import tempfile
+
+    state_dir = settings.state_dir
+    halt_path = state_dir / "halt.json"
+    if not halt_path.exists() and not force:
+        console.print("[yellow]no halt state file — nothing to do[/yellow]")
+        return
+    # Fall through and write a clean "not halted" file anyway.
+
+    payload = {
+        "halted": False,
+        "reason": "",
+        "halted_at": None,
+        "flatten_on_next_cycle": False,
+    }
+    state_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=state_dir, prefix="halt.", suffix=".json")
+    try:
+        with open(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+        import os
+
+        os.replace(tmp, halt_path)
+    except Exception:
+        import os
+
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+    console.print("[green]RESUMED[/green] — halt cleared")
+    logger.info("operator resumed runner")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
