@@ -508,5 +508,55 @@ def _live_run(
         console.print("[yellow]interrupted[/yellow]")
 
 
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+
+report_app = typer.Typer(help="Daily / mark-to-market reports.")
+app.add_typer(report_app, name="report")
+
+
+@report_app.command("daily")
+def _report_daily(
+    output: str | None = typer.Option(
+        None, "--output", "-o", help="Write the Markdown report to this file."
+    ),
+    no_news: bool = typer.Option(False, "--no-news", help="Skip news fetching."),
+    no_summary: bool = typer.Option(False, "--no-summary", help="Skip the LLM executive summary."),
+    no_vix: bool = typer.Option(False, "--no-vix", help="Skip the VIX regime fetch."),
+) -> None:
+    """Generate the daily report.
+
+    Reads from the runner / order stores under settings.state_dir,
+    optionally pulls news for held symbols, generates an executive
+    summary via the Anthropic API if ANTHROPIC_API_KEY is set (otherwise
+    falls back to a deterministic bullet-point summary), and writes
+    Markdown to stdout or ``--output``.
+    """
+    from pathlib import Path
+
+    from trading.reporting import (
+        fetch_news_for_symbols,
+        gather_daily_report,
+        render_markdown,
+        summarise,
+    )
+
+    report = gather_daily_report(fetch_vix=not no_vix)
+    if not no_news and report.positions:
+        report.news_by_symbol = fetch_news_for_symbols(
+            list(report.positions.keys()),
+            max_per_symbol=3,
+        )
+    summary = None if no_summary else summarise(report)
+    md = render_markdown(report, executive_summary=summary)
+    if output:
+        Path(output).write_text(md)
+        console.print(f"wrote {output}")
+    else:
+        console.print(md)
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()

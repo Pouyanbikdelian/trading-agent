@@ -1,0 +1,38 @@
+# Core-satellite portfolio configuration.
+#
+# Copy to config/portfolio.yaml and edit. The runner loads this if the
+# RunnerConfig has core_spec_path set; otherwise the whole book is
+# treated as one satellite (the legacy behaviour).
+#
+# Total equity is split into two sleeves:
+#   * the CORE is the static long-term sleeve below. The algorithm
+#     never trades into or out of it; quarterly drift correction only.
+#   * the SATELLITE is whatever the active strategy decides, scaled
+#     down to (1 - core_allocation) of total equity.
+#
+# Theme weights are expressed as fractions of the CORE sleeve. They
+# must sum to <= 1.0; any unused fraction stays in cash.
+
+core_allocation: 0.50         # 50% of equity locked into the core sleeve
+core_rebalance_days: 63       # quarterly drift correction
+
+core_holdings:
+  nuclear:
+    weight: 0.30              # 30% of core (= 15% of total equity)
+    symbols: [URA, CCJ, NLR, UUUU]
+
+  utilities:
+    weight: 0.20              # 20% of core (= 10% of total equity)
+    symbols: [XLU, NEE, DUK, SO]
+
+  defense_aerospace:
+    weight: 0.20
+    symbols: [ITA, LMT, RTX, NOC]
+
+  precious_metals:
+    weight: 0.15
+    symbols: [GLD, GDX]
+
+  long_treasuries:
+    weight: 0.15
+    symbols: [TLT, IEF]
