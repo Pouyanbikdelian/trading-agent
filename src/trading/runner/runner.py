@@ -217,6 +217,15 @@ class Runner:
                 id="risk_advisor",
                 replace_existing=True,
             )
+            # HMM regime advisor: once daily after US close (≈ 22:00 UTC).
+            # Slow signal — daily granularity is enough. Complements the
+            # hourly SMA/VIX advisor without spamming.
+            self._scheduler.add_job(
+                self._run_hmm_advisor_async,
+                CronTrigger(hour=22, minute=15, timezone="UTC"),
+                id="hmm_advisor",
+                replace_existing=True,
+            )
 
         self._scheduler.start()
         self.alerts.info(
@@ -246,6 +255,29 @@ class Runner:
             logger.bind(component="runner").error(f"cycle error: {report.error}")
         elif report.status == "halted":
             logger.bind(component="runner").warning("cycle halted by risk manager")
+
+    async def _run_hmm_advisor_async(self) -> None:
+        """Daily: refit a 3-state Gaussian HMM on the last ~5 years of
+        SPY log-returns and push a Telegram alert when the labeled
+        regime (bear/neutral/bull) changes. Advisory only — never writes
+        ``mode.json``. Best-effort: any failure is logged and swallowed.
+        """
+        try:
+            spy, _vix = await asyncio.to_thread(_fetch_spy_vix, 1300)
+            if spy is None or len(spy) < 300:
+                logger.bind(component="hmm_advisor").info(
+                    "HMM advisor skipped — not enough SPY history yet"
+                )
+                return
+            import numpy as np
+
+            log_ret = np.log(spy).diff().dropna()
+            log_ret.name = "SPY"
+            from trading.runtime.hmm_advisor import poll_and_alert
+
+            await poll_and_alert(spy_returns=log_ret)
+        except Exception:
+            logger.bind(component="hmm_advisor").exception("HMM advisor failed")
 
     async def _run_advisor_async(self) -> None:
         """Hourly: poll SPY+VIX, push Telegram alert on new risk events.

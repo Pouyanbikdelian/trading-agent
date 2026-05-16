@@ -642,6 +642,67 @@ def _bot_test(
 
 
 # ---------------------------------------------------------------------------
+# Advisor — manual one-shot regime checks
+# ---------------------------------------------------------------------------
+
+
+advisor_app = typer.Typer(help="Manually run the regime advisors (HMM / SMA).")
+app.add_typer(advisor_app, name="advisor")
+
+
+@advisor_app.command("hmm")
+def _advisor_hmm(
+    lookback_days: int = typer.Option(
+        1300, "--lookback", help="Days of SPY history to fit the HMM on (~5 years)."
+    ),
+    no_send: bool = typer.Option(
+        False, "--no-send", help="Compute the regime but don't send a Telegram alert."
+    ),
+) -> None:
+    """Fit the HMM on recent SPY history and print the current regime.
+
+    Will send a Telegram alert IF the labeled regime has changed since
+    the last poll (unless --no-send). Always prints the posterior
+    probabilities to the console for inspection.
+    """
+    import asyncio
+
+    import numpy as np
+    import yfinance as yf
+
+    raw = yf.download("SPY", period=f"{lookback_days}d", auto_adjust=True, progress=False)[
+        "Close"
+    ].dropna()
+    if isinstance(raw, pd.DataFrame):
+        raw = raw.iloc[:, 0]
+    if raw.index.tz is None:
+        raw.index = raw.index.tz_localize("UTC")
+    log_ret = np.log(raw).diff().dropna()
+    log_ret.name = "SPY"
+
+    from trading.runtime.hmm_advisor import fit_and_classify, poll_and_alert
+
+    _model, snap = fit_and_classify(log_ret)
+
+    t = Table(title="HMM regime snapshot", show_header=False, box=None)
+    t.add_column("key", style="cyan", no_wrap=True)
+    t.add_column("value")
+    t.add_row("label", f"[bold]{snap.label}[/bold]")
+    t.add_row("P(bear)", f"{snap.p_bear:.1%}")
+    t.add_row("P(neutral)", f"{snap.p_neutral:.1%}")
+    t.add_row("P(bull)", f"{snap.p_bull:.1%}")
+    t.add_row("fit on", f"{len(log_ret)} bars (last: {log_ret.index[-1].date()})")
+    console.print(t)
+
+    if not no_send:
+        result = asyncio.run(poll_and_alert(spy_returns=log_ret))
+        if result.get("regime_changed"):
+            console.print("[green]regime change detected — Telegram alert sent[/green]")
+        else:
+            console.print("[yellow]regime unchanged — no alert sent[/yellow]")
+
+
+# ---------------------------------------------------------------------------
 # Mode — operator-facing portfolio style (bull / neutral / defense / bear)
 # ---------------------------------------------------------------------------
 
