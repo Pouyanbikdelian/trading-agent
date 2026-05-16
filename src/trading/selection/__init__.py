@@ -19,6 +19,7 @@ from trading.selection.combine import (
     sharpe_weighted,
 )
 from trading.selection.dip_buy_overlay import dip_buy
+from trading.selection.ewma_vol_target import ewma_vol_target
 from trading.selection.hedge_overlay import beta_hedge
 from trading.selection.mode_overlay import (
     DEFAULT_DEFENSIVE_SLEEVE,
@@ -60,6 +61,7 @@ __all__ = [
     "dsr_weighted",
     "equal_weight",
     "estimate_mode_impact",
+    "ewma_vol_target",
     "expected_max_sharpe",
     "inverse_vol",
     "liquidity_screen",
