@@ -642,6 +642,68 @@ def _bot_test(
 
 
 # ---------------------------------------------------------------------------
+# Mode — operator-facing portfolio style (bull / neutral / defense / bear)
+# ---------------------------------------------------------------------------
+
+
+mode_app = typer.Typer(help="Operator-set portfolio mode (bull/neutral/defense/bear/flatten).")
+app.add_typer(mode_app, name="mode")
+
+
+@mode_app.command("show")
+def _mode_show() -> None:
+    """Print the current operator mode and when it was set."""
+    from trading.runtime.mode import read_mode
+
+    state = read_mode(settings.state_dir / "mode.json")
+    t = Table(title="Operator mode", show_header=False, box=None)
+    t.add_column("key", style="cyan", no_wrap=True)
+    t.add_column("value")
+    t.add_row("mode", f"[bold]{state.mode.value}[/bold]")
+    t.add_row("set at", state.set_at or "(default)")
+    t.add_row("set by", state.set_by)
+    t.add_row("reason", state.reason or "(none)")
+    console.print(t)
+
+
+@mode_app.command("set")
+def _mode_set(
+    mode_name: str = typer.Argument(..., help="One of: bull, neutral, defense, bear, flatten."),
+    reason: str = typer.Option("", "--reason", "-r", help="Free-text reason."),
+    now: bool = typer.Option(
+        True,
+        "--now/--schedule",
+        help="Fire an off-cycle rebalance now (default) or wait for the next cron.",
+    ),
+) -> None:
+    """Set the operator mode immediately.
+
+    Without ``--schedule``, also drops ``state/trigger_now.flag`` so the
+    runner fires an off-cycle rebalance within ~30 seconds.
+    """
+    import json as _json
+
+    from trading.runtime.mode import Mode, write_mode
+
+    try:
+        target = Mode.parse(mode_name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+
+    state_dir = settings.state_dir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state = write_mode(state_dir / "mode.json", target, set_by="cli", reason=reason or "")
+    console.print(f"[green]mode set to[/green] [bold]{state.mode.value}[/bold]")
+    if now:
+        (state_dir / "trigger_now.flag").write_text(
+            _json.dumps({"reason": f"cli mode set to {state.mode.value}", "ts": state.set_at})
+        )
+        console.print(
+            "[yellow]off-cycle rebalance queued[/yellow] (runner picks it up within ~30s)"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Hard kill — operator-facing halt / resume
 # ---------------------------------------------------------------------------
 

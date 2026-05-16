@@ -308,6 +308,11 @@ class Cycle:
                 max_leverage=cfg.max_leverage,
             )
 
+        # 6b. Operator mode overlay. Reads state/mode.json (default NEUTRAL,
+        #     pass-through). Lets the operator de-risk via /mode defense
+        #     etc. without touching the strategy code.
+        weights = self._apply_operator_mode(weights, prices)
+
         # 7. Build the Signal from the last row of the weights frame.
         signal = self._weights_to_signal(weights, instruments, ts_start, cfg=cfg)
         last_prices = self._last_prices(prices, instruments)
@@ -543,6 +548,31 @@ class Cycle:
             return AccountSnapshot(
                 ts=ts, cash=self.config.initial_cash, equity=self.config.initial_cash
             )
+
+    def _apply_operator_mode(self, weights: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+        """Apply the operator-set mode from ``state/mode.json``.
+
+        Default mode is NEUTRAL (pass-through) — this only reshapes
+        weights when the operator has set DEFENSE / BEAR / FLATTEN via
+        the Telegram bot or CLI.
+        """
+        try:
+            from trading.core.config import settings
+            from trading.runtime.mode import Mode, read_mode
+            from trading.selection.mode_overlay import apply_mode
+        except ImportError:
+            return weights  # graceful: if anything is wrong with imports, skip
+
+        mode_path = settings.state_dir / "mode.json"
+        state = read_mode(mode_path)
+        if state.mode in (Mode.BULL, Mode.NEUTRAL):
+            return weights  # fast path — no reshape
+        adjusted = apply_mode(weights, prices, state.mode)
+        self.alerts.info(
+            f"mode active: {state.mode.value} "
+            f"(set by {state.set_by} at {state.set_at[:19] if state.set_at else '?'})"
+        )
+        return adjusted
 
     def _generate_combined_weights(
         self,

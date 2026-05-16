@@ -20,6 +20,12 @@ from trading.selection.combine import (
 )
 from trading.selection.dip_buy_overlay import dip_buy
 from trading.selection.hedge_overlay import beta_hedge
+from trading.selection.mode_overlay import (
+    DEFAULT_DEFENSIVE_SLEEVE,
+    ModePolicy,
+    apply_mode,
+    estimate_mode_impact,
+)
 from trading.selection.overlay import vol_target
 from trading.selection.rank import rank_strategies
 from trading.selection.regime_derisk import regime_derisk
@@ -41,15 +47,19 @@ from trading.selection.screens import (
 )
 
 __all__ = [
+    "DEFAULT_DEFENSIVE_SLEEVE",
     "Fundamentals",
+    "ModePolicy",
     "ScreenConfig",
     "annualize_sharpe",
+    "apply_mode",
     "apply_screens",
     "beta_hedge",
     "deflated_sharpe",
     "dip_buy",
     "dsr_weighted",
     "equal_weight",
+    "estimate_mode_impact",
     "expected_max_sharpe",
     "inverse_vol",
     "liquidity_screen",

@@ -60,6 +60,42 @@ def _default_source_factory(instrument: Instrument) -> DataSource:
     raise ValueError(f"no DataSource configured for asset_class={cls.value}")
 
 
+def _fetch_spy_vix(lookback_days: int = 260) -> tuple[Any, Any]:
+    """Pull SPY + ^VIX daily series from yfinance for the advisor.
+
+    Lightweight — only two symbols. Returns (spy_series, vix_series).
+    Either may be empty/None if the fetch failed; the caller treats
+    failure as "no data, skip this poll."
+    """
+    try:
+        import pandas as pd
+        import yfinance as yf
+    except Exception:
+        return None, None
+    try:
+        raw = yf.download(
+            "SPY ^VIX",
+            period=f"{lookback_days}d",
+            auto_adjust=True,
+            progress=False,
+            threads=False,
+            group_by="ticker",
+        )
+        if isinstance(raw.columns, pd.MultiIndex):
+            spy = raw["SPY"]["Close"].dropna()
+            vix = raw["^VIX"]["Close"].dropna()
+        else:
+            spy = raw["Close"].dropna()
+            vix = None
+        if spy.index.tz is None:
+            spy.index = spy.index.tz_localize("UTC")
+        if vix is not None and vix.index.tz is None:
+            vix.index = vix.index.tz_localize("UTC")
+        return spy.sort_index(), (vix.sort_index() if vix is not None else None)
+    except Exception:
+        return None, None
+
+
 class Runner:
     """Coordinates one Cycle on an APScheduler crontab. Holds no state of
     its own — restart safety comes from the SQLite stores and halt file."""
@@ -158,6 +194,30 @@ class Runner:
             timezone=self.config.schedule_tz,
         )
         self._scheduler.add_job(self._run_cycle_async, trigger, id="cycle", replace_existing=True)
+
+        # Off-cycle trigger watcher: polls state/trigger_now.flag every 30s
+        # and fires a cycle when the operator (via /mode confirm or
+        # `trading mode set X --now`) drops the flag.
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        self._scheduler.add_job(
+            self._check_trigger_flag,
+            IntervalTrigger(seconds=30),
+            id="trigger_watcher",
+            replace_existing=True,
+        )
+
+        # Advisory risk monitor: hourly poll of SPY+VIX, push a Telegram
+        # alert on new triggers. NEVER auto-applies a mode change — only
+        # informs the operator. Disabled if Telegram isn't configured.
+        if settings.telegram_bot_token and settings.telegram_chat_id:
+            self._scheduler.add_job(
+                self._run_advisor_async,
+                IntervalTrigger(hours=1),
+                id="risk_advisor",
+                replace_existing=True,
+            )
+
         self._scheduler.start()
         self.alerts.info(
             f"runner started — universe={self.config.universe} "
@@ -186,6 +246,43 @@ class Runner:
             logger.bind(component="runner").error(f"cycle error: {report.error}")
         elif report.status == "halted":
             logger.bind(component="runner").warning("cycle halted by risk manager")
+
+    async def _run_advisor_async(self) -> None:
+        """Hourly: poll SPY+VIX, push Telegram alert on new risk events.
+
+        Never modifies mode.json. Pure advisory. Failure is logged and
+        swallowed — a flaky network mustn't break the runner.
+        """
+        try:
+            spy, vix = await asyncio.to_thread(_fetch_spy_vix)
+            if spy is None or spy.empty:
+                return
+            from trading.runtime.advisor import poll_and_alert
+
+            await poll_and_alert(spy=spy, vix=vix)
+        except Exception:
+            logger.bind(component="advisor").exception("advisor poll failed")
+
+    async def _check_trigger_flag(self) -> None:
+        """Off-cycle trigger watcher.
+
+        When the bot writes ``state/trigger_now.flag`` (typically after
+        a mode-change confirmation), we fire one cycle immediately,
+        outside the cron schedule. The flag is consumed (deleted) before
+        we run so a slow cycle doesn't get re-triggered.
+        """
+        from trading.core.config import settings
+
+        flag_path = settings.state_dir / "trigger_now.flag"
+        if not flag_path.exists():
+            return
+        try:
+            payload = flag_path.read_text()
+            flag_path.unlink()  # consume first — re-entry safe
+            logger.bind(component="runner").info(f"off-cycle trigger fired: {payload[:120]}")
+            await self._run_cycle_async()
+        except Exception:
+            logger.bind(component="runner").exception("off-cycle trigger failed")
 
     async def _shutdown(self) -> None:
         if self._scheduler is not None:

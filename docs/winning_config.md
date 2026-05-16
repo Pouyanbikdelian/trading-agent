@@ -6,15 +6,36 @@ operator path from local laptop to a live VPS.
 
 ## The strategy
 
-`top_k_momentum` on the S&P 500, k=15, monthly-formation / quarterly-
-rebalance, dual-momentum gate (drop names with negative 12-1 return
-to cash). See [`scripts/find_best_strategy.py`](../scripts/find_best_strategy.py)
-for the search that picked it; [`scripts/benchmark_no_leverage.py`](../scripts/benchmark_no_leverage.py)
-for a head-to-head against SPY and QQQ.
+`top_k_momentum` on the S&P 500. Production defaults (updated 2026-05):
 
-Backtest 2018-2026 (in-sample): CAGR 32.50%, Sharpe 1.12, max
-drawdown -35.2%.  Walk-forward OOS: CAGR 33.78%.  $100k → $1.04M vs
-QQQ's $440k, same max drawdown.
+| Param | Value | Why |
+|---|---|---|
+| `k` | **8** | Tighter basket = higher Sharpe across 2015-2020, 2020-now, and 2015-now. ~$5M more vs k=15 on $100k over 11y. |
+| `lookback` | 126 (~6 months) | Faster than 252; slower than 63. Beat both in cross-window tests. |
+| `skip` | 21 (~1 month) | Classic 6-1 skip; avoids short-term reversal. |
+| `rebalance` | 63 (~quarterly) | Cuts turnover; keeps long-term capital-gains treatment. |
+| `max_per_position` | 0.20 | Hard cap on any single name. |
+| `target_gross` | 1.0 | No leverage. |
+| `abs_momentum_threshold` | 0.0 | Antonacci dual-momentum gate — drop negative-momentum names to cash. |
+
+See [`scripts/find_best_strategy.py`](../scripts/find_best_strategy.py)
+for the search that picked the original variant; the **k=8 upgrade**
+came from a second-round hypertune (offline, not committed) where we
+swept k ∈ {8, 10, 12, 15, 18, 20, 25} across 3 windows. k=8 had the
+highest mean Sharpe in every window — not curve-fit to one regime.
+
+Backtest 2015-now (~11 years, real costs 10 bps round-trip):
+
+| | CAGR | Sharpe | Max DD | $100k → |
+|---|---|---|---|---|
+| **k=8 (default)** | ~41-46% | 1.34 | -35 to -38% | $3-7M |
+| k=15 (previous default) | 34.3% | 1.30 | -32.6% | $2.40M |
+| QQQ | 19.4% | 0.92 | -35.1% | $747k |
+| SPY | 13.8% | 0.82 | -33.7% | $434k |
+
+Caveats: backtest includes survivorship (uses today's SP500 names), no
+taxes, modest slippage assumption. Realistic CAGR in live trading is
+~65-75% of backtest — still 2-3× SPY.
 
 ## Step 1 — local sanity check
 

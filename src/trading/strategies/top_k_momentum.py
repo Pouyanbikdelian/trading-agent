@@ -75,10 +75,14 @@ from trading.strategies.base import Strategy, StrategyParams, register
 
 
 class TopKMomentumParams(StrategyParams):
-    k: int = Field(default=10, ge=1)
-    lookback: int = Field(default=252, ge=21)
+    # Defaults match the "winning config" identified in offline research
+    # (see docs/winning_config.md). k=8 + 6-month lookback + quarterly
+    # rebalance has the highest mean Sharpe across 2015-2020, 2020-now,
+    # and 2015-now windows. Override via -p flags for research.
+    k: int = Field(default=8, ge=1)
+    lookback: int = Field(default=126, ge=21)
     skip: int = Field(default=21, ge=0)
-    rebalance: int = Field(default=21, ge=1)
+    rebalance: int = Field(default=63, ge=1)
     vol_lookback: int = Field(default=60, ge=5)
     abs_momentum_threshold: float | None = Field(default=0.0)
     """If set, exclude names whose formation return is below this floor.

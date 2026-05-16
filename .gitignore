@@ -59,6 +59,9 @@ state/
 runs/
 checkpoints/
 
+# Offline research scratchpad — not committed
+experiments/
+
 # Notebooks
 .ipynb_checkpoints/
 notebooks/*.ipynb

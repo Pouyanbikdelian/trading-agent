@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pandas as pd
 
 from trading.core.config import settings
 from trading.core.logging import logger
@@ -50,10 +51,13 @@ BOT_API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 25  # seconds — long-poll
 HELP_TEXT = (
     "*Trading bot — commands*\n"
-    "/status — env, halted, heartbeat, last cycle\n"
+    "/status — env, halted, heartbeat, mode\n"
     "/positions — current positions and weights\n"
     "/report — generate and send the weekly report\n"
-    "/halt [reason] — force-flatten on next cycle\n"
+    "/mode [bull|neutral|defense|bear|flatten] — preview a mode change\n"
+    "/confirm — apply the previewed mode + run an off-cycle rebalance\n"
+    "/cancel — discard a pending mode preview\n"
+    "/halt [reason] — kill switch: refuse to trade + force flatten\n"
     "/resume — clear halt\n"
     "/heartbeat — last cycle age\n"
 )
@@ -220,6 +224,175 @@ def _cmd_positions() -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Mode change — preview / confirm / cancel
+# ---------------------------------------------------------------------------
+
+
+def _mode_paths() -> tuple[Path, Path, Path]:
+    """(mode.json, pending_mode.json, trigger_now flag) — atomic single source."""
+    sd = settings.state_dir
+    return sd / "mode.json", sd / "pending_mode.json", sd / "trigger_now.flag"
+
+
+def _cmd_mode(args: list[str]) -> str:
+    """Preview a mode change. Operator must /confirm to apply."""
+    from trading.runtime.mode import (
+        Mode,
+        PendingModeChange,
+        read_mode,
+        write_pending,
+    )
+
+    if not args:
+        # No arg → just show current mode
+        cur = read_mode(_mode_paths()[0])
+        return (
+            f"*Current mode:* `{cur.mode.value}`\n"
+            f"set by `{cur.set_by}` at `{cur.set_at or 'default'}`\n"
+            f"reason: _{cur.reason or 'n/a'}_\n\n"
+            "Send `/mode bull|neutral|defense|bear|flatten` to preview a change."
+        )
+
+    try:
+        target = Mode.parse(args[0])
+    except ValueError as e:
+        return f"❌ {e}"
+
+    cur = read_mode(_mode_paths()[0])
+    if cur.mode == target:
+        return f"already in `{target.value}` mode — nothing to do."
+
+    # Best-effort impact preview from the latest snapshot.
+    preview_lines = _build_mode_preview(cur.mode, target)
+
+    # Stage the change. /confirm reads it back.
+    pending = PendingModeChange(
+        new_mode=target,
+        requested_at=datetime.now(tz=timezone.utc).isoformat(),
+        requested_by="telegram",
+        reason=" ".join(args[1:]) if len(args) > 1 else "",
+    )
+    _, pending_path, _ = _mode_paths()
+    write_pending(pending_path, pending)
+
+    return (
+        f"📋 *Mode change preview — `{target.value.upper()}`*\n"
+        f"current: `{cur.mode.value}` → proposed: `{target.value}`\n\n"
+        f"{preview_lines}\n\n"
+        "Reply *CONFIRM* (or /confirm) within 10 min, or /cancel."
+    )
+
+
+def _cmd_confirm() -> str:
+    """Apply the staged mode change + fire an off-cycle rebalance."""
+    from trading.runtime.mode import (
+        clear_pending,
+        read_pending,
+        write_mode,
+    )
+
+    mode_path, pending_path, trigger_path = _mode_paths()
+    pending = read_pending(pending_path)
+    if pending is None:
+        return "no pending mode change. Send `/mode <name>` first."
+    if pending.is_expired():
+        clear_pending(pending_path)
+        return "⏱️ pending mode change expired. Re-send `/mode <name>`."
+
+    state = write_mode(mode_path, pending.new_mode, set_by="telegram", reason=pending.reason)
+    clear_pending(pending_path)
+
+    # Drop the trigger-now flag — the runner picks this up and runs a
+    # cycle immediately instead of waiting for the cron.
+    trigger_path.parent.mkdir(parents=True, exist_ok=True)
+    trigger_path.write_text(
+        json.dumps({"reason": f"mode change to {state.mode.value}", "ts": state.set_at})
+    )
+    logger.bind(mode=state.mode.value).info("telegram confirmed mode change")
+    return (
+        f"✅ Mode set to *{state.mode.value.upper()}*.\n"
+        f"🔄 Off-cycle rebalance queued — runner will pick it up within ~30s."
+    )
+
+
+def _cmd_cancel() -> str:
+    from trading.runtime.mode import clear_pending, read_pending
+
+    _, pending_path, _ = _mode_paths()
+    pending = read_pending(pending_path)
+    if pending is None:
+        return "nothing to cancel."
+    clear_pending(pending_path)
+    return f"❌ pending `{pending.new_mode.value}` change cancelled."
+
+
+def _build_mode_preview(current_mode: object, target_mode: object) -> str:
+    """Estimate trades + cost for the staged mode change.
+
+    Falls back to a generic preview if we can't read a current snapshot
+    (e.g. the runner hasn't completed its first cycle yet).
+    """
+    try:
+        from trading.runner.state import RunnerStore
+        from trading.selection.mode_overlay import ModePolicy, apply_mode
+
+        store = RunnerStore(settings.state_dir / "runner.db")
+        snap = store.latest_snapshot()
+    except Exception:
+        snap = None
+
+    if snap is None or not snap.positions or snap.equity <= 0:
+        return (
+            "_No snapshot yet — can't compute trade list. Trades will be "
+            "computed by the runner on the next cycle._"
+        )
+
+    # Current weights from the snapshot
+    cur_weights = {}
+    for _key, pos in snap.positions.items():
+        mv = pos.quantity * pos.avg_price + pos.unrealized_pnl
+        cur_weights[pos.instrument.symbol] = mv / snap.equity if snap.equity > 0 else 0.0
+    cur_w = pd.Series(cur_weights, dtype=float)  # type: ignore[name-defined]
+
+    # Estimate target by applying the mode to the *current* weights as a proxy
+    # (the real recompute happens in the runner — this preview is just illustrative)
+    cur_frame = cur_w.to_frame().T
+    prices_proxy = cur_frame.copy() * 0 + 1.0  # placeholder; mode overlay reads columns only
+    # Inject defensive ETF columns so the overlay can place them
+    for tkr in ModePolicy().defensive_sleeve:
+        prices_proxy[tkr] = 1.0
+    target_frame = apply_mode(cur_frame, prices_proxy, target_mode, policy=ModePolicy())  # type: ignore[arg-type]
+    target_w = target_frame.iloc[-1]
+
+    from trading.selection.mode_overlay import estimate_mode_impact
+
+    impact = estimate_mode_impact(cur_w, target_w, equity=snap.equity)
+
+    sells = impact["sells"][:5]
+    buys = impact["buys"][:5]
+    lines = []
+    if sells:
+        lines.append("*Sells (top 5):*")
+        for r in sells:
+            lines.append(
+                f"  `{r['symbol']:<6}` Δw `{r['weight_delta']:+.2%}` ≈ `${r['dollar_delta']:+,.0f}`"
+            )
+    if buys:
+        lines.append("*Buys (top 5):*")
+        for r in buys:
+            lines.append(
+                f"  `{r['symbol']:<6}` Δw `{r['weight_delta']:+.2%}` ≈ `${r['dollar_delta']:+,.0f}`"
+            )
+    lines.append("")
+    lines.append(
+        f"_Turnover:_ `{impact['turnover_pct']:.1%}` (`${impact['turnover_dollar']:,.0f}`)"
+    )
+    lines.append(f"_Est. cost:_ `${impact['trading_cost_dollar']:,.2f}` (~10 bps)")
+    lines.append(f"_Net gross change:_ `{impact['net_gross_delta']:+.2%}`")
+    return "\n".join(lines)
+
+
 def _cmd_report() -> str:
     """Generate a fresh weekly report and return its executive summary."""
     try:
@@ -271,6 +444,12 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_resume()
     if cmd == "/report":
         return _cmd_report()
+    if cmd == "/mode":
+        return _cmd_mode(args)
+    if cmd == "/confirm":
+        return _cmd_confirm()
+    if cmd == "/cancel":
+        return _cmd_cancel()
     return f"unknown command `{cmd}` — try /help"
 
 
