@@ -442,6 +442,16 @@ def _paper_run(
     ),
     initial_cash: float = typer.Option(100_000.0, "--cash"),
     once: bool = typer.Option(False, "--once", help="Run one cycle and exit."),
+    param: list[str] = typer.Option(
+        [],
+        "--param",
+        "-p",
+        help=(
+            "Override a strategy parameter, e.g. `-p rebalance=5`. Repeat for "
+            "multiple. Applies to ALL configured strategies — for multi-strategy "
+            "ensembles, use the playbook YAML instead."
+        ),
+    ),
     use_ibkr: bool = typer.Option(
         False,
         "--use-ibkr",
@@ -464,6 +474,14 @@ def _paper_run(
     it logs into. The port check is our defense-in-depth — you can't
     accidentally point the paper runner at a live gateway.
     """
+    # Parse -p / --param flags into a strategy_params dict applied to
+    # every strategy. The Params class on each strategy handles
+    # type-coercion of string values ("5" -> 5, "0.20" -> 0.20).
+    overrides = _parse_params(param)
+    strategy_params: dict[str, dict[str, str]] = (
+        {s: dict(overrides) for s in strategy} if overrides else {}
+    )
+
     if use_ibkr:
         if settings.ibkr_port == 4001:
             raise typer.BadParameter(
@@ -485,6 +503,8 @@ def _paper_run(
             initial_cash=initial_cash,
             use_simulator=False,
         )
+        if strategy_params:
+            cfg = cfg.model_copy(update={"strategy_params": strategy_params})
         runner = Runner.from_config(cfg, broker=broker)
         console.print(
             f"[yellow]paper runner via IBKR Gateway[/yellow] "
@@ -501,7 +521,12 @@ def _paper_run(
             initial_cash=initial_cash,
             use_simulator=True,
         )
+        if strategy_params:
+            cfg = cfg.model_copy(update={"strategy_params": strategy_params})
         runner = Runner.from_config(cfg)
+
+    if strategy_params:
+        console.print(f"[cyan]strategy overrides:[/cyan] {strategy_params}")
 
     if once:
         report = runner.run_once()
