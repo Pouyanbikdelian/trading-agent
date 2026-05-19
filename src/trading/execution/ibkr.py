@@ -40,6 +40,15 @@ from trading.core.types import (
 )
 from trading.execution.base import Broker, BrokerError, NotConnectedError
 
+
+class BrokerTimeoutError(BrokerError):
+    """Raised when an IBKR API call exceeds its timeout budget.
+
+    The cycle catches this and logs a clear "broker hung" error + Telegram
+    alert, instead of waiting forever for the gateway to respond.
+    """
+
+
 # Map our enums to ib-async strings. Centralizing here means a vendor change
 # only touches this file.
 _OUR_TO_IBKR_ACTION: dict[Side, str] = {Side.BUY: "BUY", Side.SELL: "SELL"}
@@ -85,7 +94,14 @@ class IbkrBroker(Broker):
 
             self._ib = IB()
         if not self._ib.isConnected():
-            self._run(self._ib.connectAsync(self._host, self._port, clientId=self._client_id))
+            # Use a longer timeout for connect — gateway might still be
+            # logging in during the first ~minute after container start.
+            self._run(
+                asyncio.wait_for(
+                    self._ib.connectAsync(self._host, self._port, clientId=self._client_id),
+                    timeout=60.0,
+                )
+            )
         self._connected = True
         logger.bind(broker=self.name).info(
             f"connected ibkr@{self._host}:{self._port} client_id={self._client_id}"
@@ -102,6 +118,12 @@ class IbkrBroker(Broker):
 
     # ------------------------------------------------------------ helpers
 
+    # Hard per-call timeout for IBKR Gateway requests. Gateway can be
+    # connected at the TCP layer while its broker session is dead, in which
+    # case API calls hang forever — exactly what we lived through earlier.
+    # 30 seconds is generous for healthy gateways, draconian for broken ones.
+    DEFAULT_API_TIMEOUT_S: float = 30.0
+
     @staticmethod
     def _run(coro: Any) -> Any:
         """Run an awaitable from synchronous code. Reuses the running loop
@@ -111,6 +133,33 @@ class IbkrBroker(Broker):
         except RuntimeError:
             return asyncio.run(coro)
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
+
+    def _bounded(self, what: str, fn: Any, *, timeout: float | None = None) -> Any:
+        """Run a synchronous ib-async call under a thread-based timeout.
+
+        ib-async's sync API blocks on its internal event loop. If that loop
+        is wedged (broker session dead, gateway not responsive), the call
+        hangs indefinitely. We dispatch into a worker thread and reap with
+        a hard timeout — on expiry, raise ``BrokerTimeoutError`` so the
+        cycle aborts cleanly instead of silently waiting hours.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FutTimeout
+
+        timeout = timeout if timeout is not None else self.DEFAULT_API_TIMEOUT_S
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"ibkr-{what}") as ex:
+            future = ex.submit(fn)
+            try:
+                return future.result(timeout=timeout)
+            except FutTimeout as e:
+                # The submitted call is still running in the executor thread —
+                # we can't safely interrupt it, but we let it finish at its
+                # own pace while the cycle moves on. The thread will be GC'd
+                # when the executor exits this `with` block.
+                raise BrokerTimeoutError(
+                    f"IBKR {what} timed out after {timeout:.0f}s — gateway likely "
+                    "has a dead broker session (try restarting ib-gateway container)"
+                ) from e
 
     def _contract(self, instrument: Instrument) -> Any:
         from ib_async import Crypto, Forex, Future, Stock  # lazy import
@@ -157,7 +206,10 @@ class IbkrBroker(Broker):
         self._ensure_connected()
         contract = self._contract(order.instrument)
         ib_order = self._build_ib_order(order)
-        self._ib.placeOrder(contract, ib_order)
+        # placeOrder is fire-and-forget; the trade-status update arrives
+        # async. But the call itself can wedge if the gateway's order book
+        # isn't accepting submissions — bound it.
+        self._bounded("placeOrder", lambda: self._ib.placeOrder(contract, ib_order))
         logger.bind(broker=self.name, symbol=order.instrument.symbol).info(
             f"submitted {order.side.value} {order.quantity} {order.instrument.symbol} "
             f"as {order.order_type.value}"
@@ -168,9 +220,10 @@ class IbkrBroker(Broker):
 
     def cancel_order(self, client_order_id: str) -> None:
         self._ensure_connected()
-        for trade in self._ib.openTrades():
+        open_trades = self._bounded("openTrades", self._ib.openTrades)
+        for trade in open_trades:
             if getattr(trade.order, "orderRef", None) == client_order_id:
-                self._ib.cancelOrder(trade.order)
+                self._bounded("cancelOrder", lambda t=trade: self._ib.cancelOrder(t.order))
                 return
         # Already terminal or never seen — non-fatal.
         logger.bind(broker=self.name).warning(
@@ -181,8 +234,9 @@ class IbkrBroker(Broker):
 
     def get_positions(self) -> list[Position]:
         self._ensure_connected()
+        raw = self._bounded("positions", self._ib.positions)
         out: list[Position] = []
-        for p in self._ib.positions():
+        for p in raw:
             instrument = _ibkr_contract_to_instrument(p.contract)
             out.append(
                 Position(
@@ -199,7 +253,8 @@ class IbkrBroker(Broker):
         # Try the structured summary first; fall back to TWS-side accountValues.
         cash = 0.0
         equity = 0.0
-        for row in self._ib.accountSummary():
+        summary = self._bounded("accountSummary", self._ib.accountSummary)
+        for row in summary:
             tag = getattr(row, "tag", None)
             try:
                 val = float(getattr(row, "value", 0.0))
@@ -214,8 +269,9 @@ class IbkrBroker(Broker):
 
     def get_fills(self, *, since: datetime | None = None) -> list[Fill]:
         self._ensure_connected()
+        raw = self._bounded("fills", self._ib.fills)
         out: list[Fill] = []
-        for f in self._ib.fills():
+        for f in raw:
             exec_ = f.execution
             ts = getattr(exec_, "time", None)
             if ts is None:
