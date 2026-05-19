@@ -50,16 +50,35 @@ from trading.core.logging import logger
 BOT_API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 25  # seconds — long-poll
 HELP_TEXT = (
-    "*Trading bot — commands*\n"
+    "*Trading bot — commands*\n\n"
+    "*Read-only*\n"
     "/status — env, halted, heartbeat, mode\n"
     "/positions — current positions and weights\n"
-    "/report — generate and send the weekly report\n"
+    "/balances — cash per currency\n"
+    "/orders — recent orders (last 7d)\n"
+    "/heartbeat — last cycle age\n"
+    "/report — generate the weekly report\n"
+    "/fx-rate FROM TO — current reference rate (e.g. `/fx-rate USD CHF`)\n\n"
+    "*Mode (rebalance posture)*\n"
     "/mode [bull|neutral|defense|bear|flatten] — preview a mode change\n"
     "/confirm — apply the previewed mode + run an off-cycle rebalance\n"
-    "/cancel — discard a pending mode preview\n"
+    "/cancel — discard a pending mode preview\n\n"
+    "*Manual orders* (queued; runner executes within ~5s)\n"
+    "/buy SYM QTY [LIMIT] — e.g. `/buy AAPL 10`\n"
+    "/sell SYM [QTY|all] [LIMIT] — e.g. `/sell AAPL all`\n"
+    "/close SYM — close a single position\n"
+    "/flatten — close every open position\n"
+    "/cancel_order CLIENT_ID — cancel a specific pending order\n\n"
+    "*FX*\n"
+    "/fx FROM AMOUNT [TO] — convert at market, e.g. `/fx CHF 50000`\n\n"
+    "*Reliability*\n"
+    "/health — broker / heartbeat / queue at a glance\n"
+    "/cycle — force one off-cycle rebalance now\n"
+    "/refresh — queue a data refresh\n"
+    "/reconnect — bounce the broker connection\n\n"
+    "*Safety*\n"
     "/halt [reason] — kill switch: refuse to trade + force flatten\n"
     "/resume — clear halt\n"
-    "/heartbeat — last cycle age\n"
 )
 
 
@@ -418,6 +437,244 @@ def _cmd_report() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Manual trading commands — queue work, return acknowledgement, runner
+# executes asynchronously and pushes a result alert.
+# ---------------------------------------------------------------------------
+
+
+def _queue_command(cmd_type: str, args: dict[str, Any]) -> str:
+    r"""Submit a command to the runner via the file queue. Returns a
+    short Telegram-formatted ack message."""
+    from trading.runtime.commands import Command, CommandType, submit
+
+    try:
+        cmd = Command.new(CommandType(cmd_type), args=args, requested_by="telegram")
+    except ValueError:
+        return f"❌ unknown command `{cmd_type}`"
+    submit(cmd, settings.state_dir)
+    return f"📋 Queued `{cmd.id[:8]}` ({cmd_type}) — runner will execute within ~5s and reply."
+
+
+def _cmd_buy(args: list[str]) -> str:
+    r"""``/buy SYM QTY [LIMIT_PRICE]``  e.g. ``/buy AAPL 10`` or ``/buy AAPL 10 195.50``."""
+    if len(args) < 2:
+        return "usage: `/buy SYMBOL QTY [LIMIT_PRICE]` — e.g. `/buy AAPL 10`"
+    payload: dict[str, Any] = {
+        "symbol": args[0].upper(),
+        "qty": args[1],
+    }
+    if len(args) >= 3:
+        payload["limit"] = args[2]
+    return _queue_command("buy", payload)
+
+
+def _cmd_sell(args: list[str]) -> str:
+    r"""``/sell SYM [QTY|all] [LIMIT_PRICE]`` — defaults to selling the entire position."""
+    if len(args) < 1:
+        return "usage: `/sell SYMBOL [QTY|all] [LIMIT_PRICE]` — e.g. `/sell AAPL 5` or `/sell AAPL all`"
+    payload: dict[str, Any] = {"symbol": args[0].upper(), "qty": "all"}
+    if len(args) >= 2:
+        payload["qty"] = args[1]
+    if len(args) >= 3:
+        payload["limit"] = args[2]
+    return _queue_command("sell", payload)
+
+
+def _cmd_close(args: list[str]) -> str:
+    r"""``/close SYM`` — flatten a specific position (alias for ``/sell SYM all``)."""
+    if len(args) < 1:
+        return "usage: `/close SYMBOL` — e.g. `/close AAPL`"
+    return _queue_command("close", {"symbol": args[0].upper()})
+
+
+def _cmd_flatten() -> str:
+    r"""``/flatten`` — close every open position at market."""
+    return _queue_command("flatten", {})
+
+
+def _cmd_cancel_order(args: list[str]) -> str:
+    r"""``/cancel_order CLIENT_ORDER_ID`` — cancel a specific pending order."""
+    if not args:
+        return "usage: `/cancel_order CLIENT_ORDER_ID`"
+    return _queue_command("cancel_order", {"client_order_id": args[0]})
+
+
+def _cmd_orders() -> str:
+    r"""``/orders`` — list pending and recent orders from the local store."""
+    try:
+        from trading.execution.store import OrderStore
+
+        store = OrderStore(settings.state_dir / "orders.db")
+        from datetime import timedelta
+
+        recent = store.load_orders(since=datetime.now(tz=timezone.utc) - timedelta(days=7))
+    except Exception as e:
+        return f"could not read orders: `{e}`"
+
+    if not recent:
+        return "_no orders in the last 7 days._"
+    lines = ["*Recent orders (last 7d):*", ""]
+    for o in recent[-20:]:
+        lines.append(
+            f"`{o.client_order_id[:14]:<14}` "
+            f"{o.side.value} {o.quantity:g} {o.instrument.symbol} "
+            f"({o.order_type.value})"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# FX commands
+# ---------------------------------------------------------------------------
+
+
+def _cmd_balances() -> str:
+    r"""``/balances`` — show per-currency cash from the last account snapshot."""
+    # We read from the latest runner snapshot to avoid hitting the broker
+    # directly from the bot process. Snapshot is refreshed each cycle.
+    try:
+        from trading.runner.state import RunnerStore
+
+        store = RunnerStore(settings.state_dir / "runner.db")
+        snap = store.latest_snapshot()
+    except Exception as e:
+        return f"could not read snapshot: `{e}`"
+    if snap is None:
+        return (
+            "_no account snapshot yet — runner hasn't completed a cycle._\n"
+            "Try `/cycle` to force one (when implemented), or wait for Friday."
+        )
+    lines = [f"*Account balances* (as of {snap.ts.strftime('%Y-%m-%d %H:%M UTC')}):"]
+    lines.append(f"  total cash: `${snap.cash:,.2f}`")
+    lines.append(f"  total equity: `${snap.equity:,.2f}`")
+    lines.append("")
+    lines.append(
+        "_Per-currency breakdown requires a live broker query. Try after "
+        "the next cycle, or send `/fx-rate USD CHF` for current rate._"
+    )
+    return "\n".join(lines)
+
+
+def _cmd_fx_rate(args: list[str]) -> str:
+    r"""``/fx-rate USD CHF`` — show reference rate from yfinance (delayed).
+
+    Argument parsing: either two args (``USD CHF``) or one pair (``USDCHF``).
+    """
+    if not args:
+        return "usage: `/fx-rate USD CHF` — show reference rate"
+    if len(args) == 1 and len(args[0]) >= 6:
+        base, quote = args[0][:3].upper(), args[0][3:6].upper()
+    else:
+        base, quote = args[0].upper(), args[1].upper() if len(args) >= 2 else "USD"
+    try:
+        import yfinance as yf
+
+        symbol = f"{base}{quote}=X"
+        data = yf.download(symbol, period="2d", auto_adjust=True, progress=False)
+        if data.empty:
+            return f"❌ no FX quote for `{symbol}`"
+        close = data["Close"]
+        # yfinance can return either a Series or 1-col DataFrame here.
+        last = close.iloc[-1]
+        if hasattr(last, "iloc"):
+            last = last.iloc[0]
+        rate = float(last)
+        return (
+            f"*FX reference rate* `{base}/{quote}`: `{rate:.4f}`\n"
+            f"_source: yfinance (delayed up to ~15 min). The trade fill "
+            f"will use IBKR's live IDEALPRO rate at the time of execution._"
+        )
+    except Exception as e:
+        return f"❌ FX rate lookup failed: `{e}`"
+
+
+def _cmd_fx(args: list[str]) -> str:
+    r"""``/fx FROM_CCY AMOUNT [TO_CCY]`` — convert at market via IBKR.
+
+    Examples:
+      ``/fx CHF 50000``       → spend 50000 CHF, receive USD
+      ``/fx USD 30000``       → spend 30000 USD, receive CHF (the OTHER major)
+      ``/fx CHF 50000 USD``   → explicit destination
+    """
+    if len(args) < 2:
+        return "usage: `/fx FROM_CCY AMOUNT [TO_CCY]` — e.g. `/fx CHF 50000`"
+    from_ccy = args[0].upper()
+    try:
+        amount = float(args[1])
+    except ValueError:
+        return f"❌ amount must be a number, got `{args[1]}`"
+    # Default: pick the OTHER major between USD and CHF.
+    to_ccy = args[2].upper() if len(args) >= 3 else ("USD" if from_ccy != "USD" else "CHF")
+    if from_ccy == to_ccy:
+        return "❌ from_ccy and to_ccy can't be the same"
+    return _queue_command(
+        "fx_convert",
+        {"from_ccy": from_ccy, "to_ccy": to_ccy, "amount": amount},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reliability / health commands
+# ---------------------------------------------------------------------------
+
+
+def _cmd_health() -> str:
+    r"""``/health`` — broker, scheduler, and heartbeat state at a glance."""
+    sd = settings.state_dir
+    hb_age = _heartbeat_age()
+    hb_line = "unknown (no cycle yet)" if hb_age is None else f"{hb_age:.0f}s ago"
+    halt_path = sd / "halt.json"
+    halt_state = "🟢 not halted"
+    if halt_path.exists():
+        try:
+            payload = json.loads(halt_path.read_text())
+            if payload.get("halted"):
+                halt_state = f"🛑 HALTED — `{payload.get('reason', '')}`"
+        except Exception:
+            halt_state = "⚠️ halt.json unparseable"
+    pending_path = sd / "commands" / "pending"
+    n_pending = len(list(pending_path.glob("*.json"))) if pending_path.exists() else 0
+    running_path = sd / "commands" / "running"
+    n_running = len(list(running_path.glob("*.json"))) if running_path.exists() else 0
+    return (
+        "*Health*\n"
+        f"env: `{settings.trading_env}`  live armed: `{settings.is_live_armed()}`\n"
+        f"halt: {halt_state}\n"
+        f"heartbeat: {hb_line}\n"
+        f"command queue: `{n_pending}` pending, `{n_running}` running\n"
+    )
+
+
+def _cmd_cycle_now() -> str:
+    r"""``/cycle`` — force one off-cycle execution immediately."""
+    sd = settings.state_dir
+    trigger_path = sd / "trigger_now.flag"
+    sd.mkdir(parents=True, exist_ok=True)
+    trigger_path.write_text(
+        json.dumps(
+            {
+                "reason": "telegram /cycle",
+                "ts": datetime.now(tz=timezone.utc).isoformat(),
+            }
+        )
+    )
+    return (
+        "🔄 *Off-cycle trigger queued.* Runner picks it up within ~30s.\n"
+        "Cycle has a 5-min hard timeout — you'll get a Telegram message either way."
+    )
+
+
+def _cmd_refresh() -> str:
+    r"""``/refresh`` — queue a data-refresh command for the runner."""
+    return _queue_command("refresh_data", {})
+
+
+def _cmd_reconnect() -> str:
+    r"""``/reconnect`` — bounce the broker connection."""
+    return _queue_command("reconnect_broker", {})
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -450,6 +707,35 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_confirm()
     if cmd == "/cancel":
         return _cmd_cancel()
+    # --- manual orders ---
+    if cmd == "/buy":
+        return _cmd_buy(args)
+    if cmd == "/sell":
+        return _cmd_sell(args)
+    if cmd == "/close":
+        return _cmd_close(args)
+    if cmd == "/flatten":
+        return _cmd_flatten()
+    if cmd == "/orders":
+        return _cmd_orders()
+    if cmd == "/cancel_order":
+        return _cmd_cancel_order(args)
+    # --- FX ---
+    if cmd == "/balances":
+        return _cmd_balances()
+    if cmd in ("/fx-rate", "/fx_rate", "/fxrate"):
+        return _cmd_fx_rate(args)
+    if cmd == "/fx":
+        return _cmd_fx(args)
+    # --- Reliability ---
+    if cmd == "/health":
+        return _cmd_health()
+    if cmd in ("/cycle", "/cycle_now"):
+        return _cmd_cycle_now()
+    if cmd == "/refresh":
+        return _cmd_refresh()
+    if cmd == "/reconnect":
+        return _cmd_reconnect()
     return f"unknown command `{cmd}` — try /help"
 
 

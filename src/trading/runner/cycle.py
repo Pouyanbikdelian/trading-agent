@@ -328,6 +328,12 @@ class Cycle:
             **({"order_id_factory": self._order_id_factory} if self._order_id_factory else {}),
         )
 
+        # 8b. Buying-power preflight. Estimate notional required vs cash
+        # available; warn (don't refuse) if we're going to run short. The
+        # broker will issue the actual rejection if margin doesn't permit
+        # — this is a heads-up so the operator can intervene with /fx.
+        self._preflight_buying_power(orders, account, last_prices)
+
         # 9. Submit each order. The cycle stops at first hard failure to
         #    avoid partial portfolio bringups, but logs and alerts.
         orders_submitted = 0
@@ -338,11 +344,17 @@ class Cycle:
                 self.order_store.update_status(order.client_order_id, OrderStatus.SUBMITTED)
                 orders_submitted += 1
             except Exception as e:
+                # Surface broker rejections explicitly in Telegram so the
+                # operator sees the reason — not just a generic stack.
+                err_str = f"{type(e).__name__}: {e}"[:400]
                 logger.bind(component="cycle").exception(
                     f"submit failed for {order.client_order_id}"
                 )
                 self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
-                self.alerts.error(f"order submit failed: {e!r}")
+                self.alerts.error(
+                    f"❌ order rejected: {order.side.value} {order.quantity:g} "
+                    f"{order.instrument.symbol} — {err_str}"
+                )
 
         # 9b. Drive the broker's internal clock so paper-trade fills
         # materialize in the same cycle they were submitted in. No-op for
@@ -548,6 +560,42 @@ class Cycle:
             return AccountSnapshot(
                 ts=ts, cash=self.config.initial_cash, equity=self.config.initial_cash
             )
+
+    def _preflight_buying_power(
+        self,
+        orders: list[Any],
+        account: Any,
+        last_prices: dict[str, float],
+    ) -> None:
+        """Estimate notional cost of BUY orders vs current cash.
+
+        Surfaces a Telegram warning when cash is short. We don't *reject*
+        — IBKR's risk margin may permit; the operator can also `/fx
+        CHF X` to convert before the actual fill. Sells reduce required
+        notional. Skip if last_prices is empty.
+        """
+        if not orders or not last_prices:
+            return
+        from trading.core.types import Side as _Side  # local to avoid name clash
+
+        notional_required = 0.0
+        for o in orders:
+            px = last_prices.get(o.instrument.key)
+            if px is None:
+                continue
+            sign = 1.0 if o.side == _Side.BUY else -1.0
+            notional_required += sign * o.quantity * px
+        if notional_required <= 0:
+            return
+        cash = float(getattr(account, "cash", 0.0) or 0.0)
+        shortfall = notional_required - cash
+        if shortfall <= 0:
+            return
+        self.alerts.warning(
+            f"⚠️ buying-power preflight: need ~${notional_required:,.0f} for "
+            f"net buys, have ${cash:,.0f} — short ~${shortfall:,.0f}. "
+            "IBKR may reject or auto-margin; consider `/fx` to convert."
+        )
 
     def _apply_operator_mode(self, weights: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
         """Apply the operator-set mode from ``state/mode.json``.
