@@ -67,11 +67,14 @@ services:
       # from the host without rebuilding.
       - ./config:/app/config:ro
     # Override CMD here so the image's default ("status") doesn't apply.
-    # The runner picks paper or live based on TRADING_ENV in .env.
+    # --use-ibkr routes fills through IB Gateway in paper mode so positions
+    # land in the real IBKR paper account. Refuses to start if IBKR_PORT=4001
+    # (live) — defense-in-depth against pointing the paper runner at live.
     command: ["paper", "run", "${UNIVERSE:-us_large_cap}",
               "--strategy", "${STRATEGY:-donchian}",
               "--cron", "${CRON:-0 16 * * MON-FRI}",
-              "--tz",   "${TZ:-UTC}"]
+              "--tz",   "${TZ:-UTC}",
+              "--use-ibkr"]
     networks:
       - trading
 
