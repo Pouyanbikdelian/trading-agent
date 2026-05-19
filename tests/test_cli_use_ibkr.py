@@ -52,5 +52,15 @@ def test_paper_run_help_shows_use_ibkr_flag() -> None:
     assert "--use-ibkr" in result.output
 
 
+def test_paper_run_help_shows_param_flag() -> None:
+    """The -p / --param flag must be visible — that's how operators
+    override strategy params per-deploy (e.g. tighter rebalance for
+    paper-testing)."""
+    runner = CliRunner()
+    result = runner.invoke(app, ["paper", "run", "--help"])
+    assert result.exit_code == 0
+    assert "--param" in result.output or "-p" in result.output
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

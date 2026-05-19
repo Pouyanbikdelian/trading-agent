@@ -70,10 +70,16 @@ services:
     # --use-ibkr routes fills through IB Gateway in paper mode so positions
     # land in the real IBKR paper account. Refuses to start if IBKR_PORT=4001
     # (live) — defense-in-depth against pointing the paper runner at live.
+    #
+    # PAPER NOTE: -p rebalance=${REBALANCE:-5} forces weekly basket rotation
+    # for paper-trading (catch bugs faster, verify the order pipeline more
+    # often). Live keeps the strategy's quarterly default (63 bars) — set
+    # REBALANCE=63 in .env or remove the -p flag for the live profile.
     command: ["paper", "run", "${UNIVERSE:-us_large_cap}",
               "--strategy", "${STRATEGY:-donchian}",
               "--cron", "${CRON:-0 16 * * MON-FRI}",
               "--tz",   "${TZ:-UTC}",
+              "-p", "rebalance=${REBALANCE:-5}",
               "--use-ibkr"]
     networks:
       - trading
