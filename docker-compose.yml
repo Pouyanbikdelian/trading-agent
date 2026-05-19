@@ -23,6 +23,19 @@ services:
     image: ghcr.io/gnzsnz/ib-gateway:stable
     container_name: ibkr-gateway
     restart: unless-stopped
+    # HOST NETWORKING for the gateway.
+    # Docker port-forwards do NAT — when a host-net trader connects to
+    # 127.0.0.1:4002, the kernel rewrites the source to the docker bridge
+    # gateway before delivering inside the bridged gateway container. So
+    # the gateway sees a 172.x.x.x source, fails the TrustedIPs check
+    # (default = 127.0.0.1 only), and the API handshake hangs forever.
+    #
+    # Putting BOTH the gateway and the trader on host networking gives
+    # them the same network namespace: trader's loopback connection
+    # arrives on the gateway's loopback socket with src=127.0.0.1, which
+    # IS trusted by default. UFW already blocks ports 4001/4002/5900 from
+    # external IPs, so host networking doesn't widen our exposure.
+    network_mode: host
     environment:
       # The image reads these on startup. .env must define them.
       TWS_USERID: ${IBKR_USERNAME}
@@ -32,16 +45,10 @@ services:
       TIME_ZONE: ${TZ:-UTC}
       # 2FA: IBKR's gateway falls back to mobile auth; keep IBC alive long enough.
       TWOFA_TIMEOUT_ACTION: "restart"
-    ports:
-      # Exposed to localhost only — never publish to 0.0.0.0 unless you
-      # know exactly what you're doing. The trader container reaches the
-      # gateway over the docker network on the same ports.
-      - "127.0.0.1:4001:4001"   # live API
-      - "127.0.0.1:4002:4002"   # paper API
+      # Bypass the "running outside the live system" warning at startup.
+      BYPASS_WARNING: "yes"
     volumes:
       - ib_settings:/home/ibgateway/Jts
-    networks:
-      - trading
 
   trader:
     build:
