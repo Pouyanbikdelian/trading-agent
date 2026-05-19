@@ -54,8 +54,16 @@ services:
       - ib-gateway
     env_file:
       - .env
+    # HOST NETWORKING: the trader connects to IB Gateway via 127.0.0.1.
+    # Why not the docker bridge network: IB Gateway's TrustedIPs default
+    # is 127.0.0.1 only. Connections from the docker bridge subnet
+    # (172.18.x.x) trigger a manual-confirmation dialog server-side that
+    # blocks the API handshake. Putting the trader on host network sidesteps
+    # the dialog entirely — connections appear FROM 127.0.0.1, which IS
+    # trusted. Also bumps connect reliability.
+    network_mode: host
     environment:
-      IBKR_HOST: ib-gateway              # docker DNS — same network
+      IBKR_HOST: 127.0.0.1
       # 4001 = live, 4002 = paper. We pick the right port based on the
       # mode the gateway booted in.
       IBKR_PORT: ${IBKR_PORT:-4002}
@@ -81,8 +89,10 @@ services:
               "--tz",   "${TZ:-UTC}",
               "-p", "rebalance=${REBALANCE:-5}",
               "--use-ibkr"]
-    networks:
-      - trading
+    # NB: network_mode: host is incompatible with the `networks` key,
+    # so we omit it for the trader. The bot still uses the trading
+    # network for clean inter-container isolation (it doesn't talk to
+    # IB Gateway).
 
   # Telegram command bot. Long-poll only — no inbound ports. Reads/writes
   # the same state/ volume as the runner so /halt and /resume are honoured
