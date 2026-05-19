@@ -113,6 +113,9 @@ class Runner:
         self.broker = broker
         self.alerts = alerts
         self._scheduler: Any = None
+        # Health-tracking state. Reset to 0 on a successful cycle.
+        self._consecutive_errors: int = 0
+        self._last_success_ts: datetime | None = None
 
     # -------------------------------------------------- factory
 
@@ -207,6 +210,28 @@ class Runner:
             replace_existing=True,
         )
 
+        # Manual-command watcher. The Telegram bot writes JSON commands
+        # (BUY / SELL / FLATTEN / FX_CONVERT / CANCEL_ORDER / ...) into
+        # state/commands/pending/. This watcher executes them via the
+        # broker on a single thread so they never race the cycle.
+        self._scheduler.add_job(
+            self._process_pending_commands,
+            IntervalTrigger(seconds=5),
+            id="command_processor",
+            replace_existing=True,
+            max_instances=1,
+        )
+
+        # Heartbeat watchdog: every 6h, check that we've had a successful
+        # cycle in the last HEARTBEAT_WATCHDOG_HOURS. Sends a Telegram
+        # nudge if we haven't. Does NOT halt — that's the operator's call.
+        self._scheduler.add_job(
+            self._watchdog,
+            IntervalTrigger(hours=6),
+            id="watchdog",
+            replace_existing=True,
+        )
+
         # Advisory risk monitor: hourly poll of SPY+VIX, push a Telegram
         # alert on new triggers. NEVER auto-applies a mode change — only
         # informs the operator. Disabled if Telegram isn't configured.
@@ -275,27 +300,105 @@ class Runner:
                 timeout=self.CYCLE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
+            self._consecutive_errors += 1
             msg = (
-                f"⏱️ cycle aborted after {self.CYCLE_TIMEOUT_SECONDS:.0f}s — "
-                "likely a wedged IBKR Gateway. Try: docker compose restart "
-                "ib-gateway + trader, then re-trigger."
+                f"⏱️ cycle aborted after {self.CYCLE_TIMEOUT_SECONDS:.0f}s "
+                f"(error #{self._consecutive_errors}/{self.AUTO_HALT_AFTER}) — "
+                "likely a wedged IBKR Gateway."
             )
             logger.bind(component="runner").error(msg)
             self.alerts.critical(msg)
+            self._maybe_auto_halt("cycle timeout")
             return
         except Exception as e:
-            msg = f"❌ cycle crashed: {type(e).__name__}: {e}"
+            self._consecutive_errors += 1
+            msg = (
+                f"❌ cycle crashed: {type(e).__name__}: {e} "
+                f"(error #{self._consecutive_errors}/{self.AUTO_HALT_AFTER})"
+            )
             logger.bind(component="runner").exception("cycle crashed")
             self.alerts.critical(msg)
+            self._maybe_auto_halt(f"cycle crash: {type(e).__name__}")
             return
 
         if report.status == "error":
+            self._consecutive_errors += 1
             err = (report.error or "unknown error").strip()
             logger.bind(component="runner").error(f"cycle error: {err}")
-            self.alerts.error(f"❌ cycle finished with error: {err[:300]}")
+            self.alerts.error(
+                f"❌ cycle error ({self._consecutive_errors}/{self.AUTO_HALT_AFTER}): {err[:300]}"
+            )
+            self._maybe_auto_halt(f"cycle error: {err[:100]}")
         elif report.status == "halted":
             logger.bind(component="runner").warning("cycle halted by risk manager")
             self.alerts.warning("⚠️ cycle halted by risk manager")
+        else:
+            # Success — reset the consecutive error counter.
+            if self._consecutive_errors > 0:
+                self.alerts.info(f"✅ cycle recovered (after {self._consecutive_errors} errors)")
+            self._consecutive_errors = 0
+            self._last_success_ts = datetime.now()
+
+    # Tracked by _run_cycle_async to enable "auto-halt after N consecutive
+    # failures" and the heartbeat watchdog. The runner is the only writer.
+    AUTO_HALT_AFTER: int = 3
+    HEARTBEAT_WATCHDOG_HOURS: float = 25.0  # 1h grace past 24h cron
+
+    def _maybe_auto_halt(self, reason: str) -> None:
+        """If we've crossed the consecutive-error threshold, drop a halt
+        file ourselves and tell the operator loudly. They have to /resume
+        to re-arm; we never auto-recover."""
+        if self._consecutive_errors < self.AUTO_HALT_AFTER:
+            return
+        try:
+            import json as _json
+            import os as _os
+            import tempfile as _tmp
+
+            halt_path = settings.state_dir / "halt.json"
+            halt_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = _tmp.mkstemp(dir=halt_path.parent, prefix=f"{halt_path.name}.")
+            with _os.fdopen(fd, "w") as f:
+                _json.dump(
+                    {
+                        "halted": True,
+                        "reason": f"auto-halt after {self._consecutive_errors} consecutive failures: {reason}",
+                        "halted_at": datetime.now().isoformat(),
+                        "flatten_on_next_cycle": False,  # don't flatten reflexively
+                    },
+                    f,
+                    indent=2,
+                )
+            _os.replace(tmp, halt_path)
+        except Exception:
+            logger.bind(component="runner").exception("auto-halt write failed")
+        self.alerts.critical(
+            f"🛑 *AUTO-HALT*: {self._consecutive_errors} consecutive cycle failures.\n"
+            f"Last reason: `{reason[:200]}`\n"
+            "Investigate, then `/resume` to re-arm."
+        )
+
+    async def _watchdog(self) -> None:
+        """Daily: if we haven't completed a successful cycle in
+        ``HEARTBEAT_WATCHDOG_HOURS``, alert the operator. Not a halt —
+        just a nudge. The runner could be stuck without ever raising,
+        which silent-mode would hide."""
+        try:
+            hb_path = settings.state_dir / "heartbeat.json"
+            if not hb_path.exists():
+                if self._last_success_ts is None:
+                    # Bootstrapping — no heartbeat yet; ignore for now.
+                    return
+                age_s = (datetime.now() - self._last_success_ts).total_seconds()
+            else:
+                age_s = datetime.now().timestamp() - hb_path.stat().st_mtime
+            if age_s > self.HEARTBEAT_WATCHDOG_HOURS * 3600.0:
+                self.alerts.warning(
+                    f"⏰ Watchdog: no successful cycle in {age_s / 3600:.1f}h. "
+                    "Check `/health` and broker connection."
+                )
+        except Exception:
+            logger.bind(component="runner").exception("watchdog poll failed")
 
     async def _run_hmm_advisor_async(self) -> None:
         """Daily: refit a 3-state Gaussian HMM on the last ~5 years of
@@ -335,6 +438,21 @@ class Runner:
             await poll_and_alert(spy=spy, vix=vix)
         except Exception:
             logger.bind(component="advisor").exception("advisor poll failed")
+
+    async def _process_pending_commands(self) -> None:
+        """Every 5s: pick up Telegram-queued commands, execute them.
+
+        Runs in a worker thread so a slow broker call doesn't block the
+        event loop. APScheduler's ``max_instances=1`` guarantees a single
+        instance at a time, so we never have two parallel command
+        processors competing for the broker.
+        """
+        try:
+            from trading.runtime.command_processor import process_pending
+
+            await asyncio.to_thread(process_pending, self.broker, settings.state_dir, self.alerts)
+        except Exception:
+            logger.bind(component="command_processor").exception("command processing failed")
 
     async def _check_trigger_flag(self) -> None:
         """Off-cycle trigger watcher.

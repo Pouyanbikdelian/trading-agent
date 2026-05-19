@@ -209,14 +209,50 @@ class IbkrBroker(Broker):
         # placeOrder is fire-and-forget; the trade-status update arrives
         # async. But the call itself can wedge if the gateway's order book
         # isn't accepting submissions — bound it.
-        self._bounded("placeOrder", lambda: self._ib.placeOrder(contract, ib_order))
+        trade = self._bounded("placeOrder", lambda: self._ib.placeOrder(contract, ib_order))
         logger.bind(broker=self.name, symbol=order.instrument.symbol).info(
             f"submitted {order.side.value} {order.quantity} {order.instrument.symbol} "
             f"as {order.order_type.value}"
         )
-        # IBKR is async — the order's status is "PendingSubmit" until ack'd.
-        # We don't block here; the caller polls via get_order_status (Phase 8).
+        # Best-effort: check whether the gateway rejected the order
+        # synchronously (most commonly: insufficient buying power, bad
+        # contract, market closed in non-LRPO mode). If trade.log has any
+        # 'Reject' entries within the first second, surface them. We
+        # don't WAIT for the trade to settle — that's still async.
+        try:
+            import time
+
+            time.sleep(0.5)
+            rejected = self._extract_reject_reason(trade)
+            if rejected:
+                raise BrokerError(
+                    f"IBKR rejected {order.side.value} {order.quantity} "
+                    f"{order.instrument.symbol}: {rejected}"
+                )
+        except BrokerError:
+            raise
+        except Exception:
+            # Don't let log parsing fail order submission.
+            pass
         return order
+
+    @staticmethod
+    def _extract_reject_reason(trade: Any) -> str | None:
+        """Pull out the first explicit reject/error reason from an
+        ib-async Trade object. Returns None if there's no rejection."""
+        log = getattr(trade, "log", None) or []
+        for entry in log:
+            status = (getattr(entry, "status", "") or "").lower()
+            msg = getattr(entry, "message", None) or getattr(entry, "errorMessage", None)
+            if not msg:
+                continue
+            if "reject" in status or "cancelled" in status:
+                return str(msg)[:300]
+        order_status = getattr(getattr(trade, "orderStatus", None), "status", "").lower()
+        if order_status in ("apicancelled", "cancelled", "inactive", "rejected"):
+            why = getattr(trade.orderStatus, "whyHeld", "") or ""
+            return f"status={order_status} whyHeld={why}"[:300]
+        return None
 
     def cancel_order(self, client_order_id: str) -> None:
         self._ensure_connected()
@@ -267,6 +303,108 @@ class IbkrBroker(Broker):
         positions = {p.instrument.key: p for p in self.get_positions()}
         return AccountSnapshot(ts=ts, cash=cash, equity=equity, positions=positions)
 
+    # --------------------------------------------------------------- FX
+
+    def get_balances(self) -> dict[str, float]:
+        r"""Return per-currency cash balances from the account.
+
+        Used by the Telegram ``/balances`` command and as a pre-flight
+        check before placing FX-converted orders. We aggregate
+        ``CashBalance`` rows from ``accountValues``; the same currency
+        may appear multiple times across accounts so we sum.
+        """
+        self._ensure_connected()
+        raw = self._bounded("accountValues", self._ib.accountValues)
+        out: dict[str, float] = {}
+        for row in raw:
+            tag = getattr(row, "tag", None)
+            ccy = getattr(row, "currency", None) or "BASE"
+            if tag != "CashBalance":
+                continue
+            try:
+                amount = float(getattr(row, "value", 0.0))
+            except (TypeError, ValueError):
+                continue
+            out[ccy] = out.get(ccy, 0.0) + amount
+        return out
+
+    def get_fx_rate(self, base_ccy: str, quote_ccy: str) -> float:
+        r"""Spot rate ``base_ccy``/``quote_ccy`` — i.e. how many units of
+        ``quote_ccy`` one unit of ``base_ccy`` buys right now.
+
+        Uses yfinance for the reference quote (free, slightly delayed).
+        Not used for trade execution — that uses IBKR's market price.
+        This is purely for showing rates to the operator before they
+        confirm a conversion.
+        """
+        import yfinance as yf
+
+        symbol = f"{base_ccy}{quote_ccy}=X"
+        df = yf.download(symbol, period="5d", auto_adjust=True, progress=False)
+        if df.empty:
+            raise BrokerError(f"no FX quote available for {symbol}")
+        close = df["Close"]
+        # yfinance can return either Series or 1-col DataFrame here.
+        if hasattr(close, "iloc"):
+            try:
+                val = float(close.iloc[-1])
+            except TypeError:
+                val = float(close.iloc[-1, 0])
+            return val
+        return float(close[-1])
+
+    def convert_currency(self, *, from_ccy: str, to_ccy: str, from_amount: float) -> dict[str, Any]:
+        r"""Spend ``from_amount`` of ``from_ccy`` at market to receive ``to_ccy``.
+
+        Submits a market order on IDEALPRO. We use IBKR's ``cashQty`` so the
+        operator can specify exactly how much of the source currency to
+        spend, rather than computing a target quantity from a stale rate.
+
+        Returns a dict with submission details; the actual fill comes
+        back asynchronously and is captured by the next account snapshot.
+        """
+        from ib_async import Forex
+        from ib_async import Order as IbOrder
+
+        if from_ccy == to_ccy:
+            raise BrokerError(f"from_ccy and to_ccy are identical ({from_ccy})")
+        if from_amount <= 0:
+            raise BrokerError(f"from_amount must be > 0, got {from_amount}")
+
+        # IBKR Forex contract convention: USD comes before CHF/JPY/CAD;
+        # EUR before USD/JPY/GBP/CHF; GBP before USD/JPY/CHF. We pick the
+        # pair whose base/quote sides we recognise, then decide direction.
+        pair_base, pair_quote = _fx_pair_for(from_ccy, to_ccy)
+        contract = Forex(pair_base + pair_quote)
+
+        ib_order = IbOrder()
+        ib_order.orderType = "MKT"
+        ib_order.tif = "DAY"
+        if from_ccy == pair_quote:
+            # Spending the quote side → buying the base.
+            ib_order.action = "BUY"
+            ib_order.cashQty = float(from_amount)
+        else:
+            # Spending the base side → selling it.
+            ib_order.action = "SELL"
+            ib_order.totalQuantity = float(from_amount)
+
+        self._bounded(
+            f"placeOrder-fx-{pair_base}{pair_quote}",
+            lambda: self._ib.placeOrder(contract, ib_order),
+        )
+        logger.bind(broker=self.name).info(
+            f"FX order: {ib_order.action} {pair_base}{pair_quote} "
+            f"(spending {from_amount} {from_ccy} → {to_ccy})"
+        )
+        return {
+            "pair": pair_base + pair_quote,
+            "action": ib_order.action,
+            "from_ccy": from_ccy,
+            "to_ccy": to_ccy,
+            "from_amount": float(from_amount),
+        }
+
     def get_fills(self, *, since: datetime | None = None) -> list[Fill]:
         self._ensure_connected()
         raw = self._bounded("fills", self._ib.fills)
@@ -289,6 +427,25 @@ class IbkrBroker(Broker):
                 )
             )
         return out
+
+
+def _fx_pair_for(a: str, b: str) -> tuple[str, str]:
+    r"""Return the canonical ``(base, quote)`` IBKR Forex pair for two
+    currencies, in either order.
+
+    IBKR's convention: the more-conventional base currency comes first.
+    USD is base in USDCHF / USDJPY / USDCAD; EUR is base in EURUSD;
+    GBP is base in GBPUSD, etc. We don't try to cover every cross —
+    just the handful that matter for a typical retail SP500 trader.
+    """
+    # Ordering: the currency that appears FIRST in this list is the base.
+    priority = ["EUR", "GBP", "AUD", "NZD", "USD", "CAD", "CHF", "JPY"]
+    a, b = a.upper(), b.upper()
+    if a not in priority or b not in priority:
+        raise BrokerError(f"unsupported FX pair: {a}/{b}")
+    if priority.index(a) < priority.index(b):
+        return a, b
+    return b, a
 
 
 def _ibkr_contract_to_instrument(contract: Any) -> Instrument:
