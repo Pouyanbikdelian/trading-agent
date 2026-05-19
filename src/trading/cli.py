@@ -442,19 +442,66 @@ def _paper_run(
     ),
     initial_cash: float = typer.Option(100_000.0, "--cash"),
     once: bool = typer.Option(False, "--once", help="Run one cycle and exit."),
+    use_ibkr: bool = typer.Option(
+        False,
+        "--use-ibkr",
+        help=(
+            "Route fills through IBKR Gateway instead of the in-memory Simulator. "
+            "Requires IBKR_PORT=4002 (paper port) — refuses to start if 4001 (live)."
+        ),
+    ),
 ) -> None:
-    """Paper-trading runner (uses the in-memory Simulator)."""
-    cfg = _build_runner_config(
-        universe=universe,
-        strategies=strategy,
-        freq=freq,
-        schedule_cron=cron,
-        schedule_tz=tz,
-        vol_target_value=vol_target_value,
-        initial_cash=initial_cash,
-        use_simulator=True,
-    )
-    runner = Runner.from_config(cfg)
+    """Paper-trading runner.
+
+    By default uses the in-memory Simulator — instant, deterministic
+    fills, no broker round-trip. Pass ``--use-ibkr`` to route through IB
+    Gateway in paper mode instead; that connects to the real IBKR paper
+    account so positions show up in Client Portal.
+
+    Safety: ``--use-ibkr`` refuses to start if ``IBKR_PORT=4001`` (live
+    port). The same gateway image can serve both paper and live;
+    ``IBKR_TRADING_MODE`` on the gateway side determines which account
+    it logs into. The port check is our defense-in-depth — you can't
+    accidentally point the paper runner at a live gateway.
+    """
+    if use_ibkr:
+        if settings.ibkr_port == 4001:
+            raise typer.BadParameter(
+                "--use-ibkr with IBKR_PORT=4001 would route to the LIVE port. "
+                "Set IBKR_PORT=4002 in .env to use the paper gateway, or use "
+                "`trading live run` explicitly if you actually want live."
+            )
+        from trading.execution.ibkr import IbkrBroker
+
+        broker = IbkrBroker()
+        broker.connect()
+        cfg = _build_runner_config(
+            universe=universe,
+            strategies=strategy,
+            freq=freq,
+            schedule_cron=cron,
+            schedule_tz=tz,
+            vol_target_value=vol_target_value,
+            initial_cash=initial_cash,
+            use_simulator=False,
+        )
+        runner = Runner.from_config(cfg, broker=broker)
+        console.print(
+            f"[yellow]paper runner via IBKR Gateway[/yellow] "
+            f"({settings.ibkr_host}:{settings.ibkr_port})"
+        )
+    else:
+        cfg = _build_runner_config(
+            universe=universe,
+            strategies=strategy,
+            freq=freq,
+            schedule_cron=cron,
+            schedule_tz=tz,
+            vol_target_value=vol_target_value,
+            initial_cash=initial_cash,
+            use_simulator=True,
+        )
+        runner = Runner.from_config(cfg)
 
     if once:
         report = runner.run_once()
