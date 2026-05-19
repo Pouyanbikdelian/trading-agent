@@ -247,14 +247,55 @@ class Runner:
         finally:
             await self._shutdown()
 
+    # Hard upper bound on cycle duration. If the cycle is still running
+    # past this, we abort and notify the operator. Generous enough for
+    # a cold data refresh + ~10 IBKR API calls; tight enough that the
+    # operator hears about a wedged gateway within minutes, not hours.
+    CYCLE_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
+
     async def _run_cycle_async(self) -> None:
-        # APScheduler will execute coroutine jobs natively; we run the
-        # synchronous cycle in a thread so a slow run doesn't block the loop.
-        report = await asyncio.to_thread(self.cycle.run_cycle)
+        """Run one trading cycle with a hard timeout + Telegram-friendly
+        error reporting.
+
+        APScheduler executes coroutine jobs natively; we run the synchronous
+        cycle in a worker thread so the event loop stays responsive (the
+        trigger watcher, the HMM advisor, etc. continue to fire).
+
+        If the cycle exceeds ``CYCLE_TIMEOUT_SECONDS`` — almost always
+        because the IBKR gateway has a dead broker session and an API call
+        is wedged — we abort with a clear error message and Telegram alert.
+        The worker thread continues running in the background; it'll wind
+        down on its own when its ib-async call eventually times out
+        internally. Crucially the runner is unblocked and ready for the
+        next scheduled cycle.
+        """
+        try:
+            report = await asyncio.wait_for(
+                asyncio.to_thread(self.cycle.run_cycle),
+                timeout=self.CYCLE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            msg = (
+                f"⏱️ cycle aborted after {self.CYCLE_TIMEOUT_SECONDS:.0f}s — "
+                "likely a wedged IBKR Gateway. Try: docker compose restart "
+                "ib-gateway + trader, then re-trigger."
+            )
+            logger.bind(component="runner").error(msg)
+            self.alerts.critical(msg)
+            return
+        except Exception as e:
+            msg = f"❌ cycle crashed: {type(e).__name__}: {e}"
+            logger.bind(component="runner").exception("cycle crashed")
+            self.alerts.critical(msg)
+            return
+
         if report.status == "error":
-            logger.bind(component="runner").error(f"cycle error: {report.error}")
+            err = (report.error or "unknown error").strip()
+            logger.bind(component="runner").error(f"cycle error: {err}")
+            self.alerts.error(f"❌ cycle finished with error: {err[:300]}")
         elif report.status == "halted":
             logger.bind(component="runner").warning("cycle halted by risk manager")
+            self.alerts.warning("⚠️ cycle halted by risk manager")
 
     async def _run_hmm_advisor_async(self) -> None:
         """Daily: refit a 3-state Gaussian HMM on the last ~5 years of
