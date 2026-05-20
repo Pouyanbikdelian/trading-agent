@@ -334,6 +334,10 @@ class Cycle:
         # — this is a heads-up so the operator can intervene with /fx.
         self._preflight_buying_power(orders, account, last_prices)
 
+        # 8c. Basket preview — Telegram the planned orders *before* they
+        # go to the broker so the operator can see what will trade.
+        self._announce_basket(orders, account, last_prices)
+
         # 9. Submit each order. The cycle stops at first hard failure to
         #    avoid partial portfolio bringups, but logs and alerts.
         orders_submitted = 0
@@ -596,6 +600,63 @@ class Cycle:
             f"net buys, have ${cash:,.0f} — short ~${shortfall:,.0f}. "
             "IBKR may reject or auto-margin; consider `/fx` to convert."
         )
+
+    def _announce_basket(
+        self,
+        orders: list[Any],
+        account: Any,
+        last_prices: dict[str, float],
+    ) -> None:
+        """Telegram-announce the planned order list before broker submission.
+
+        Lets the operator see *what* the strategy decided this cycle (which
+        names, what size, what % of equity) without having to wait for
+        fills or grep order_store.
+        """
+        if not orders:
+            self.alerts.info(
+                "📊 cycle plan: no orders — portfolio already on target."
+            )
+            return
+
+        from trading.core.types import Side as _Side
+
+        equity = float(getattr(account, "equity", 0.0) or 0.0)
+        cash = float(getattr(account, "cash", 0.0) or 0.0)
+
+        buy_lines: list[str] = []
+        sell_lines: list[str] = []
+        gross = 0.0
+        net = 0.0
+        for o in orders:
+            px = last_prices.get(o.instrument.key, 0.0)
+            notional = float(o.quantity) * float(px)
+            gross += abs(notional)
+            pct = (notional / equity * 100.0) if equity > 0 else 0.0
+            line = (
+                f"  {o.instrument.symbol:<6} {o.quantity:>6g} @ ${px:,.2f} "
+                f"= ${notional:>10,.0f}  ({pct:>4.1f}%)"
+            )
+            if o.side == _Side.BUY:
+                buy_lines.append(line)
+                net += notional
+            else:
+                sell_lines.append(line)
+                net -= notional
+
+        parts: list[str] = [
+            f"📊 cycle plan: {len(orders)} order(s), gross ${gross:,.0f} "
+            f"on equity ${equity:,.0f}, cash ${cash:,.0f}"
+        ]
+        if buy_lines:
+            parts.append("BUY:")
+            parts.extend(buy_lines)
+        if sell_lines:
+            parts.append("SELL:")
+            parts.extend(sell_lines)
+        parts.append(f"net buy: ${net:,.0f}")
+
+        self.alerts.info("\n".join(parts))
 
     def _apply_operator_mode(self, weights: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
         """Apply the operator-set mode from ``state/mode.json``.
