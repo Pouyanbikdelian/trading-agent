@@ -444,9 +444,13 @@ class IbkrBroker(Broker):
                 continue
             if since is not None and ts < since:
                 continue
+            # ib-async's Fill exposes contract/execution/commissionReport but
+            # NOT a top-level .order — that was an earlier API. The orderRef
+            # (our client_order_id) lives on the Execution itself; fall back
+            # to the IBKR orderId if it's missing.
             out.append(
                 Fill(
-                    order_id=getattr(f.order, "orderRef", "") or str(getattr(exec_, "orderId", "")),
+                    order_id=getattr(exec_, "orderRef", "") or str(getattr(exec_, "orderId", "")),
                     ts=ts,
                     quantity=float(exec_.shares),
                     price=float(exec_.price),

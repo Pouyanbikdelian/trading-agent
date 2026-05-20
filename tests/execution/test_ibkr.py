@@ -209,12 +209,14 @@ def test_get_account_reads_summary(broker: IbkrBroker, fake_ib: _FakeIb) -> None
 
 
 def test_get_fills_filters_by_since(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
+    # ib-async's Execution carries orderRef directly (no .order on Fill).
     exec1 = SimpleNamespace(
         time=datetime(2024, 1, 1, tzinfo=timezone.utc),
         shares=5,
         price=100.0,
         exchange="SMART",
         orderId=1,
+        orderRef="ref-1",
     )
     exec2 = SimpleNamespace(
         time=datetime(2024, 1, 3, tzinfo=timezone.utc),
@@ -222,15 +224,14 @@ def test_get_fills_filters_by_since(broker: IbkrBroker, fake_ib: _FakeIb) -> Non
         price=101.0,
         exchange="SMART",
         orderId=2,
+        orderRef="ref-2",
     )
     fill1 = SimpleNamespace(
         execution=exec1,
-        order=SimpleNamespace(orderRef="ref-1"),
         commissionReport=SimpleNamespace(commission=0.1),
     )
     fill2 = SimpleNamespace(
         execution=exec2,
-        order=SimpleNamespace(orderRef="ref-2"),
         commissionReport=SimpleNamespace(commission=0.1),
     )
     fake_ib._fills = [fill1, fill2]
