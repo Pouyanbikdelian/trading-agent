@@ -22,6 +22,7 @@ from typing import Any
 from trading.core.logging import logger
 from trading.core.types import AssetClass, Instrument, Order, OrderType, Side, TimeInForce
 from trading.execution.base import Broker
+from trading.risk.manager import RiskManager
 from trading.runner.alerts import TelegramAlerts
 from trading.runtime.commands import (
     Command,
@@ -31,16 +32,41 @@ from trading.runtime.commands import (
     pending_commands,
 )
 
+# Commands that submit orders to the broker. These MUST be gated by the
+# risk manager's halt state — otherwise an operator who has typed /halt
+# can still trade via /buy, /sell, /close, /flatten, /fx. Audit (May 2026)
+# flagged this as a critical bypass. Non-order commands (cancel, refresh,
+# reconnect) are still allowed during halt — they're recovery actions.
+_ORDER_SUBMITTING_COMMANDS = {
+    CommandType.BUY,
+    CommandType.SELL,
+    CommandType.CLOSE,
+    CommandType.FLATTEN,
+    CommandType.FX_CONVERT,
+}
+
 
 def _short_id(uuid_str: str) -> str:
     return uuid_str[:8]
 
 
-def process_pending(broker: Broker, state_dir: Path, alerts: TelegramAlerts) -> int:
+def process_pending(
+    broker: Broker,
+    state_dir: Path,
+    alerts: TelegramAlerts,
+    *,
+    risk_manager: RiskManager | None = None,
+) -> int:
     r"""Pick up all pending commands, execute them, and alert the operator.
 
     Returns the number of commands processed (useful for tests + logs).
     Never raises — each command's failure is captured and reported.
+
+    The ``risk_manager`` argument is optional for backward compatibility
+    with existing tests, but the runner always passes it in production so
+    the halt gate is enforced on manual orders. When omitted, the halt
+    gate is skipped (callers should explicitly pass ``None`` only in
+    tests that don't exercise the halt-bypass path).
     """
     cmds = pending_commands(state_dir)
     if not cmds:
@@ -52,16 +78,39 @@ def process_pending(broker: Broker, state_dir: Path, alerts: TelegramAlerts) -> 
         except FileNotFoundError:
             # Another watcher beat us to it — skip.
             continue
-        _execute_one(cmd, broker, state_dir, alerts)
+        _execute_one(cmd, broker, state_dir, alerts, risk_manager=risk_manager)
     return len(cmds)
 
 
-def _execute_one(cmd: Command, broker: Broker, state_dir: Path, alerts: TelegramAlerts) -> None:
+def _execute_one(
+    cmd: Command,
+    broker: Broker,
+    state_dir: Path,
+    alerts: TelegramAlerts,
+    *,
+    risk_manager: RiskManager | None = None,
+) -> None:
     handler = _HANDLERS.get(cmd.type)
     if handler is None:
         msg = f"unknown command type `{cmd.type.value}`"
         mark_executed(cmd, state_dir, status="error", result=msg)
         alerts.error(f"❌ command `{_short_id(cmd.id)}` rejected: {msg}")
+        return
+
+    # Halt gate: refuse to submit orders while the risk manager is halted.
+    # Operator must /resume before manual trading resumes.
+    if (
+        risk_manager is not None
+        and risk_manager.is_halted()
+        and cmd.type in _ORDER_SUBMITTING_COMMANDS
+    ):
+        reason = getattr(risk_manager._state, "reason", "") or "halted"  # noqa: SLF001
+        msg = f"refused — risk manager halted: {reason}. /resume first."
+        logger.bind(component="command_processor").warning(
+            f"halt gate blocked {cmd.type.value} command {cmd.id}"
+        )
+        mark_executed(cmd, state_dir, status="error", result=msg)
+        alerts.error(f"🛑 `{_short_id(cmd.id)}` {cmd.type.value} {msg}")
         return
 
     try:

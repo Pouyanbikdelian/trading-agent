@@ -314,6 +314,20 @@ class Runner:
             f"scheduler started — next run: {self._scheduler.get_job('cycle').next_run_time}"
         )
 
+        # Startup reconciliation. Today (May 2026) we shipped a bug where
+        # broker.get_account silently returned a zero-position snapshot on
+        # IBKR timeout, and three cycles stacked to 3× target. The cycle
+        # itself now fails-closed on that path, but a sibling failure
+        # mode is: container restarts mid-cycle, local order_store is
+        # empty, broker still holds positions, next cycle thinks book is
+        # flat and re-buys. We can't *fix* that automatically (the
+        # safest thing is to make the operator notice + decide), but we
+        # CAN make the drift loud at startup so they intervene.
+        try:
+            await asyncio.to_thread(self._reconcile_startup)
+        except Exception:
+            logger.bind(component="runner").exception("startup reconciliation failed")
+
         # Park until cancelled.
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -330,6 +344,67 @@ class Runner:
     # a cold data refresh + ~10 IBKR API calls; tight enough that the
     # operator hears about a wedged gateway within minutes, not hours.
     CYCLE_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
+
+    def _reconcile_startup(self) -> None:
+        """At startup, compare the broker's positions to the last persisted
+        snapshot. If they differ, alert the operator loudly — they may need
+        to manually flatten or sell down before the next cycle.
+
+        Why this matters: the cycle uses broker.get_account() each cycle,
+        but if the operator just restarted the container right after a
+        partial-fill run, the local snapshot might be stale and the
+        broker could be holding positions that were never persisted. We
+        don't auto-rebalance because the safe action depends on intent
+        — *operator must decide*.
+        """
+        try:
+            broker_positions = self.broker.get_positions()
+        except Exception as e:
+            logger.bind(component="runner").warning(
+                f"startup reconciliation: broker.get_positions failed ({e!r}); "
+                "skipping drift check"
+            )
+            return
+
+        snap = None
+        with contextlib.suppress(Exception):
+            snap = self.cycle.runner_store.latest_snapshot()
+        snap_positions = list(snap.positions.values()) if snap else []
+
+        # Build a key -> quantity mapping for both sides.
+        broker_map = {p.instrument.key: float(p.quantity) for p in broker_positions}
+        snap_map = {p.instrument.key: float(p.quantity) for p in snap_positions}
+
+        drifted: list[str] = []
+        all_keys = set(broker_map) | set(snap_map)
+        for k in all_keys:
+            b = broker_map.get(k, 0.0)
+            s = snap_map.get(k, 0.0)
+            if abs(b - s) < 1e-6:
+                continue
+            sym = k.split(":", 1)[1] if ":" in k else k
+            drifted.append(f"{sym}: broker={b:g}, snapshot={s:g}")
+
+        if not drifted:
+            self.alerts.info(
+                f"✅ startup reconciliation: broker matches last snapshot "
+                f"({len(broker_positions)} position(s))"
+            )
+            return
+
+        snap_age = "(no prior snapshot)"
+        if snap is not None:
+            age = (datetime.now() - snap.ts.replace(tzinfo=None)).total_seconds()
+            snap_age = f"(snapshot is {age / 60:.0f} min old)"
+        body = "\n".join(f"  • {line}" for line in drifted)
+        self.alerts.critical(
+            "⚠️ startup reconciliation: BROKER POSITIONS DIFFER FROM SNAPSHOT "
+            f"{snap_age}\n{body}\n"
+            "→ review with /positions and either /flatten or accept the broker state."
+        )
+        logger.bind(component="runner").warning(
+            f"startup drift: {len(drifted)} symbol(s) — {drifted}"
+        )
 
     def _format_runner_started_message(self) -> str:
         """Build the human-readable startup alert.
@@ -533,11 +608,21 @@ class Runner:
         event loop. APScheduler's ``max_instances=1`` guarantees a single
         instance at a time, so we never have two parallel command
         processors competing for the broker.
+
+        Threads the risk manager through so order-submitting commands
+        are halt-gated; otherwise a /halt followed by /buy would still
+        submit (audit May 2026).
         """
         try:
             from trading.runtime.command_processor import process_pending
 
-            await asyncio.to_thread(process_pending, self.broker, settings.state_dir, self.alerts)
+            await asyncio.to_thread(
+                process_pending,
+                self.broker,
+                settings.state_dir,
+                self.alerts,
+                risk_manager=self.cycle.risk_manager,
+            )
         except Exception:
             logger.bind(component="command_processor").exception("command processing failed")
 
