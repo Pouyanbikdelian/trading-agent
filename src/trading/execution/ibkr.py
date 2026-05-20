@@ -163,24 +163,31 @@ class IbkrBroker(Broker):
         hangs indefinitely. We dispatch into a worker thread and reap with
         a hard timeout — on expiry, raise ``BrokerTimeoutError`` so the
         cycle aborts cleanly instead of silently waiting hours.
+
+        IMPORTANT: do not use ThreadPoolExecutor as a context manager here.
+        The default ``__exit__`` calls ``shutdown(wait=True)`` which blocks
+        waiting for the still-running wedged task to complete — that defeats
+        the entire timeout. We explicitly ``shutdown(wait=False)`` so the
+        leaked thread can die in the background (the GC will eventually
+        clean it up; the cost is one dead Python thread per IBKR wedge,
+        which is acceptable until the operator restarts the gateway).
         """
         from concurrent.futures import ThreadPoolExecutor
         from concurrent.futures import TimeoutError as FutTimeout
 
         timeout = timeout if timeout is not None else self.DEFAULT_API_TIMEOUT_S
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"ibkr-{what}") as ex:
+        ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"ibkr-{what}")
+        try:
             future = ex.submit(fn)
             try:
                 return future.result(timeout=timeout)
             except FutTimeout as e:
-                # The submitted call is still running in the executor thread —
-                # we can't safely interrupt it, but we let it finish at its
-                # own pace while the cycle moves on. The thread will be GC'd
-                # when the executor exits this `with` block.
                 raise BrokerTimeoutError(
                     f"IBKR {what} timed out after {timeout:.0f}s — gateway likely "
                     "has a dead broker session (try restarting ib-gateway container)"
                 ) from e
+        finally:
+            ex.shutdown(wait=False)
 
     def _contract(self, instrument: Instrument) -> Any:
         from ib_async import Crypto, Forex, Future, Stock  # lazy import
