@@ -45,8 +45,10 @@ def test_gross_exposure_scales_everything(mgr, aapl, msft, account_100k, t0) -> 
         instruments=instruments_dict(aapl, msft),
     )
     # Gross before scaling: 0.15; after: 0.10. scale = 0.10 / 0.15.
+    # AAPL fractional target = 66.666… shares; truncated to 66 because IBKR
+    # rejects fractional EQUITY orders via API.
     by_sym = {o.instrument.symbol: o for o in orders}
-    assert by_sym["AAPL"].quantity == pytest.approx((0.10 * 0.10 / 0.15 * 100_000) / 100, rel=1e-9)
+    assert by_sym["AAPL"].quantity == 66.0
     assert any("gross" in d.reason for d in decisions if d.action == "scale")
 
 

@@ -38,6 +38,7 @@ from pathlib import Path
 from trading.core.logging import logger
 from trading.core.types import (
     AccountSnapshot,
+    AssetClass,
     Instrument,
     Order,
     OrderType,
@@ -248,6 +249,10 @@ class RiskManager:
             )
 
         # --- 5. Build delta-quantity orders.
+        # IBKR's API rejects fractional shares for EQUITY/ETF orders
+        # (Error 10243: "Fractional-sized order cannot be placed via API").
+        # Crypto and FX support fractional sizing. We truncate toward zero
+        # so the resulting notional never exceeds the per-position cap.
         orders: list[Order] = []
         for key, target_w in weights.items():
             if key not in instruments:
@@ -261,17 +266,25 @@ class RiskManager:
                 )
                 continue
 
+            ins = instruments[key]
+            whole_shares_only = ins.asset_class in (AssetClass.EQUITY, AssetClass.ETF)
+
             target_value = target_w * account.equity
             target_qty = target_value / last_prices[key]
+            if whole_shares_only:
+                # int() truncates toward zero — fine for both long and short legs.
+                target_qty = float(int(target_qty))
             current_qty = account.positions[key].quantity if key in account.positions else 0.0
             delta = target_qty - current_qty
+            if whole_shares_only:
+                delta = float(int(delta))
             if abs(delta) < _EPS_QTY:
                 continue
 
             orders.append(
                 Order(
                     client_order_id=order_id_factory(),
-                    instrument=instruments[key],
+                    instrument=ins,
                     side=Side.BUY if delta > 0 else Side.SELL,
                     quantity=abs(delta),
                     order_type=OrderType.MARKET,
