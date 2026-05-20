@@ -279,7 +279,13 @@ class Cycle:
             )
 
         # 3. Get the latest broker account view.
+        logger.bind(component="cycle").info("fetching broker account snapshot")
         account = self._fetch_account(ts_start)
+        logger.bind(component="cycle").info(
+            f"account: cash=${getattr(account, 'cash', 0):,.0f} "
+            f"equity=${getattr(account, 'equity', 0):,.0f} "
+            f"positions={len(getattr(account, 'positions', {}) or {})}"
+        )
 
         # 4. Intraday kill switches (daily-loss, drawdown).
         intraday = self.risk_manager.evaluate_intraday(account)
@@ -295,6 +301,10 @@ class Cycle:
             )
 
         # 5. Generate strategy weights and combine.
+        logger.bind(component="cycle").info(
+            f"generating weights: strategies={cfg.strategies}, "
+            f"combiner={cfg.combiner}, prices_shape={prices.shape}"
+        )
         weights = self._generate_combined_weights(prices, cfg=cfg)
 
         # 6. Optional vol-target overlay.
@@ -319,6 +329,9 @@ class Cycle:
         instruments_by_key = {ins.key: ins for ins in instruments if ins.key in last_prices}
 
         # 8. Risk manager: signal -> orders.
+        logger.bind(component="cycle").info(
+            f"risk manager: signal has {len(signal.target_weights)} target weights"
+        )
         orders, decisions = self.risk_manager.signal_to_orders(
             signal,
             account=account,
@@ -400,34 +413,91 @@ class Cycle:
     def _elapsed_ms(self, ts_start: datetime) -> float:
         return (self._clock() - ts_start).total_seconds() * 1000.0
 
+    # Per-instrument refresh hard ceiling. yfinance has no built-in timeout;
+    # before this we silently hung for >5min on the sp500 universe, blowing
+    # the cycle's outer 300s budget. 15s per ticker × 500 = max 125min, but
+    # in practice most calls return in ~500ms so totals are ~5min worst case.
+    # The cycle's own 300s timeout still backstops the whole thing.
+    REFRESH_PER_CALL_TIMEOUT_S: ClassVar[float] = 15.0
+    REFRESH_PROGRESS_EVERY: ClassVar[int] = 50
+
     def _load_prices(self, instruments: list[Instrument], ts: datetime) -> pd.DataFrame:
         """Read each instrument's price column from the cache, optionally
         fetching fresh bars first. Returns a wide-format DataFrame aligned
-        on the inner intersection of dates."""
+        on the inner intersection of dates.
+
+        Adds per-call timeout + progress logging because the prior silent
+        loop wedged on yfinance for 500 sp500 names and blew the cycle
+        budget.
+        """
+        import concurrent.futures
+        import time
+
         freq: Frequency = self.config.freq  # type: ignore[assignment]
         # Choose a generous start: we want at least `history_bars` rows. The
         # cache returns whatever it has; downstream code handles short series.
         start = ts.replace(year=ts.year - 5)  # 5 years back is more than enough
         end = ts
 
+        n_total = len(instruments)
+        logger.bind(component="cycle").info(
+            f"loading prices: {n_total} instruments, auto_refresh="
+            f"{self.config.auto_refresh}, freq={freq}"
+        )
+        t0 = time.monotonic()
+        n_refreshed = 0
+        n_refresh_failed = 0
+        n_refresh_timeout = 0
+
         series: dict[str, pd.Series] = {}
-        for ins in instruments:
-            df = pd.DataFrame()
-            if self.config.auto_refresh:
-                try:
+        # Single executor reused across the loop — cheaper than spawning one
+        # per call. Workers run yfinance.download() (blocking I/O); 4 is
+        # enough since per-call timeout is the real safety net.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            for idx, ins in enumerate(instruments, start=1):
+                df = pd.DataFrame()
+                if self.config.auto_refresh:
                     source = self.source_factory(ins)
-                    df = self.cache.get_bars(source, ins, start, end, freq)
-                except Exception:
-                    logger.bind(symbol=ins.symbol).exception(
-                        "refresh failed; falling back to cache"
+                    future = pool.submit(self.cache.get_bars, source, ins, start, end, freq)
+                    try:
+                        df = future.result(timeout=self.REFRESH_PER_CALL_TIMEOUT_S)
+                        n_refreshed += 1
+                    except concurrent.futures.TimeoutError:
+                        n_refresh_timeout += 1
+                        logger.bind(symbol=ins.symbol).warning(
+                            f"refresh timed out after {self.REFRESH_PER_CALL_TIMEOUT_S:.0f}s; "
+                            "falling back to cache"
+                        )
+                        # The future will keep running in the worker; the
+                        # executor's __exit__ will wait, but the loop continues.
+                    except Exception:
+                        n_refresh_failed += 1
+                        logger.bind(symbol=ins.symbol).exception(
+                            "refresh failed; falling back to cache"
+                        )
+                if df.empty:
+                    df = self.cache.read(ins, freq)
+                if df.empty or self.config.price_column not in df.columns:
+                    continue
+                s = df[self.config.price_column].dropna()
+                if not s.empty:
+                    series[ins.symbol] = s.iloc[-self.config.history_bars :]
+
+                if idx % self.REFRESH_PROGRESS_EVERY == 0:
+                    elapsed = time.monotonic() - t0
+                    logger.bind(component="cycle").info(
+                        f"  …prices {idx}/{n_total} loaded "
+                        f"({len(series)} non-empty, {elapsed:.0f}s elapsed, "
+                        f"refresh: {n_refreshed} ok / {n_refresh_timeout} timeout / "
+                        f"{n_refresh_failed} err)"
                     )
-            if df.empty:
-                df = self.cache.read(ins, freq)
-            if df.empty or self.config.price_column not in df.columns:
-                continue
-            s = df[self.config.price_column].dropna()
-            if not s.empty:
-                series[ins.symbol] = s.iloc[-self.config.history_bars :]
+
+        elapsed = time.monotonic() - t0
+        logger.bind(component="cycle").info(
+            f"prices loaded: {len(series)}/{n_total} non-empty in {elapsed:.1f}s "
+            f"(refresh: {n_refreshed} ok, {n_refresh_timeout} timeout, "
+            f"{n_refresh_failed} err)"
+        )
 
         if not series:
             return pd.DataFrame()
