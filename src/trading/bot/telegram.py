@@ -64,13 +64,14 @@ HELP_TEXT = (
     "/confirm — apply the previewed mode + run an off-cycle rebalance\n"
     "/cancel — discard a pending mode preview\n\n"
     "*Manual orders* (queued; runner executes within ~5s)\n"
-    "/buy SYM QTY [LIMIT] — e.g. `/buy AAPL 10`\n"
+    "/buy SYM QTY [LIMIT] — e.g. `/buy AAPL 10` or `/buy 10 AAPL`\n"
     "/sell SYM [QTY|all] [LIMIT] — e.g. `/sell AAPL all`\n"
     "/close SYM — close a single position\n"
     "/flatten — close every open position\n"
     "/cancel_order CLIENT_ID — cancel a specific pending order\n\n"
     "*FX*\n"
-    "/fx FROM AMOUNT [TO] — convert at market, e.g. `/fx CHF 50000`\n\n"
+    "/fx 5000 CHF to USD — convert at market (also: `/convert`)\n"
+    "/fx 5000 CHF — to USD by default\n\n"
     "*Reliability*\n"
     "/health — broker / heartbeat / queue at a glance\n"
     "/cycle — force one off-cycle rebalance now\n"
@@ -455,28 +456,94 @@ def _queue_command(cmd_type: str, args: dict[str, Any]) -> str:
     return f"📋 Queued `{cmd.id[:8]}` ({cmd_type}) — runner will execute within ~5s and reply."
 
 
+def _looks_like_number(s: str) -> bool:
+    """True if ``s`` parses as a positive number (or 'all')."""
+    if s.lower() == "all":
+        return True
+    try:
+        return float(s) > 0
+    except ValueError:
+        return False
+
+
+def _looks_like_ticker(s: str) -> bool:
+    r"""True if ``s`` looks like a stock ticker: 1-5 alphanumeric chars,
+    optionally with `.`, `-` (BRK.A, RDS-A). Not bulletproof — just to
+    catch typos like ``/buy 10 appl`` early with a clear message."""
+    if not s or len(s) > 8:
+        return False
+    cleaned = s.replace(".", "").replace("-", "")
+    return cleaned.isalnum() and cleaned[0].isalpha()
+
+
+def _parse_order_args(args: list[str], action: str) -> tuple[str, str, str | None] | str:
+    r"""Parse buy/sell args supporting either order:
+
+      /buy AAPL 10           — SYMBOL first
+      /buy 10 AAPL           — QTY first (more natural English)
+      /buy AAPL 10 195.50    — with limit price
+      /buy 10 AAPL 195.50    — with limit price (qty-first)
+      /sell AAPL all
+      /sell all AAPL
+
+    Returns (symbol, qty, limit_or_None) on success, or an error string.
+    """
+    if not args:
+        return (
+            f"usage: `/{action} SYMBOL QTY [LIMIT_PRICE]` — "
+            f"e.g. `/{action} AAPL 10` or `/{action} 10 AAPL`"
+        )
+
+    # Strategy: identify which arg is the ticker (alpha-leading) and
+    # which is the quantity (numeric or "all"). Then any third arg is
+    # the limit price.
+    if len(args) == 1:
+        # Only one arg — must be a symbol (for sell-all)
+        if not _looks_like_ticker(args[0]):
+            return f"❌ `{args[0]}` doesn't look like a ticker (1-5 letters)"
+        if action == "sell":
+            return (args[0].upper(), "all", None)
+        return f"usage: `/{action} SYMBOL QTY` — e.g. `/{action} AAPL 10`"
+
+    a, b = args[0], args[1]
+    if _looks_like_ticker(a) and _looks_like_number(b):
+        symbol, qty = a, b
+    elif _looks_like_number(a) and _looks_like_ticker(b):
+        symbol, qty = b, a
+    else:
+        return (
+            f"❌ couldn't parse `{a}` `{b}` as (symbol, qty). "
+            f"Expected one to be a ticker (e.g. AAPL) and the other a "
+            f"number (e.g. 10) — got `{a}`, `{b}`."
+        )
+
+    limit = args[2] if len(args) >= 3 else None
+    if limit is not None and not _looks_like_number(limit):
+        return f"❌ limit price `{limit}` is not a number"
+    return symbol.upper(), qty, limit
+
+
 def _cmd_buy(args: list[str]) -> str:
-    r"""``/buy SYM QTY [LIMIT_PRICE]``  e.g. ``/buy AAPL 10`` or ``/buy AAPL 10 195.50``."""
-    if len(args) < 2:
-        return "usage: `/buy SYMBOL QTY [LIMIT_PRICE]` — e.g. `/buy AAPL 10`"
-    payload: dict[str, Any] = {
-        "symbol": args[0].upper(),
-        "qty": args[1],
-    }
-    if len(args) >= 3:
-        payload["limit"] = args[2]
+    r"""``/buy AAPL 10`` or ``/buy 10 AAPL`` — accepts either arg order."""
+    parsed = _parse_order_args(args, "buy")
+    if isinstance(parsed, str):
+        return parsed
+    symbol, qty, limit = parsed
+    payload: dict[str, Any] = {"symbol": symbol, "qty": qty}
+    if limit is not None:
+        payload["limit"] = limit
     return _queue_command("buy", payload)
 
 
 def _cmd_sell(args: list[str]) -> str:
-    r"""``/sell SYM [QTY|all] [LIMIT_PRICE]`` — defaults to selling the entire position."""
-    if len(args) < 1:
-        return "usage: `/sell SYMBOL [QTY|all] [LIMIT_PRICE]` — e.g. `/sell AAPL 5` or `/sell AAPL all`"
-    payload: dict[str, Any] = {"symbol": args[0].upper(), "qty": "all"}
-    if len(args) >= 2:
-        payload["qty"] = args[1]
-    if len(args) >= 3:
-        payload["limit"] = args[2]
+    r"""``/sell AAPL 5`` or ``/sell 5 AAPL`` or ``/sell AAPL all`` — defaults to closing the full position."""
+    parsed = _parse_order_args(args, "sell")
+    if isinstance(parsed, str):
+        return parsed
+    symbol, qty, limit = parsed
+    payload: dict[str, Any] = {"symbol": symbol, "qty": qty}
+    if limit is not None:
+        payload["limit"] = limit
     return _queue_command("sell", payload)
 
 
@@ -588,25 +655,63 @@ def _cmd_fx_rate(args: list[str]) -> str:
         return f"❌ FX rate lookup failed: `{e}`"
 
 
-def _cmd_fx(args: list[str]) -> str:
-    r"""``/fx FROM_CCY AMOUNT [TO_CCY]`` — convert at market via IBKR.
+_KNOWN_CCYS = {"USD", "CHF", "EUR", "GBP", "JPY", "CAD", "AUD", "NZD"}
 
-    Examples:
-      ``/fx CHF 50000``       → spend 50000 CHF, receive USD
-      ``/fx USD 30000``       → spend 30000 USD, receive CHF (the OTHER major)
-      ``/fx CHF 50000 USD``   → explicit destination
+
+def _cmd_fx(args: list[str]) -> str:
+    r"""Convert currency at market — flexible parsing.
+
+    All of these work:
+      /fx 5000 CHF                 — 5000 CHF → USD  (default destination)
+      /fx 5000 CHF to USD          — explicit destination (English)
+      /fx 5000 CHF USD             — explicit destination (terse)
+      /fx CHF 5000                 — old form, still supported
+      /fx CHF 5000 USD             — old form with destination
+      /fx 5000 USD to CHF          — works either direction
+
+    ``/convert`` is registered as an alias for the same handler.
     """
-    if len(args) < 2:
-        return "usage: `/fx FROM_CCY AMOUNT [TO_CCY]` — e.g. `/fx CHF 50000`"
-    from_ccy = args[0].upper()
-    try:
-        amount = float(args[1])
-    except ValueError:
-        return f"❌ amount must be a number, got `{args[1]}`"
-    # Default: pick the OTHER major between USD and CHF.
-    to_ccy = args[2].upper() if len(args) >= 3 else ("USD" if from_ccy != "USD" else "CHF")
+    if not args:
+        return (
+            "*Usage:*\n"
+            "  `/fx 5000 CHF` — convert 5000 CHF to USD\n"
+            "  `/fx 5000 CHF to USD` — explicit destination\n"
+            "  `/fx 5000 USD to CHF` — either direction\n\n"
+            "_Same command also responds to `/convert`._"
+        )
+
+    # Drop English filler words so natural phrasing works.
+    tokens = [t for t in args if t.lower() not in ("to", "→", "->", "into", "for")]
+
+    amount: float | None = None
+    ccys: list[str] = []
+    for t in tokens:
+        if _looks_like_number(t) and t.lower() != "all":
+            if amount is None:
+                amount = float(t)
+            else:
+                return f"❌ unexpected second number: `{t}`"
+        else:
+            ccys.append(t.upper())
+
+    if amount is None or amount <= 0:
+        return "❌ missing or invalid amount. Try `/fx 5000 CHF to USD`"
+    if not ccys:
+        return "❌ missing currency. Try `/fx 5000 CHF` or `/fx 5000 CHF to USD`"
+
+    bad = [c for c in ccys if c not in _KNOWN_CCYS]
+    if bad:
+        return (
+            f"❌ unsupported currency: `{', '.join(bad)}`. "
+            f"Supported: {', '.join(sorted(_KNOWN_CCYS))}"
+        )
+
+    from_ccy = ccys[0]
+    # Default destination: the OTHER major between USD and CHF (matches user's CHF base account)
+    to_ccy = ccys[1] if len(ccys) >= 2 else ("USD" if from_ccy != "USD" else "CHF")
     if from_ccy == to_ccy:
-        return "❌ from_ccy and to_ccy can't be the same"
+        return f"❌ source and destination are the same (`{from_ccy}`)"
+
     return _queue_command(
         "fx_convert",
         {"from_ccy": from_ccy, "to_ccy": to_ccy, "amount": amount},
@@ -725,7 +830,7 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_balances()
     if cmd in ("/fx-rate", "/fx_rate", "/fxrate"):
         return _cmd_fx_rate(args)
-    if cmd == "/fx":
+    if cmd in ("/fx", "/convert"):
         return _cmd_fx(args)
     # --- Reliability ---
     if cmd == "/health":

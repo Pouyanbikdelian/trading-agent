@@ -90,13 +90,34 @@ class IbkrBroker(Broker):
 
     def connect(self) -> None:
         if self._ib is None:
-            from ib_async import IB  # lazy import
+            from ib_async import IB, util  # lazy import
 
+            # ib-async is single-event-loop. If we let ``asyncio.run`` in
+            # ``_run`` create a transient loop just for ``connectAsync``,
+            # that loop closes after the call and every subsequent ib-async
+            # call (placeOrder, accountSummary, …) raises ``Event loop is
+            # closed``. ``util.startLoop()`` spins up a *persistent*
+            # background loop in a daemon thread so the IB instance and
+            # all its async machinery stay alive for the process lifetime.
+            # If we're already inside an async context (e.g. inside the
+            # runner's APScheduler thread), skip startLoop — ib-async will
+            # use the running loop instead.
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                util.startLoop()
             self._ib = IB()
         if not self._ib.isConnected():
-            # Use a longer timeout for connect — gateway might still be
-            # logging in during the first ~minute after container start.
-            self._run(
+            # Route connectAsync through ib-async's util.run, which uses
+            # the persistent background loop set up above. We can't use
+            # asyncio.run() — that creates+closes a temporary loop and
+            # leaves the IB instance with stale loop references.
+            from ib_async import util as _util
+
+            # Wrap connectAsync in asyncio.wait_for so we get a hard
+            # ceiling (60s) on the initial handshake — useful when the
+            # gateway is still in its login dance.
+            _util.run(
                 asyncio.wait_for(
                     self._ib.connectAsync(self._host, self._port, clientId=self._client_id),
                     timeout=60.0,
