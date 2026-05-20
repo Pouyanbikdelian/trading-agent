@@ -227,29 +227,58 @@ def _cmd_heartbeat() -> str:
 
 
 def _cmd_positions() -> str:
-    # Pull the latest snapshot from the runner store. Lazily imported so
-    # the bot doesn't require sqlite to be initialised at import time.
+    """``/positions`` — monospace table of holdings as of the last cycle.
+
+    Note: this reads the *snapshot* the runner writes at end-of-cycle,
+    not a live broker query (the bot has no broker connection). If the
+    last cycle crashed mid-flight the data here is from the prior good
+    cycle; the snapshot timestamp at the top tells you how old it is.
+    """
     try:
         from trading.runner.state import RunnerStore
 
         store = RunnerStore(settings.state_dir / "runner.db")
         snap = store.latest_snapshot()
     except Exception as e:
-        return f"could not read positions: `{e}`"
+        return f"could not read positions: {e}"
     if snap is None:
-        return "_no snapshot yet — runner hasn't completed a cycle._"
+        return "no snapshot yet — runner hasn't completed a cycle."
     if not snap.positions:
-        return "_no open positions._"
+        return (
+            f"📊 Portfolio (snapshot {snap.ts:%Y-%m-%d %H:%M UTC})\n"
+            f"  Equity: ${snap.equity:,.2f}    Cash: ${snap.cash:,.2f}\n"
+            "  No open positions."
+        )
 
-    lines = [f"*Equity:* `${snap.equity:,.2f}`  *Cash:* `${snap.cash:,.2f}`", ""]
+    rows: list[tuple[str, float, float, float, float, float]] = []
     for _key, pos in sorted(snap.positions.items()):
         mv = pos.quantity * pos.avg_price + pos.unrealized_pnl
         weight = mv / snap.equity if snap.equity > 0 else 0.0
-        lines.append(
-            f"`{pos.instrument.symbol:<6}` qty `{pos.quantity:>8.2f}` "
-            f"avg `${pos.avg_price:>8.2f}` w `{weight:>6.2%}`"
+        rows.append(
+            (pos.instrument.symbol, pos.quantity, pos.avg_price, mv, weight, pos.unrealized_pnl)
         )
-    return "\n".join(lines)
+
+    header = (
+        f"{'Symbol':<7} {'Qty':>10} {'Avg cost':>11} "
+        f"{'Mkt value':>12} {'Weight':>7} {'P&L':>11}"
+    )
+    sep = "-" * len(header)
+    body = [
+        f"{sym:<7} {qty:>10.2f} {avg:>11,.2f} {mv:>12,.0f} {w:>6.1%} {pnl:>+11,.0f}"
+        for sym, qty, avg, mv, w, pnl in rows
+    ]
+
+    n = len(rows)
+    long_count = sum(1 for _, qty, *_ in rows if qty > 0)
+    short_count = n - long_count
+
+    summary = (
+        f"📊 Portfolio (snapshot {snap.ts:%Y-%m-%d %H:%M UTC})\n"
+        f"  Equity: ${snap.equity:,.2f}    Cash: ${snap.cash:,.2f}\n"
+        f"  Positions: {n} ({long_count} long, {short_count} short)"
+    )
+    table = "```\n" + "\n".join([header, sep, *body]) + "\n```"
+    return summary + "\n" + table
 
 
 # ---------------------------------------------------------------------------

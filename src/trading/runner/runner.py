@@ -96,6 +96,62 @@ def _fetch_spy_vix(lookback_days: int = 260) -> tuple[Any, Any]:
         return None, None
 
 
+_CRON_DOW_NAMES = {
+    "MON": "Mondays",
+    "TUE": "Tuesdays",
+    "WED": "Wednesdays",
+    "THU": "Thursdays",
+    "FRI": "Fridays",
+    "SAT": "Saturdays",
+    "SUN": "Sundays",
+}
+
+
+def _humanize_cron(expr: str) -> str:
+    """Translate a 5-field cron string into something humans read.
+
+    Only handles the common case "M H * * DOW" — falls back to the raw
+    expression for anything more exotic (the operator can read cron;
+    the goal is just to avoid surprising the user with `5 21 * * FRI`).
+    """
+    parts = expr.split()
+    if len(parts) != 5:
+        return expr
+    minute, hour, dom, mon, dow = parts
+    try:
+        m = int(minute)
+        h = int(hour)
+    except ValueError:
+        return expr
+    time_s = f"{h:02d}:{m:02d} UTC"
+    if dom == "*" and mon == "*" and dow == "*":
+        return f"daily at {time_s}"
+    if dom == "*" and mon == "*" and dow.upper() in _CRON_DOW_NAMES:
+        return f"{_CRON_DOW_NAMES[dow.upper()]} {time_s}"
+    return expr
+
+
+def _humanize_strategy(slug: str, params: dict[str, Any]) -> str:
+    """Translate a strategy slug + params into a one-line description.
+
+    Falls back to the raw slug for strategies we haven't pretty-printed
+    yet; safe to extend without coupling.
+    """
+    if slug == "top_k_momentum":
+        k = params.get("k", 8)
+        lookback = params.get("lookback", 126)
+        skip = params.get("skip", 21)
+        rebal = params.get("rebalance", 63)
+        return (
+            f"Top-{k} momentum (lookback {lookback}d, skip {skip}d, "
+            f"rebalance every {rebal} bars)"
+        )
+    if not params:
+        return slug
+    p = ", ".join(f"{k}={v}" for k, v in params.items())
+    return f"{slug} ({p})"
+
+
 class Runner:
     """Coordinates one Cycle on an APScheduler crontab. Holds no state of
     its own — restart safety comes from the SQLite stores and halt file."""
@@ -253,10 +309,7 @@ class Runner:
             )
 
         self._scheduler.start()
-        self.alerts.info(
-            f"runner started — universe={self.config.universe} "
-            f"strategies={self.config.strategies} cron={self.config.schedule_cron}"
-        )
+        self.alerts.info(self._format_runner_started_message())
         logger.bind(component="runner").info(
             f"scheduler started — next run: {self._scheduler.get_job('cycle').next_run_time}"
         )
@@ -277,6 +330,40 @@ class Runner:
     # a cold data refresh + ~10 IBKR API calls; tight enough that the
     # operator hears about a wedged gateway within minutes, not hours.
     CYCLE_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
+
+    def _format_runner_started_message(self) -> str:
+        """Build the human-readable startup alert.
+
+        Expands the internal strategy slug + cron expression into something
+        the operator can scan on Telegram without thinking — no Python
+        ``['x']`` reprs, no raw cron strings.
+        """
+        cfg = self.config
+        parts: list[str] = []
+        for slug in cfg.strategies:
+            params = cfg.strategy_params.get(slug, {}) if cfg.strategy_params else {}
+            parts.append(_humanize_strategy(slug, params))
+        strat_line = "; ".join(parts) if parts else "(none)"
+
+        try:
+            next_run = self._scheduler.get_job("cycle").next_run_time
+            next_run_s = next_run.strftime("%Y-%m-%d %H:%M %Z") if next_run else "?"
+        except Exception:
+            next_run_s = "?"
+
+        lines = [
+            "🤖 Runner online",
+            f"  Strategy:    {strat_line}",
+            f"  Universe:    {cfg.universe.upper()}",
+            f"  Rebalance:   {_humanize_cron(cfg.schedule_cron)}",
+            f"  Next run:    {next_run_s}",
+        ]
+        if cfg.vol_target is not None:
+            lines.append(
+                f"  Vol target:  {cfg.vol_target:.0%} annualized "
+                f"(max leverage {cfg.max_leverage:g}x)"
+            )
+        return "\n".join(lines)
 
     async def _run_cycle_async(self) -> None:
         """Run one trading cycle with a hard timeout + Telegram-friendly
