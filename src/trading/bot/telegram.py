@@ -89,18 +89,26 @@ HELP_TEXT = (
 
 
 async def _send(client: httpx.AsyncClient, token: str, chat_id: str, text: str) -> None:
-    """POST sendMessage. Never raises — bot loop must keep running."""
+    """POST sendMessage. Never raises — bot loop must keep running.
+
+    Markdown parse failures (400 with "can't parse entities") have caused us
+    to drop critical alerts (e.g. broker rejection messages with unbalanced
+    backticks). On any 400 we retry once as plain text so the operator
+    *always* sees the message; aesthetics lose to deliverability.
+    """
+    url = f"{BOT_API_BASE}/bot{token}/sendMessage"
+    base = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
     try:
-        r = await client.post(
-            f"{BOT_API_BASE}/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": True,
-            },
-            timeout=10.0,
-        )
+        r = await client.post(url, json={**base, "parse_mode": "Markdown"}, timeout=10.0)
+        if r.status_code == 400:
+            logger.warning(
+                f"telegram markdown parse failed, retrying as plain text: {r.text[:200]}"
+            )
+            r = await client.post(url, json=base, timeout=10.0)
         if r.status_code >= 400:
             logger.warning(f"telegram send failed: {r.status_code} {r.text[:200]}")
     except Exception as e:
