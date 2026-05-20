@@ -623,17 +623,17 @@ class Cycle:
         return bars
 
     def _fetch_account(self, ts: datetime) -> AccountSnapshot:
-        """Get the broker's account view. For brokers that need a step()
-        call before reporting (Simulator), the runner drives that in
-        ``Runner.before_cycle``; here we just ask."""
-        try:
-            return self.broker.get_account()
-        except Exception:
-            # Fall back to a fresh zero-position snapshot. This is mostly for
-            # the very first cycle after process start.
-            return AccountSnapshot(
-                ts=ts, cash=self.config.initial_cash, equity=self.config.initial_cash
-            )
+        """Get the broker's account view.
+
+        CRITICAL: if this fails we MUST raise. The previous behavior of
+        falling back to a synthetic zero-position snapshot caused real
+        money damage in paper: when ``broker.get_account`` timed out the
+        cycle thought it owned nothing, bought the full target basket
+        again, and stacked positions to 3× target across three cycles.
+        Re-raising means the outer cycle handler reports the error and
+        skips the rebalance — far safer than trading on stale state.
+        """
+        return self.broker.get_account()
 
     def _preflight_buying_power(
         self,
