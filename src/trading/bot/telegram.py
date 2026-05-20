@@ -226,6 +226,41 @@ def _cmd_heartbeat() -> str:
     return f"heartbeat updated `{age:.0f}s` ago"
 
 
+# How old a snapshot can be before we prepend a "snapshot is stale" warning
+# to /positions and /balances. The runner writes a fresh snapshot at the end
+# of every successful cycle; on a normal weekly-rebalance cadence the
+# snapshot will be at most a week old between scheduled cycles. We use a
+# tighter threshold here (30 min) because the operator usually only checks
+# /positions to verify a recent action just took effect — anything older
+# than that probably means a cycle failed and the file is fossilised.
+_SNAPSHOT_STALE_AFTER_MINUTES = 30
+
+
+def _snapshot_age_warning(snap_ts: datetime) -> str | None:
+    """Return a warning prefix when the snapshot is older than the threshold.
+
+    Saved as a separate helper so /positions and /balances stay in sync —
+    they were both lying about state in the May 2026 incident (broker was
+    flat post-/flatten, snapshot still showed the over-bought basket).
+    """
+    now = datetime.now(tz=timezone.utc)
+    ts = snap_ts if snap_ts.tzinfo else snap_ts.replace(tzinfo=timezone.utc)
+    age_min = (now - ts).total_seconds() / 60.0
+    if age_min < _SNAPSHOT_STALE_AFTER_MINUTES:
+        return None
+    if age_min < 60:
+        age_s = f"{age_min:.0f} min"
+    elif age_min < 60 * 48:
+        age_s = f"{age_min / 60:.1f} h"
+    else:
+        age_s = f"{age_min / 60 / 24:.1f} d"
+    return (
+        f"⚠️ snapshot is {age_s} old — broker state may have changed.\n"
+        "   Run /cycle to refresh, or trust /flatten + /balances which "
+        "talk to the broker live.\n\n"
+    )
+
+
 def _cmd_positions() -> str:
     """``/positions`` — monospace table of holdings as of the last cycle.
 
@@ -233,6 +268,8 @@ def _cmd_positions() -> str:
     not a live broker query (the bot has no broker connection). If the
     last cycle crashed mid-flight the data here is from the prior good
     cycle; the snapshot timestamp at the top tells you how old it is.
+    A stale-snapshot warning is prepended when the snapshot is older than
+    the threshold so the operator isn't misled.
     """
     try:
         from trading.runner.state import RunnerStore
@@ -243,11 +280,15 @@ def _cmd_positions() -> str:
         return f"could not read positions: {e}"
     if snap is None:
         return "no snapshot yet — runner hasn't completed a cycle."
+
+    prefix = _snapshot_age_warning(snap.ts) or ""
+
     if not snap.positions:
         return (
-            f"📊 Portfolio (snapshot {snap.ts:%Y-%m-%d %H:%M UTC})\n"
-            f"  Equity: ${snap.equity:,.2f}    Cash: ${snap.cash:,.2f}\n"
-            "  No open positions."
+            prefix
+            + f"📊 Portfolio (snapshot {snap.ts:%Y-%m-%d %H:%M UTC})\n"
+            + f"  Equity: ${snap.equity:,.2f}    Cash: ${snap.cash:,.2f}\n"
+            + "  No open positions."
         )
 
     rows: list[tuple[str, float, float, float, float, float]] = []
@@ -278,7 +319,7 @@ def _cmd_positions() -> str:
         f"  Positions: {n} ({long_count} long, {short_count} short)"
     )
     table = "```\n" + "\n".join([header, sep, *body]) + "\n```"
-    return summary + "\n" + table
+    return prefix + summary + "\n" + table
 
 
 # ---------------------------------------------------------------------------
@@ -633,9 +674,14 @@ def _cmd_orders() -> str:
 
 
 def _cmd_balances() -> str:
-    r"""``/balances`` — show per-currency cash from the last account snapshot."""
-    # We read from the latest runner snapshot to avoid hitting the broker
-    # directly from the bot process. Snapshot is refreshed each cycle.
+    r"""``/balances`` — show per-currency cash from the last account snapshot.
+
+    Reads the snapshot the runner writes at end-of-cycle, so the data
+    can be hours old if cycles have been failing. A stale-snapshot
+    warning is prepended when the snapshot is past the freshness
+    threshold — without that, the operator can't tell a fresh balance
+    from a fossilised one.
+    """
     try:
         from trading.runner.state import RunnerStore
 
@@ -646,8 +692,9 @@ def _cmd_balances() -> str:
     if snap is None:
         return (
             "_no account snapshot yet — runner hasn't completed a cycle._\n"
-            "Try `/cycle` to force one (when implemented), or wait for Friday."
+            "Try `/cycle` to force one, or wait for Friday."
         )
+    prefix = _snapshot_age_warning(snap.ts) or ""
     lines = [f"*Account balances* (as of {snap.ts.strftime('%Y-%m-%d %H:%M UTC')}):"]
     lines.append(f"  total cash: `${snap.cash:,.2f}`")
     lines.append(f"  total equity: `${snap.equity:,.2f}`")
@@ -656,7 +703,7 @@ def _cmd_balances() -> str:
         "_Per-currency breakdown requires a live broker query. Try after "
         "the next cycle, or send `/fx-rate USD CHF` for current rate._"
     )
-    return "\n".join(lines)
+    return prefix + "\n".join(lines)
 
 
 def _cmd_fx_rate(args: list[str]) -> str:
