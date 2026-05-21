@@ -113,7 +113,16 @@ class OrderStore:
             self._conn.row_factory = sqlite3.Row
             # WAL for concurrent reads; only matters for the live runner.
             if self.path != ":memory:":
-                self._conn.execute("PRAGMA journal_mode=WAL")
+                # Audit fix #14: verify WAL actually took effect.
+                actual = self._conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                if actual and actual[0].lower() != "wal":
+                    from trading.core.logging import logger as _logger
+
+                    _logger.bind(component="order_store").warning(
+                        f"could not enable WAL on {self.path} "
+                        f"(journal_mode={actual[0]}); writes are less crash-safe"
+                    )
+                self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
         return self._conn
 

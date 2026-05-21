@@ -172,8 +172,16 @@ class IbkrBroker(Broker):
         ib-async's sync API blocks on its internal event loop. If that loop
         is wedged (broker session dead, gateway not responsive), the call
         hangs indefinitely. We dispatch into a worker thread and reap with
-        a hard timeout — on expiry, raise ``BrokerTimeoutError`` so the
-        cycle aborts cleanly instead of silently waiting hours.
+        a hard timeout — on expiry, attempt ONE auto-reconnect + retry. If
+        that also fails, raise ``BrokerTimeoutError`` so the cycle aborts
+        cleanly instead of silently waiting hours.
+
+        Self-heal rationale: IBKR Gateway routinely drops its server-side
+        session (Error 1100 in the IBKR API). The gateway recovers in
+        seconds, but our existing client connection thinks it's still
+        live and every API call hangs until the local 30s timeout. A
+        single reconnect-and-retry transparently rides through these
+        transient session drops without operator intervention.
 
         IMPORTANT: do not use ThreadPoolExecutor as a context manager here.
         The default ``__exit__`` calls ``shutdown(wait=True)`` which blocks
@@ -183,6 +191,36 @@ class IbkrBroker(Broker):
         clean it up; the cost is one dead Python thread per IBKR wedge,
         which is acceptable until the operator restarts the gateway).
         """
+        try:
+            return self._call_with_timeout(what, fn, timeout)
+        except BrokerTimeoutError as first_err:
+            # Try one reconnect + retry before surrendering. Most "wedged
+            # gateway" symptoms come from a dead session that recovers on a
+            # fresh connection. We protect against reconnect storms by
+            # only attempting once per call.
+            logger.bind(broker=self.name).warning(
+                f"{what} timed out; attempting one auto-reconnect + retry"
+            )
+            try:
+                self._reconnect_session()
+            except Exception as reconnect_err:
+                logger.bind(broker=self.name).exception(
+                    f"auto-reconnect failed during {what}: {reconnect_err!r}"
+                )
+                raise first_err from None
+            try:
+                return self._call_with_timeout(what, fn, timeout)
+            except BrokerTimeoutError:
+                # Second timeout after fresh connect — gateway is genuinely
+                # wedged. Re-raise so the cycle aborts and the operator is
+                # alerted; auto-halt counter will tick.
+                logger.bind(broker=self.name).warning(
+                    f"{what} still timing out after reconnect — surrender"
+                )
+                raise
+
+    def _call_with_timeout(self, what: str, fn: Any, timeout: float | None) -> Any:
+        """Inner: one ThreadPoolExecutor-bounded call, no retry."""
         from concurrent.futures import ThreadPoolExecutor
         from concurrent.futures import TimeoutError as FutTimeout
 
@@ -199,6 +237,19 @@ class IbkrBroker(Broker):
                 ) from e
         finally:
             ex.shutdown(wait=False)
+
+    def _reconnect_session(self) -> None:
+        """Best-effort reconnect after a session drop.
+
+        Disconnect (suppress errors — we'll connect fresh either way),
+        then call connect() which goes through the normal handshake path
+        with its own 60s timeout.
+        """
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            self.disconnect()
+        self.connect()
 
     def _contract(self, instrument: Instrument) -> Any:
         from ib_async import Crypto, Forex, Future, Stock  # lazy import

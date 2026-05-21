@@ -90,7 +90,20 @@ class RunnerStore:
             self._conn = sqlite3.connect(self.path, isolation_level=None)
             self._conn.row_factory = sqlite3.Row
             if self.path != ":memory:":
-                self._conn.execute("PRAGMA journal_mode=WAL")
+                # Audit fix #14: verify WAL actually took effect. WAL can
+                # silently fall back (e.g. on a network filesystem) and we'd
+                # lose crash-safety guarantees. Log loudly if so.
+                actual = self._conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                if actual and actual[0].lower() != "wal":
+                    from trading.core.logging import logger as _logger
+
+                    _logger.bind(component="runner_store").warning(
+                        f"could not enable WAL on {self.path} "
+                        f"(journal_mode={actual[0]}); writes are less crash-safe"
+                    )
+                # synchronous=NORMAL pairs well with WAL: safe durability
+                # at a small fraction of FULL's fsync cost.
+                self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
         return self._conn
 

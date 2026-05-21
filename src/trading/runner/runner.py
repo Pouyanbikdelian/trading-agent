@@ -170,8 +170,15 @@ class Runner:
         self.alerts = alerts
         self._scheduler: Any = None
         # Health-tracking state. Reset to 0 on a successful cycle.
-        self._consecutive_errors: int = 0
+        # Persisted so a container restart doesn't silently reset the counter
+        # below the auto-halt threshold (audit fix #8).
+        self._error_counter_path = settings.state_dir / "consecutive_errors.json"
+        self._consecutive_errors: int = self._load_error_counter()
         self._last_success_ts: datetime | None = None
+        # Cycle cooldown: refuse to start another cycle within this window
+        # of the previous one starting (audit fix #11). Prevents overlap
+        # if the cron and an off-cycle trigger fire near-simultaneously.
+        self._last_cycle_start_ts: datetime | None = None
 
     # -------------------------------------------------- factory
 
@@ -345,6 +352,49 @@ class Runner:
     # operator hears about a wedged gateway within minutes, not hours.
     CYCLE_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
 
+    # Minimum gap between consecutive cycle starts (audit fix #11). With
+    # both a cron schedule AND an off-cycle trigger watcher polling every
+    # 30s, in pathological cases a cron firing could overlap with an
+    # operator-triggered cycle. The risk manager re-evaluates the same
+    # signal in both, producing duplicate orders. This cooldown refuses
+    # the second cycle, logs, and leaves the first to complete.
+    CYCLE_COOLDOWN_SECONDS: float = 10.0
+
+    def _load_error_counter(self) -> int:
+        """Read the persisted consecutive-error count, default to 0 on any
+        failure. Persistence keeps the auto-halt threshold honest across
+        container restarts (audit fix #8)."""
+        try:
+            if self._error_counter_path.exists():
+                import json as _json
+
+                return int(_json.loads(self._error_counter_path.read_text()).get("count", 0))
+        except Exception:
+            logger.bind(component="runner").exception(
+                "consecutive_errors.json unreadable; defaulting to 0"
+            )
+        return 0
+
+    def _save_error_counter(self) -> None:
+        """Atomically persist the counter. Best-effort: a failed write
+        logs but doesn't crash the runner (the cycle already errored
+        once, we don't want to compound)."""
+        try:
+            import json as _json
+            import os as _os
+            import tempfile as _tmp
+
+            self._error_counter_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = _tmp.mkstemp(
+                dir=self._error_counter_path.parent,
+                prefix=f"{self._error_counter_path.name}.",
+            )
+            with _os.fdopen(fd, "w") as f:
+                _json.dump({"count": self._consecutive_errors}, f)
+            _os.replace(tmp, self._error_counter_path)
+        except Exception:
+            logger.bind(component="runner").exception("failed to persist error counter")
+
     def _reconcile_startup(self) -> None:
         """At startup, compare the broker's positions to the last persisted
         snapshot. If they differ, alert the operator loudly — they may need
@@ -456,6 +506,20 @@ class Runner:
         internally. Crucially the runner is unblocked and ready for the
         next scheduled cycle.
         """
+        # Cycle cooldown gate. Audit fix #11: refuse a cycle started within
+        # CYCLE_COOLDOWN_SECONDS of the previous one — protects against
+        # cron + off-cycle trigger near-simultaneous fires.
+        now = datetime.now()
+        if self._last_cycle_start_ts is not None:
+            gap = (now - self._last_cycle_start_ts).total_seconds()
+            if gap < self.CYCLE_COOLDOWN_SECONDS:
+                logger.bind(component="runner").warning(
+                    f"cycle suppressed by cooldown ({gap:.1f}s < "
+                    f"{self.CYCLE_COOLDOWN_SECONDS:.0f}s since last start)"
+                )
+                return
+        self._last_cycle_start_ts = now
+
         try:
             report = await asyncio.wait_for(
                 asyncio.to_thread(self.cycle.run_cycle),
@@ -463,6 +527,7 @@ class Runner:
             )
         except asyncio.TimeoutError:
             self._consecutive_errors += 1
+            self._save_error_counter()
             msg = (
                 f"⏱️ cycle aborted after {self.CYCLE_TIMEOUT_SECONDS:.0f}s "
                 f"(error #{self._consecutive_errors}/{self.AUTO_HALT_AFTER}) — "
@@ -474,6 +539,7 @@ class Runner:
             return
         except Exception as e:
             self._consecutive_errors += 1
+            self._save_error_counter()
             msg = (
                 f"❌ cycle crashed: {type(e).__name__}: {e} "
                 f"(error #{self._consecutive_errors}/{self.AUTO_HALT_AFTER})"
@@ -485,6 +551,7 @@ class Runner:
 
         if report.status == "error":
             self._consecutive_errors += 1
+            self._save_error_counter()
             err = (report.error or "unknown error").strip()
             logger.bind(component="runner").error(f"cycle error: {err}")
             self.alerts.error(
@@ -495,10 +562,11 @@ class Runner:
             logger.bind(component="runner").warning("cycle halted by risk manager")
             self.alerts.warning("⚠️ cycle halted by risk manager")
         else:
-            # Success — reset the consecutive error counter.
+            # Success — reset the consecutive error counter (and persisted file).
             if self._consecutive_errors > 0:
                 self.alerts.info(f"✅ cycle recovered (after {self._consecutive_errors} errors)")
             self._consecutive_errors = 0
+            self._save_error_counter()
             self._last_success_ts = datetime.now()
 
     # Tracked by _run_cycle_async to enable "auto-halt after N consecutive

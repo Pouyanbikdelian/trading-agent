@@ -55,7 +55,8 @@ HELP_TEXT = (
     "/status — env, halted, heartbeat, mode\n"
     "/positions — current positions and weights\n"
     "/balances — cash per currency\n"
-    "/orders — recent orders (last 7d)\n"
+    "/orders — recent orders (last 7d, grouped by status)\n"
+    "/pending — only orders currently in flight\n"
     "/heartbeat — last cycle age\n"
     "/report — generate the weekly report\n"
     "/fx-rate FROM TO — current reference rate (e.g. `/fx-rate USD CHF`)\n\n"
@@ -157,32 +158,40 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _cmd_halt(args: list[str]) -> str:
+    from trading.core.file_lock import file_lock
+
     reason = " ".join(args) if args else "telegram"
     halt_path = settings.state_dir / "halt.json"
-    _atomic_write_json(
-        halt_path,
-        {
-            "halted": True,
-            "reason": reason,
-            "halted_at": datetime.now(tz=timezone.utc).isoformat(),
-            "flatten_on_next_cycle": True,
-        },
-    )
+    # Lock the halt file across processes — audit fix #9 prevents racing
+    # writes from /halt and the risk manager's auto-halt or /resume.
+    with file_lock(halt_path):
+        _atomic_write_json(
+            halt_path,
+            {
+                "halted": True,
+                "reason": reason,
+                "halted_at": datetime.now(tz=timezone.utc).isoformat(),
+                "flatten_on_next_cycle": True,
+            },
+        )
     logger.bind(reason=reason).warning("telegram halt")
     return f"🛑 *HALTED* — reason: `{reason}`\nNext cycle will force-flatten positions."
 
 
 def _cmd_resume() -> str:
+    from trading.core.file_lock import file_lock
+
     halt_path = settings.state_dir / "halt.json"
-    _atomic_write_json(
-        halt_path,
-        {
-            "halted": False,
-            "reason": "",
-            "halted_at": None,
-            "flatten_on_next_cycle": False,
-        },
-    )
+    with file_lock(halt_path):
+        _atomic_write_json(
+            halt_path,
+            {
+                "halted": False,
+                "reason": "",
+                "halted_at": None,
+                "flatten_on_next_cycle": False,
+            },
+        )
     logger.info("telegram resume")
     return "✅ *RESUMED* — halt cleared."
 
@@ -645,8 +654,16 @@ def _cmd_cancel_order(args: list[str]) -> str:
 
 
 def _cmd_orders() -> str:
-    r"""``/orders`` — list pending and recent orders from the local store."""
+    r"""``/orders`` — recent orders from the local store, grouped by status.
+
+    Previously this iterated ``load_orders`` results as if each row were
+    a flat ``Order``, but the store actually returns
+    ``(Order, OrderStatus, broker_id)`` tuples — every call was throwing
+    AttributeError. Now: properly unpacked, status shown, and pending
+    orders surface at the top so the operator sees in-flight work first.
+    """
     try:
+        from trading.core.types import OrderStatus
         from trading.execution.store import OrderStore
 
         store = OrderStore(settings.state_dir / "orders.db")
@@ -654,16 +671,73 @@ def _cmd_orders() -> str:
 
         recent = store.load_orders(since=datetime.now(tz=timezone.utc) - timedelta(days=7))
     except Exception as e:
-        return f"could not read orders: `{e}`"
+        return f"could not read orders: {e}"
 
     if not recent:
-        return "_no orders in the last 7 days._"
-    lines = ["*Recent orders (last 7d):*", ""]
-    for o in recent[-20:]:
+        return "no orders in the last 7 days."
+
+    pending_statuses = {OrderStatus.PENDING, OrderStatus.SUBMITTED}
+    pending: list[tuple[Any, OrderStatus, str | None]] = []
+    other: list[tuple[Any, OrderStatus, str | None]] = []
+    for o, st, bid in recent:
+        if st in pending_statuses:
+            pending.append((o, st, bid))
+        else:
+            other.append((o, st, bid))
+
+    lines: list[str] = []
+    if pending:
+        lines.append(f"⏳ *In flight: {len(pending)} order(s)*")
+        for o, st, _bid in pending[-15:]:
+            lines.append(
+                f"  `{o.client_order_id[:14]:<14}` "
+                f"{o.side.value} {o.quantity:g} {o.instrument.symbol} "
+                f"({o.order_type.value}) — {st.value}"
+            )
+        lines.append("")
+    lines.append(f"*Recent (last 7d, {len(other)} order(s)):*")
+    for o, st, _bid in other[-15:]:
         lines.append(
-            f"`{o.client_order_id[:14]:<14}` "
-            f"{o.side.value} {o.quantity:g} {o.instrument.symbol} "
-            f"({o.order_type.value})"
+            f"  `{o.client_order_id[:14]:<14}` "
+            f"{o.side.value} {o.quantity:g} {o.instrument.symbol} — {st.value}"
+        )
+    return "\n".join(lines)
+
+
+def _cmd_pending_orders() -> str:
+    r"""``/pending`` — only orders currently in flight.
+
+    Audit fix #7. The operator submits a basket or manual /buy, then
+    needs visibility into "did it actually fill yet?" Live broker queries
+    happen via the cycle (slow); this is the bot-side view of what's
+    SUBMITTED but not yet terminal.
+    """
+    try:
+        from trading.core.types import OrderStatus
+        from trading.execution.store import OrderStore
+
+        store = OrderStore(settings.state_dir / "orders.db")
+        from datetime import timedelta
+
+        recent = store.load_orders(since=datetime.now(tz=timezone.utc) - timedelta(days=2))
+    except Exception as e:
+        return f"could not read orders: {e}"
+
+    pending_statuses = {OrderStatus.PENDING, OrderStatus.SUBMITTED}
+    in_flight = [(o, st, bid) for (o, st, bid) in recent if st in pending_statuses]
+    if not in_flight:
+        return "✅ no orders currently in flight (per local store)."
+
+    lines = [f"⏳ *{len(in_flight)} order(s) in flight* (per local store):"]
+    now = datetime.now(tz=timezone.utc)
+    for o, st, bid in in_flight:
+        age_s = (now - o.created_at).total_seconds()
+        age_str = f"{age_s / 60:.0f}m" if age_s >= 60 else f"{age_s:.0f}s"
+        bid_str = f" broker={bid}" if bid else ""
+        lines.append(
+            f"  `{o.client_order_id[:14]:<14}` {st.value} {age_str} ago — "
+            f"{o.side.value} {o.quantity:g} {o.instrument.symbol}"
+            f" ({o.order_type.value}){bid_str}"
         )
     return "\n".join(lines)
 
@@ -907,6 +981,8 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_flatten()
     if cmd == "/orders":
         return _cmd_orders()
+    if cmd in ("/pending", "/pending_orders", "/pending-orders"):
+        return _cmd_pending_orders()
     if cmd == "/cancel_order":
         return _cmd_cancel_order(args)
     # --- FX ---

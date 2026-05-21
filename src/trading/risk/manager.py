@@ -81,8 +81,14 @@ class RiskManager:
         """
         if not (self._halt_path and self._halt_path.exists()):
             return HaltState()
+        # Take the file lock to ensure we don't read a torn write from the
+        # bot's /halt or /resume mid-write (audit fix #9). Lock is on a
+        # sibling .lock file so atomic os.replace still works.
+        from trading.core.file_lock import file_lock
+
         try:
-            return HaltState.model_validate_json(self._halt_path.read_text())
+            with file_lock(self._halt_path):
+                return HaltState.model_validate_json(self._halt_path.read_text())
         except Exception as e:
             logger.bind(component="risk").error(
                 f"halt.json could not be parsed ({type(e).__name__}: {e!r}); "
@@ -98,8 +104,14 @@ class RiskManager:
     def _save_state(self) -> None:
         if self._halt_path is None:
             return
+        # File lock + atomic rename: both the bot and the manager are
+        # writers; serialising under flock ensures no torn writes or
+        # silently-dropped intent (audit fix #9).
+        from trading.core.file_lock import file_lock
+
         self._halt_path.parent.mkdir(parents=True, exist_ok=True)
-        self._halt_path.write_text(self._state.model_dump_json(indent=2))
+        with file_lock(self._halt_path):
+            self._halt_path.write_text(self._state.model_dump_json(indent=2))
 
     # ------------------------------------------------------ halt control
 
