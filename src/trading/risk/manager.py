@@ -70,9 +70,30 @@ class RiskManager:
     # ------------------------------------------------------ persistence
 
     def _load_state(self) -> HaltState:
-        if self._halt_path and self._halt_path.exists():
+        """Read the persisted halt state, fail-CLOSED on any parse error.
+
+        A corrupted ``halt.json`` (partial write during a crash, disk
+        corruption, manual edit gone wrong) previously crashed manager
+        init with a pydantic ValidationError — leaving the cycle to fail
+        UP the stack and trade-on-no-gate. Now any parse failure puts us
+        into a halted state with a clear reason; the operator must
+        either fix the file and /resume, or manually accept.
+        """
+        if not (self._halt_path and self._halt_path.exists()):
+            return HaltState()
+        try:
             return HaltState.model_validate_json(self._halt_path.read_text())
-        return HaltState()
+        except Exception as e:
+            logger.bind(component="risk").error(
+                f"halt.json could not be parsed ({type(e).__name__}: {e!r}); "
+                "FAILING CLOSED — manager will refuse to trade until operator "
+                "fixes the file and /resume's manually."
+            )
+            return HaltState(
+                halted=True,
+                reason=f"halt.json corrupt: {type(e).__name__}",
+                halted_at=datetime.now(timezone.utc),
+            )
 
     def _save_state(self) -> None:
         if self._halt_path is None:

@@ -73,6 +73,14 @@ class IbkrBroker(Broker):
 
     name = "ibkr"
 
+    # IBKR's well-known port convention:
+    #   4001 = live IB Gateway,   4002 = paper IB Gateway
+    #   7496 = live TWS,          7497 = paper TWS
+    # If the operator is connected to a LIVE port we re-check is_live_armed
+    # on every submit_order. Paper ports skip the check (paper money is
+    # the playground; the gate exists to protect real capital).
+    _LIVE_PORTS: frozenset[int] = frozenset({4001, 7496})
+
     def __init__(
         self,
         ib: Any | None = None,
@@ -85,6 +93,9 @@ class IbkrBroker(Broker):
         self._port = port or settings.ibkr_port
         self._client_id = client_id or settings.ibkr_client_id
         self._connected = False
+
+    def _is_live_port(self) -> bool:
+        return self._port in self._LIVE_PORTS
 
     # --------------------------------------------------------- lifecycle
 
@@ -232,6 +243,17 @@ class IbkrBroker(Broker):
 
     def submit_order(self, order: Order) -> Order:
         self._ensure_connected()
+        # Defense-in-depth: even though the CLI checks ``is_live_armed`` once
+        # at runner start, a long-running process can have its environment
+        # drift (operator edits .env, container is rebuilt with new vars).
+        # We re-check on EVERY order so the live gate can't be bypassed by
+        # an in-process flag flip. The CLI-side check still stands as the
+        # first line of defense; this is the last.
+        if self._is_live_port() and not settings.is_live_armed():
+            raise BrokerError(
+                "live trading not armed — refusing to submit order. Set "
+                "TRADING_ENV=live and ALLOW_LIVE_TRADING=true in .env to enable."
+            )
         contract = self._contract(order.instrument)
         ib_order = self._build_ib_order(order)
         # placeOrder is fire-and-forget; the trade-status update arrives
@@ -417,7 +439,7 @@ class IbkrBroker(Broker):
             ib_order.action = "SELL"
             ib_order.totalQuantity = float(from_amount)
 
-        self._bounded(
+        trade = self._bounded(
             f"placeOrder-fx-{pair_base}{pair_quote}",
             lambda: self._ib.placeOrder(contract, ib_order),
         )
@@ -425,6 +447,22 @@ class IbkrBroker(Broker):
             f"FX order: {ib_order.action} {pair_base}{pair_quote} "
             f"(spending {from_amount} {from_ccy} → {to_ccy})"
         )
+
+        # Wait briefly for the broker to acknowledge — IBKR FX rejections
+        # are common (below IdealPro minimum, currency leverage, etc.) and
+        # arrive within a few seconds *after* placeOrder returns. Without
+        # this poll we report "submitted" to Telegram even when the order
+        # was immediately rejected, leaving the operator misled. We poll
+        # for up to ~5s; if no terminal status by then we return as-before
+        # (the trade is still in flight and the next cycle's get_fills
+        # will surface it).
+        rejected = self._poll_for_fx_rejection(trade, timeout_s=5.0)
+        if rejected:
+            raise BrokerError(
+                f"IBKR rejected FX {ib_order.action} {pair_base}{pair_quote} "
+                f"(spending {from_amount} {from_ccy} → {to_ccy}): {rejected}"
+            )
+
         return {
             "pair": pair_base + pair_quote,
             "action": ib_order.action,
@@ -432,6 +470,27 @@ class IbkrBroker(Broker):
             "to_ccy": to_ccy,
             "from_amount": float(from_amount),
         }
+
+    def _poll_for_fx_rejection(self, trade: Any, *, timeout_s: float) -> str | None:
+        """Poll a Trade object briefly for a terminal rejection.
+
+        Reuses ``_extract_reject_reason``'s parsing, but loops so we catch
+        async rejections that arrive after placeOrder returns. Returns the
+        reject reason if found within ``timeout_s``, else None.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout_s
+        last_reason: str | None = None
+        while time.monotonic() < deadline:
+            try:
+                last_reason = self._extract_reject_reason(trade)
+            except Exception:
+                last_reason = None
+            if last_reason:
+                return last_reason
+            time.sleep(0.25)
+        return None
 
     def get_fills(self, *, since: datetime | None = None) -> list[Fill]:
         self._ensure_connected()

@@ -243,3 +243,133 @@ def test_get_fills_filters_by_since(broker: IbkrBroker, fake_ib: _FakeIb) -> Non
 def test_disconnect_safe_to_call_twice(broker: IbkrBroker) -> None:
     broker.disconnect()
     broker.disconnect()  # second call must be a no-op
+
+
+# ---------------------------------------------------------------------------
+# Audit fix #3 — defense-in-depth: live-armed check inside submit_order
+#
+# CLI's startup gate is the first line; this is the last. A long-running
+# trader process can theoretically have its in-process settings drift; we
+# re-check on every order when connected to a LIVE port.
+# ---------------------------------------------------------------------------
+
+
+def test_submit_order_refuses_on_live_port_without_arming(
+    monkeypatch, fake_ib: _FakeIb, aapl: Instrument
+) -> None:
+    """Live-port + not-armed must raise BEFORE placeOrder runs."""
+    from trading.core import config as config_module
+    from trading.execution.base import BrokerError
+
+    b = IbkrBroker(ib=fake_ib, port=4001)  # 4001 = live IB Gateway
+    b.connect()
+
+    # Force is_live_armed → False even on live port.
+    fake_settings = SimpleNamespace(
+        ibkr_host="x", ibkr_port=4001, ibkr_client_id=17, is_live_armed=lambda: False
+    )
+    monkeypatch.setattr("trading.execution.ibkr.settings", fake_settings)
+
+    order = Order(
+        client_order_id="cid",
+        instrument=aapl,
+        side=Side.BUY,
+        quantity=1,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    with pytest.raises(BrokerError, match="live trading not armed"):
+        b.submit_order(order)
+    assert fake_ib.placed == []  # placeOrder never reached
+
+
+def test_submit_order_allows_on_paper_port_regardless_of_arming(
+    monkeypatch, fake_ib: _FakeIb, aapl: Instrument
+) -> None:
+    """Paper port (4002 / 7497) must NOT consult is_live_armed."""
+    b = IbkrBroker(ib=fake_ib, port=4002)
+    b.connect()
+    fake_settings = SimpleNamespace(
+        ibkr_host="x", ibkr_port=4002, ibkr_client_id=17, is_live_armed=lambda: False
+    )
+    monkeypatch.setattr("trading.execution.ibkr.settings", fake_settings)
+    order = Order(
+        client_order_id="cid",
+        instrument=aapl,
+        side=Side.BUY,
+        quantity=1,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    b.submit_order(order)  # must not raise
+    assert len(fake_ib.placed) == 1
+
+
+# ---------------------------------------------------------------------------
+# Audit fix #4 — convert_currency surfaces async broker rejections
+#
+# Previously the bot reported "✅ FX submitted" even when IBKR rejected
+# the order immediately (e.g. below IdealPro minimum, currency leverage).
+# Now convert_currency polls trade.log for ~5s and raises BrokerError if
+# the rejection landed in time.
+# ---------------------------------------------------------------------------
+
+
+def _rejecting_trade_log() -> list[object]:
+    return [
+        SimpleNamespace(status="PendingSubmit", message="", errorCode=0),
+        SimpleNamespace(
+            status="ValidationError",
+            message="Warning 399: Order size below 25k IdealPro minimum",
+            errorCode=399,
+        ),
+        SimpleNamespace(
+            status="Cancelled",
+            message="Order rejected - reason:FX trade would expose account to currency leverage.",
+            errorCode=201,
+        ),
+    ]
+
+
+def test_convert_currency_raises_on_async_rejection(
+    broker: IbkrBroker, fake_ib: _FakeIb
+) -> None:
+    """The exact prod failure: 5000 USD→CHF rejected with currency-leverage."""
+    from trading.execution.base import BrokerError
+
+    # Make placeOrder return a Trade whose log already shows the rejection,
+    # so the poll finds it on the very first iteration.
+    def _place_with_rejection(_contract: object, _order: object) -> object:
+        return SimpleNamespace(
+            order=_order,
+            contract=_contract,
+            log=_rejecting_trade_log(),
+            orderStatus=SimpleNamespace(status="Cancelled", whyHeld=""),
+        )
+
+    fake_ib.placeOrder = _place_with_rejection  # type: ignore[assignment]
+
+    with pytest.raises(BrokerError, match="IBKR rejected FX"):
+        broker.convert_currency(from_ccy="USD", to_ccy="CHF", from_amount=5000.0)
+
+
+def test_convert_currency_returns_when_no_rejection(
+    broker: IbkrBroker, fake_ib: _FakeIb
+) -> None:
+    """Happy path: no rejection in the trade log → returns submission details."""
+
+    def _place_clean(_contract: object, _order: object) -> object:
+        return SimpleNamespace(
+            order=_order,
+            contract=_contract,
+            log=[SimpleNamespace(status="PendingSubmit", message="", errorCode=0)],
+            orderStatus=SimpleNamespace(status="Submitted", whyHeld=""),
+        )
+
+    fake_ib.placeOrder = _place_clean  # type: ignore[assignment]
+    result = broker.convert_currency(from_ccy="CHF", to_ccy="USD", from_amount=30000.0)
+    assert result["from_ccy"] == "CHF"
+    assert result["to_ccy"] == "USD"
+    assert result["from_amount"] == 30000.0

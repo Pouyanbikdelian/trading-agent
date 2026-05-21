@@ -19,6 +19,45 @@ def test_halt_state_persists_across_processes(tmp_path: Path) -> None:
     assert m2.state.reason == "oops"
 
 
+def test_corrupt_halt_file_fails_closed(tmp_path: Path) -> None:
+    r"""A corrupt halt.json must not crash the manager AND must default
+    to halted state so we refuse to trade until the operator intervenes.
+
+    Audit (May 2026, item #2): the previous behavior was to let
+    ValidationError propagate, which crashed the manager mid-cycle.
+    """
+    path = tmp_path / "halt.json"
+    # Write invalid JSON (truncated, missing required fields, etc.)
+    path.write_text("{not even valid JSON")
+    mgr = RiskManager(RiskLimits(), halt_state_path=path)
+    assert mgr.is_halted()
+    assert "corrupt" in mgr.state.reason.lower()
+
+
+def test_partial_halt_file_fails_closed(tmp_path: Path) -> None:
+    r"""Plausibly-shaped JSON that fails schema validation also fails closed."""
+    path = tmp_path / "halt.json"
+    path.write_text('{"halted": "not a bool"}')  # bool field has wrong type
+    mgr = RiskManager(RiskLimits(), halt_state_path=path)
+    assert mgr.is_halted()
+
+
+def test_empty_halt_file_fails_closed(tmp_path: Path) -> None:
+    r"""An empty file (truncated mid-write during crash) also fails closed."""
+    path = tmp_path / "halt.json"
+    path.write_text("")
+    mgr = RiskManager(RiskLimits(), halt_state_path=path)
+    assert mgr.is_halted()
+
+
+def test_missing_halt_file_is_default_unhalted(tmp_path: Path) -> None:
+    r"""Sanity check: clean first-startup (no halt file) is NOT halted."""
+    path = tmp_path / "halt.json"
+    assert not path.exists()
+    mgr = RiskManager(RiskLimits(), halt_state_path=path)
+    assert not mgr.is_halted()
+
+
 def test_unhalt_clears_persisted_state(tmp_path: Path) -> None:
     path = tmp_path / "halt.json"
     m1 = RiskManager(RiskLimits(), halt_state_path=path)
