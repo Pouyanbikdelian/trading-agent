@@ -89,8 +89,38 @@ def broker(fake_ib: _FakeIb) -> IbkrBroker:
     return b
 
 
-def test_requires_connect(fake_ib: _FakeIb, aapl: Instrument) -> None:
-    b = IbkrBroker(ib=fake_ib)  # not connected
+def test_disconnected_broker_auto_heals_on_call(fake_ib: _FakeIb, aapl: Instrument) -> None:
+    """_ensure_connected now self-heals: if the broker is offline (e.g.
+    a prior auto-reconnect failed) the next API call attempts one
+    reconnect before raising. The previous contract — 'submit_order
+    raises NotConnectedError until connect() is called' — was a
+    fragility, not a feature: in prod it left the runner stuck after
+    any transient gateway drop. Now: API calls implicitly reconnect."""
+    b = IbkrBroker(ib=fake_ib)  # not connected initially
+    order = Order(
+        client_order_id=new_client_order_id(),
+        instrument=aapl,
+        side=Side.BUY,
+        quantity=1,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    # Submit must succeed — _ensure_connected auto-calls connect() under us.
+    b.submit_order(order)
+    assert len(fake_ib.placed) == 1
+
+
+def test_unrecoverable_disconnect_raises(aapl: Instrument) -> None:
+    """If even the auto-heal connect() raises, NotConnectedError wraps
+    the cause so the caller has somewhere to surface the failure."""
+
+    class _BrokenIb:
+        def isConnected(self) -> bool:
+            return False
+
+        async def connectAsync(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("gateway dead")
+
+    b = IbkrBroker(ib=_BrokenIb())
     order = Order(
         client_order_id=new_client_order_id(),
         instrument=aapl,

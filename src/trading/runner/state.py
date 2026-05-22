@@ -87,7 +87,16 @@ class RunnerStore:
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(self.path, isolation_level=None)
+            # check_same_thread=False is REQUIRED in production: the
+            # runner opens the conn from one thread (often the startup
+            # reconciliation worker), then the cycle saves snapshots
+            # from a DIFFERENT worker thread (asyncio.to_thread). Without
+            # this flag SQLite raises ProgrammingError mid-cycle. Safe
+            # because we serialise writes through the runner — no real
+            # concurrent access — and WAL handles concurrent reads.
+            self._conn = sqlite3.connect(
+                self.path, isolation_level=None, check_same_thread=False
+            )
             self._conn.row_factory = sqlite3.Row
             if self.path != ":memory:":
                 # Audit fix #14: verify WAL actually took effect. WAL can

@@ -109,7 +109,14 @@ class OrderStore:
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(self.path, isolation_level=None)
+            # check_same_thread=False — same justification as RunnerStore:
+            # the cycle saves orders from a worker thread, the startup
+            # reconciliation reads from another, the bot reads from yet
+            # another process. Safe because all our writes serialise
+            # through the runner; WAL handles concurrent reads.
+            self._conn = sqlite3.connect(
+                self.path, isolation_level=None, check_same_thread=False
+            )
             self._conn.row_factory = sqlite3.Row
             # WAL for concurrent reads; only matters for the live runner.
             if self.path != ":memory:":

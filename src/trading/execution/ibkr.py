@@ -145,8 +145,17 @@ class IbkrBroker(Broker):
         self._connected = False
 
     def _ensure_connected(self) -> None:
-        if not self._connected or self._ib is None or not self._ib.isConnected():
-            raise NotConnectedError("IbkrBroker is not connected — call connect() first")
+        if self._ib is None or not self._connected or not self._ib.isConnected():
+            # Self-heal: if a prior failed auto-reconnect (e.g. _bounded
+            # timeout path) left us disconnected, try once more before
+            # giving up. The next cycle's get_account / get_positions
+            # would otherwise fail forever until manual /reconnect.
+            try:
+                self.connect()
+            except Exception as e:
+                raise NotConnectedError(
+                    f"IbkrBroker is not connected and auto-reconnect failed: {e!r}"
+                ) from e
 
     # ------------------------------------------------------------ helpers
 
