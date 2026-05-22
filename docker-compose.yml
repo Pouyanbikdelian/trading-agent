@@ -110,6 +110,23 @@ services:
       - ib-gateway
     env_file:
       - .env
+    labels:
+      # Ofelia scheduler picks these up and exec's them inside the trader
+      # container at the listed cadence. All disk hygiene — keeps long-
+      # running deployments from accumulating cruft. None of these touch
+      # trading-critical state (orders.db, halt.json, snapshot) — just
+      # the audit/audit-adjacent stuff that grows unbounded.
+      - "ofelia.enabled=true"
+      # Daily 23:45 UTC: prune executed-command JSONs older than 14 days.
+      # Each /buy / /cycle / /balances leaves one of these; uncapped it
+      # grows by ~MB/month per active operator.
+      - "ofelia.job-exec.prune-executed.schedule=0 45 23 * * *"
+      - 'ofelia.job-exec.prune-executed.command=/bin/sh -c "find /app/state/commands/executed -type f -name ''*.json'' -mtime +14 -delete 2>/dev/null; echo prune-executed: $(find /app/state/commands/executed -type f 2>/dev/null | wc -l) files remaining"'
+      # Weekly Sunday 04:00 UTC: vacuum the SQLite stores so deleted
+      # rows actually reclaim disk. Without VACUUM, SQLite holds
+      # tombstoned pages indefinitely — annoying for the long tail.
+      - "ofelia.job-exec.sqlite-vacuum.schedule=0 0 4 * * SUN"
+      - 'ofelia.job-exec.sqlite-vacuum.command=/bin/sh -c "for db in /app/state/runner.db /app/state/orders.db; do [ -f \"$db\" ] && python -c \"import sqlite3,sys; sqlite3.connect(sys.argv[1]).execute(''VACUUM'')\" \"$db\" && echo vacuumed $db; done"'
     # HOST NETWORKING: the trader connects to IB Gateway via 127.0.0.1.
     # Why not the docker bridge network: IB Gateway's TrustedIPs default
     # is 127.0.0.1 only. Connections from the docker bridge subnet
