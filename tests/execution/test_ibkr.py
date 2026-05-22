@@ -253,6 +253,46 @@ def test_get_account_uses_netliquidation_currency_as_base(
     assert snap.base_currency == "CHF"
 
 
+def test_get_account_uses_multiple_rows_to_detect_base_currency(
+    broker: IbkrBroker, fake_ib: _FakeIb
+) -> None:
+    """If one tag's currency attribute is missing during a gateway
+    wedge, the others should carry the detection. Earlier code only
+    looked at NetLiquidation — a single missing field would mis-label
+    the account as USD."""
+    fake_ib._account_summary = [
+        SimpleNamespace(tag="TotalCashValue", value="100000", currency="CHF"),
+        SimpleNamespace(tag="NetLiquidation", value="100000", currency=""),
+        SimpleNamespace(tag="AvailableFunds", value="100000", currency="CHF"),
+    ]
+    snap = broker.get_account()
+    assert snap.base_currency == "CHF"
+
+
+def test_get_account_ignores_BASE_pseudo_currency(
+    broker: IbkrBroker, fake_ib: _FakeIb
+) -> None:
+    """IBKR's accountValues uses ``currency='BASE'`` as a pseudo-code
+    on consolidated rows. That isn't a real ISO code; we must skip it
+    so the detector lands on the actual base currency instead."""
+    fake_ib._account_summary = [
+        SimpleNamespace(tag="NetLiquidation", value="100000", currency="BASE"),
+        SimpleNamespace(tag="TotalCashValue", value="100000", currency="CHF"),
+    ]
+    snap = broker.get_account()
+    assert snap.base_currency == "CHF"
+
+
+def test_get_account_falls_back_to_usd_when_no_currency_hints(
+    broker: IbkrBroker, fake_ib: _FakeIb
+) -> None:
+    """If accountSummary is empty or carries no currency hints, default
+    to USD so downstream code (display, no-margin) still has a value."""
+    fake_ib._account_summary = []
+    snap = broker.get_account()
+    assert snap.base_currency == "USD"
+
+
 def test_get_fills_filters_by_since(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
     # ib-async's Execution carries orderRef directly (no .order on Fill).
     exec1 = SimpleNamespace(

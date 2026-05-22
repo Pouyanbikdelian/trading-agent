@@ -267,10 +267,50 @@ def _h_refresh_data(_cmd: Command, _broker: Broker) -> dict[str, Any]:
 
 
 def _h_reconnect_broker(_cmd: Command, broker: Broker) -> dict[str, Any]:
+    """Reconnect to the broker. Detects the "port refused" case where
+    the gateway TCP listener is fully down (vs. just wedged at the
+    subscription level) and triggers a docker restart, since the
+    timeout-driven self-heal in _bounded only fires on wedged calls.
+    Falls back gracefully on non-IBKR brokers."""
+    import socket
+
     with contextlib.suppress(Exception):
         broker.disconnect()
-    broker.connect()
-    return {"reconnected": True}
+    try:
+        broker.connect()
+        return {"reconnected": True, "via": "direct"}
+    except (ConnectionRefusedError, OSError, TimeoutError) as e:
+        # Only the IBKR adapter has the gateway-restart helper. If the
+        # broker is a Simulator or something else, surface the original
+        # error rather than guessing.
+        restarter = getattr(broker, "_docker_restart_via_socket", None)
+        gateway_container = getattr(broker, "_GATEWAY_CONTAINER_NAME", None)
+        if restarter is None or gateway_container is None:
+            raise
+        # Make sure the error is actually a port-down style failure —
+        # not, say, an auth refusal that a restart wouldn't fix.
+        msg = str(e).lower()
+        port_down = (
+            isinstance(e, ConnectionRefusedError)
+            or "refused" in msg
+            or "no route" in msg
+            or "no such" in msg
+            or "errno 111" in msg
+        )
+        if not port_down:
+            raise
+        logger.bind(component="command_processor").warning(
+            f"connect refused (gateway port down); restarting {gateway_container}"
+        )
+        restarter(gateway_container, timeout=30.0)
+        return {
+            "reconnected": False,
+            "via": "gateway_restart",
+            "note": (
+                f"gateway port was down; {gateway_container} is restarting and "
+                "will be ready in ~90s. Try /cycle once gateway is back."
+            ),
+        }
 
 
 _HANDLERS = {
@@ -320,6 +360,10 @@ def _format_success(cmd: Command, result: dict[str, Any] | str | None) -> str:
             f"→ {result['to_ccy']} (market) submitted"  # type: ignore[index]
         )
     if cmd.type == CommandType.RECONNECT_BROKER:
+        via = result.get("via") if isinstance(result, dict) else None  # type: ignore[union-attr]
+        if via == "gateway_restart":
+            note = result.get("note", "")  # type: ignore[union-attr]
+            return f"🔄 `{cmd_id}` Gateway port was down — restart issued.\n{note}"
         return f"✅ `{cmd_id}` Broker reconnected"
     return f"✅ `{cmd_id}` {cmd.type.value} executed"
 

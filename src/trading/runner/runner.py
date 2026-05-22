@@ -650,23 +650,63 @@ class Runner:
         Also folds in per-currency cash via get_balances() when the
         broker supports it, so /balances can render the CHF/USD/EUR
         split without doing a second live query from the bot process.
+
+        Guards against overwriting a good snapshot with placeholder
+        data when the broker is mid-wedge. Wedged sessions can return
+        an empty accountSummary list, which our adapter renders as
+        equity=0 / cash=0 / base_currency="USD" — strictly worse than
+        the previous snapshot (which at least had real numbers from
+        the last working call). Snapshot-refresh ALSO touches
+        heartbeat.json so /status reflects "broker alive" between
+        cycles, not just at end-of-cycle.
         """
         try:
             snap = self.broker.get_account()
-            if hasattr(self.broker, "get_balances"):
-                try:
-                    per_ccy = self.broker.get_balances() or {}  # type: ignore[attr-defined]
-                except Exception as e:
-                    per_ccy = {}
-                    logger.bind(component="runner").debug(
-                        f"get_balances failed during refresh: {type(e).__name__}: {e!r}"
-                    )
-                if per_ccy:
-                    snap = snap.model_copy(update={"cash_by_currency": per_ccy})
-            self.cycle.runner_store.save_snapshot(snap)
         except Exception as e:
             logger.bind(component="runner").debug(
                 f"snapshot refresh skipped: {type(e).__name__}: {e!r}"
+            )
+            return
+
+        # Defensive: drop obviously-empty snapshots. equity == 0 is the
+        # giveaway — even a freshly-opened paper account has the funding
+        # cash showing as both cash and equity. A zero here means the
+        # broker returned no accountSummary rows, almost always because
+        # of a wedged subscription state.
+        if snap.equity == 0 and snap.cash == 0 and not snap.positions:
+            logger.bind(component="runner").debug(
+                "snapshot refresh produced empty data — not saving over previous snapshot"
+            )
+            return
+
+        if hasattr(self.broker, "get_balances"):
+            try:
+                per_ccy = self.broker.get_balances() or {}  # type: ignore[attr-defined]
+            except Exception as e:
+                per_ccy = {}
+                logger.bind(component="runner").debug(
+                    f"get_balances failed during refresh: {type(e).__name__}: {e!r}"
+                )
+            if per_ccy:
+                snap = snap.model_copy(update={"cash_by_currency": per_ccy})
+
+        self.cycle.runner_store.save_snapshot(snap)
+
+        # Touch heartbeat. A successful snapshot refresh proves the trader
+        # is alive AND the broker is talking back — operationally a better
+        # liveness signal than "last cycle completed", which between
+        # weekly rebalances always reads 6+ days stale.
+        try:
+            hb_path = settings.state_dir / "heartbeat.json"
+            hb_path.parent.mkdir(parents=True, exist_ok=True)
+            hb_path.write_text(
+                '{"ts": "'
+                + datetime.now(tz=timezone.utc).isoformat()
+                + '", "source": "snapshot_refresh"}'
+            )
+        except Exception as e:
+            logger.bind(component="runner").debug(
+                f"heartbeat touch failed: {type(e).__name__}: {e!r}"
             )
 
     async def _watchdog(self) -> None:

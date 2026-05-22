@@ -630,7 +630,14 @@ class IbkrBroker(Broker):
         # Try the structured summary first; fall back to TWS-side accountValues.
         cash = 0.0
         equity = 0.0
-        base_currency = "USD"
+        # Collect every plausible base-currency hint we see and pick at the
+        # end. Different tags carry the currency differently: NetLiquidation
+        # is normally per-account (base ccy), but during a gateway wedge it
+        # can come through with currency=None. AvailableFunds and
+        # TotalCashValue are also base-currency-only in IBKR's schema.
+        # Voting across multiple tags is much more robust than relying on
+        # one row whose currency attribute might be missing.
+        currency_votes: dict[str, int] = {}
         summary = self._bounded("accountSummary", self._ib.accountSummary)
         for row in summary:
             tag = getattr(row, "tag", None)
@@ -642,11 +649,19 @@ class IbkrBroker(Broker):
                 cash = val
             elif tag == "NetLiquidation":
                 equity = val
-                # NetLiquidation always carries the account's base currency
-                # (IBKR documents this; other tags can be per-sub-account).
+            # Base-currency candidates: only tags IBKR reports against the
+            # account's base. CashBalance / AccruedCash come per-currency
+            # and would skew the vote toward whichever currency happens to
+            # appear first.
+            if tag in ("NetLiquidation", "AvailableFunds", "TotalCashValue"):
                 ccy = getattr(row, "currency", None)
-                if ccy:
-                    base_currency = str(ccy)
+                if ccy and ccy != "BASE":
+                    currency_votes[str(ccy)] = currency_votes.get(str(ccy), 0) + 1
+        base_currency = (
+            max(currency_votes.items(), key=lambda kv: kv[1])[0]
+            if currency_votes
+            else "USD"
+        )
         positions = {p.instrument.key: p for p in self.get_positions()}
         return AccountSnapshot(
             ts=ts,
