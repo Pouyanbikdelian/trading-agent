@@ -292,11 +292,12 @@ def _cmd_positions() -> str:
 
     prefix = _snapshot_age_warning(snap.ts) or ""
 
+    ccy = getattr(snap, "base_currency", None) or "USD"
     if not snap.positions:
         return (
             prefix
             + f"📊 Portfolio (snapshot {snap.ts:%Y-%m-%d %H:%M UTC})\n"
-            + f"  Equity: ${snap.equity:,.2f}    Cash: ${snap.cash:,.2f}\n"
+            + f"  Equity: {ccy} {snap.equity:,.2f}    Cash: {ccy} {snap.cash:,.2f}\n"
             + "  No open positions."
         )
 
@@ -324,7 +325,7 @@ def _cmd_positions() -> str:
 
     summary = (
         f"📊 Portfolio (snapshot {snap.ts:%Y-%m-%d %H:%M UTC})\n"
-        f"  Equity: ${snap.equity:,.2f}    Cash: ${snap.cash:,.2f}\n"
+        f"  Equity: {ccy} {snap.equity:,.2f}    Cash: {ccy} {snap.cash:,.2f}\n"
         f"  Positions: {n} ({long_count} long, {short_count} short)"
     )
     table = "```\n" + "\n".join([header, sep, *body]) + "\n```"
@@ -778,9 +779,10 @@ def _cmd_balances() -> str:
             "Try `/cycle` to force one, or wait for Friday."
         )
     prefix = _snapshot_age_warning(snap.ts) or ""
+    ccy = getattr(snap, "base_currency", None) or "USD"
     lines = [f"*Account balances* (as of {snap.ts.strftime('%Y-%m-%d %H:%M UTC')}):"]
-    lines.append(f"  total cash: `${snap.cash:,.2f}`")
-    lines.append(f"  total equity: `${snap.equity:,.2f}`")
+    lines.append(f"  total cash: `{ccy} {snap.cash:,.2f}`")
+    lines.append(f"  total equity: `{ccy} {snap.equity:,.2f}`")
     lines.append("")
     lines.append(
         "_Per-currency breakdown requires a live broker query. Try after "

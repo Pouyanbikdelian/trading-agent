@@ -209,6 +209,12 @@ class AccountSnapshot(BaseModel):
     cash: float
     equity: float  # cash + market value of positions
     positions: dict[str, Position] = Field(default_factory=dict)  # keyed by instrument.key
+    # ISO-4217 code of the account's base currency. IBKR brokerage accounts
+    # have one base currency in which cash, equity and P&L are denominated;
+    # holdings in other currencies are converted into it on the broker side.
+    # We surface this so the bot can display "CHF 997k" instead of a
+    # misleading hardcoded "$" prefix when the account isn't USD.
+    base_currency: str = "USD"
 
     @field_validator("ts")
     @classmethod

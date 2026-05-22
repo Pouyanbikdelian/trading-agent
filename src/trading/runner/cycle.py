@@ -757,8 +757,9 @@ class Cycle:
             except Exception:
                 logger.bind(component="cycle").exception("get_balances failed; skipping FX breakdown")
 
+        ccy = getattr(snap, "base_currency", None) or "USD"
         lines: list[str] = ["📈 *Portfolio after this cycle*"]
-        lines.append(f"  Equity: ${equity:,.2f}    Cash: ${total_cash:,.2f}")
+        lines.append(f"  Equity: {ccy} {equity:,.2f}    Cash: {ccy} {total_cash:,.2f}")
 
         if per_ccy:
             ccy_parts = [
@@ -836,6 +837,7 @@ class Cycle:
 
         equity = float(getattr(account, "equity", 0.0) or 0.0)
         cash = float(getattr(account, "cash", 0.0) or 0.0)
+        ccy = getattr(account, "base_currency", None) or "USD"
 
         buy_lines: list[str] = []
         sell_lines: list[str] = []
@@ -846,9 +848,13 @@ class Cycle:
             notional = float(o.quantity) * float(px)
             gross += abs(notional)
             pct = (notional / equity * 100.0) if equity > 0 else 0.0
+            # Per-share prices and per-order notionals are in the instrument's
+            # currency (USD for US equities). Account totals further down are
+            # in the account's base currency. We keep them visually distinct
+            # so the operator knows which is which.
             line = (
-                f"  {o.instrument.symbol:<6} {o.quantity:>6g} @ ${px:,.2f} "
-                f"= ${notional:>10,.0f}  ({pct:>4.1f}%)"
+                f"  {o.instrument.symbol:<6} {o.quantity:>6g} @ {px:,.2f} "
+                f"= {notional:>10,.0f}  ({pct:>4.1f}%)"
             )
             if o.side == _Side.BUY:
                 buy_lines.append(line)
@@ -858,8 +864,8 @@ class Cycle:
                 net -= notional
 
         parts: list[str] = [
-            f"📊 cycle plan: {len(orders)} order(s), gross ${gross:,.0f} "
-            f"on equity ${equity:,.0f}, cash ${cash:,.0f}"
+            f"📊 cycle plan: {len(orders)} order(s), gross {gross:,.0f} "
+            f"on equity {ccy} {equity:,.0f}, cash {ccy} {cash:,.0f}"
         ]
         if buy_lines:
             parts.append("BUY:")
@@ -867,7 +873,7 @@ class Cycle:
         if sell_lines:
             parts.append("SELL:")
             parts.extend(sell_lines)
-        parts.append(f"net buy: ${net:,.0f}")
+        parts.append(f"net buy: {net:,.0f}")
 
         self.alerts.info("\n".join(parts))
 

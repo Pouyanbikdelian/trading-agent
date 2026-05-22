@@ -238,6 +238,21 @@ def test_get_account_reads_summary(broker: IbkrBroker, fake_ib: _FakeIb) -> None
     assert snap.equity == 125_000
 
 
+def test_get_account_uses_netliquidation_currency_as_base(
+    broker: IbkrBroker, fake_ib: _FakeIb
+) -> None:
+    """Regression for prod 2026-05-22: bot/cycle messages printed a
+    hardcoded ``$`` for a CHF-base account. The snapshot must surface
+    the actual base currency (taken from NetLiquidation's row) so the
+    display can use the right code."""
+    fake_ib._account_summary = [
+        SimpleNamespace(tag="TotalCashValue", value="100000", currency="CHF"),
+        SimpleNamespace(tag="NetLiquidation", value="100000", currency="CHF"),
+    ]
+    snap = broker.get_account()
+    assert snap.base_currency == "CHF"
+
+
 def test_get_fills_filters_by_since(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
     # ib-async's Execution carries orderRef directly (no .order on Fill).
     exec1 = SimpleNamespace(

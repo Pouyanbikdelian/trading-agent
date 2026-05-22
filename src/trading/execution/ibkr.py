@@ -630,6 +630,7 @@ class IbkrBroker(Broker):
         # Try the structured summary first; fall back to TWS-side accountValues.
         cash = 0.0
         equity = 0.0
+        base_currency = "USD"
         summary = self._bounded("accountSummary", self._ib.accountSummary)
         for row in summary:
             tag = getattr(row, "tag", None)
@@ -641,8 +642,19 @@ class IbkrBroker(Broker):
                 cash = val
             elif tag == "NetLiquidation":
                 equity = val
+                # NetLiquidation always carries the account's base currency
+                # (IBKR documents this; other tags can be per-sub-account).
+                ccy = getattr(row, "currency", None)
+                if ccy:
+                    base_currency = str(ccy)
         positions = {p.instrument.key: p for p in self.get_positions()}
-        return AccountSnapshot(ts=ts, cash=cash, equity=equity, positions=positions)
+        return AccountSnapshot(
+            ts=ts,
+            cash=cash,
+            equity=equity,
+            positions=positions,
+            base_currency=base_currency,
+        )
 
     # --------------------------------------------------------------- FX
 
