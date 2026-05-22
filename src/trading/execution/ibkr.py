@@ -365,17 +365,40 @@ class IbkrBroker(Broker):
             ex.shutdown(wait=False)
 
     def _reconnect_session(self) -> None:
-        """Best-effort reconnect after a session drop.
+        """Force a fresh handshake after a session drop.
 
-        Disconnect (suppress errors — we'll connect fresh either way),
-        then call connect() which goes through the normal handshake path
-        with its own 60s timeout.
+        After a gateway bounce ib-async's ``isConnected()`` can briefly
+        report True while the TCP teardown propagates. If we route
+        through ``connect()`` it short-circuits on that stale True and
+        no real ``connectAsync`` runs — the next API call then dies
+        with ``ConnectionError: Not connected``. We instead disconnect
+        explicitly and call ``connectAsync`` directly so the handshake
+        runs unconditionally.
         """
         import contextlib
 
         with contextlib.suppress(Exception):
             self.disconnect()
-        self.connect()
+        self._connected = False
+
+        if self._ib is None:
+            # Cold start (no prior IB instance) — defer to the normal
+            # connect() path which lazy-imports and instantiates IB.
+            self.connect()
+            return
+
+        from ib_async import util as _util
+
+        _util.run(
+            asyncio.wait_for(
+                self._ib.connectAsync(self._host, self._port, clientId=self._client_id),
+                timeout=60.0,
+            )
+        )
+        self._connected = True
+        logger.bind(broker=self.name).info(
+            f"reconnected ibkr@{self._host}:{self._port} client_id={self._client_id}"
+        )
 
     def _contract(self, instrument: Instrument) -> Any:
         from ib_async import Crypto, Forex, Future, Stock  # lazy import

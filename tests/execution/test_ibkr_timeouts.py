@@ -139,6 +139,49 @@ def test_bounded_auto_reconnects_and_retries(monkeypatch) -> None:
     assert snap.equity == 100_000.0
 
 
+def test_reconnect_session_forces_handshake_when_isconnected_lies(monkeypatch) -> None:
+    """Regression for prod 2026-05-22.
+
+    After a gateway bounce, ib-async's ``isConnected()`` can still report
+    True for several milliseconds while the TCP teardown propagates. If
+    ``_reconnect_session`` routes through ``connect()``, that function
+    short-circuits on the lying True and never calls ``connectAsync``.
+    The next API call then dies with ``ConnectionError: Not connected``.
+
+    This test fakes a lying ``isConnected()`` and asserts the reconnect
+    path calls ``connectAsync`` anyway.
+    """
+
+    class _LyingIb(_FlakyIb):
+        """isConnected always True, even after disconnect — mimics the
+        stale state observed in prod immediately after a gateway bounce."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_calls = 0
+
+        def isConnected(self) -> bool:
+            return True  # the lie
+
+        def disconnect(self) -> None:
+            pass  # no-op, mirroring an already-torn-down TCP socket
+
+        async def connectAsync(self, host: str, port: int, clientId: int) -> None:
+            self.connect_calls += 1
+
+    ib = _LyingIb()
+    broker = IbkrBroker(ib=ib)
+    broker._connected = True
+
+    broker._reconnect_session()
+
+    assert ib.connect_calls == 1, (
+        "connectAsync must be called unconditionally in the reconnect path — "
+        "otherwise a lying isConnected() makes the reconnect a no-op"
+    )
+    assert broker._connected is True
+
+
 def test_bounded_surrenders_after_second_timeout() -> None:
     """If the gateway is genuinely wedged (every call hangs), the second
     attempt also times out and we re-raise. Auto-halt counter ticks in
