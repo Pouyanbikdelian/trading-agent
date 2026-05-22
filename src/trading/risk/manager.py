@@ -141,6 +141,32 @@ class RiskManager:
         self._save_state()
         logger.bind(component="risk").warning(f"UNHALTED (was: {prev})")
 
+    def _reload_halt_state(self) -> None:
+        """Refresh halt-related fields from disk, preserving in-memory
+        daily P&L tracking.
+
+        We do NOT swap ``self._state`` wholesale here: the runner's
+        ``start_of_day`` populates ``daily_equity_open`` and
+        ``equity_high_watermark`` in-memory and those don't always land
+        in halt.json between processes. Reloading just the halt trio
+        keeps the bot's /halt and /resume effective without losing
+        live counters.
+        """
+        if self._halt_path is None:
+            return
+        try:
+            disk = self._load_state()
+        except Exception as e:
+            logger.bind(component="risk").warning(
+                f"_reload_halt_state failed; keeping in-memory state: {e!r}"
+            )
+            return
+        self._state = self._state.replace(
+            halted=disk.halted,
+            reason=disk.reason,
+            halted_at=disk.halted_at,
+        )
+
     def start_of_day(self, account: AccountSnapshot) -> None:
         """Stamp today's opening equity. Idempotent within a day — only the
         first call on a new date mutates state."""
@@ -159,6 +185,13 @@ class RiskManager:
 
     def evaluate_intraday(self, account: AccountSnapshot) -> RiskDecision:
         """Post-bar safety check. Returns ``halt`` if a kill switch fires."""
+        # Re-read halt.json before checking. The Telegram bot (a separate
+        # process) writes this file from /halt and /resume; without a
+        # reload here, the trader process would only see halt changes on
+        # its next restart. This caused a real incident: after /resume
+        # cleared the halt on disk, the still-running cycle saw the stale
+        # in-memory state and refused with "already halted" (2026-05-22).
+        self._reload_halt_state()
         if self._state.halted:
             return RiskDecision(action="halt", reason=f"already halted: {self._state.reason}")
 

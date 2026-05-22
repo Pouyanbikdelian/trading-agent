@@ -19,6 +19,45 @@ def test_halt_state_persists_across_processes(tmp_path: Path) -> None:
     assert m2.state.reason == "oops"
 
 
+def test_evaluate_intraday_picks_up_resume_written_by_other_process(tmp_path: Path) -> None:
+    """Regression for prod 2026-05-22.
+
+    The Telegram bot and the trader live in different processes but
+    share ``halt.json``. The trader's RiskManager used to load halt
+    state only at __init__, so after the bot's /resume cleared the
+    file on disk the still-running cycle kept refusing with
+    ``already halted: ...``. evaluate_intraday must re-read the file.
+    """
+    from trading.core.types import AccountSnapshot
+
+    path = tmp_path / "halt.json"
+
+    # Simulate "trader saw a halt at startup".
+    trader = RiskManager(RiskLimits(), halt_state_path=path)
+    trader.halt("auto-halt after consecutive failures")
+    assert trader.is_halted()
+
+    # Simulate the Telegram bot process clearing the halt by rewriting
+    # the file directly — no shared in-memory state with the trader.
+    path.write_text(
+        '{"halted": false, "reason": "", "halted_at": null, '
+        '"equity_high_watermark": 0.0, "daily_equity_open": 0.0, '
+        '"last_day": null}'
+    )
+
+    snap = AccountSnapshot(
+        ts=datetime.now(timezone.utc),
+        cash=100_000.0,
+        equity=100_000.0,
+    )
+    decision = trader.evaluate_intraday(snap)
+    assert decision.action == "allow", (
+        "evaluate_intraday must reload halt.json on each call — the bot "
+        "writes the file, the trader process must see the change"
+    )
+    assert not trader.is_halted()
+
+
 def test_corrupt_halt_file_fails_closed(tmp_path: Path) -> None:
     r"""A corrupt halt.json must not crash the manager AND must default
     to halted state so we refuse to trade until the operator intervenes.
