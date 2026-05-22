@@ -397,12 +397,19 @@ class Cycle:
         if fills:
             self._announce_fills(fills)
 
-        # 11. Persist the post-trade snapshot.
+        # 11. Persist the post-trade snapshot AND announce the new state.
+        # Operator asked for an immediate portfolio print after every cycle
+        # that did anything — so they don't have to /positions + /balances
+        # to verify what changed.
+        post_snap = None
         try:
             post_snap = self.broker.get_account()
             self.runner_store.save_snapshot(post_snap)
         except Exception:
             logger.bind(component="cycle").exception("snapshot persistence failed")
+
+        if orders_submitted > 0 and post_snap is not None:
+            self._announce_post_cycle_state(post_snap)
 
         status: CycleStatus = "ok" if orders_submitted > 0 else "no_orders"
         return CycleReport(
@@ -725,6 +732,68 @@ class Cycle:
             f"commission ${total_commission:,.2f}"
         )
         self.alerts.info("\n".join([header, *lines, footer]))
+
+    def _announce_post_cycle_state(self, snap: Any) -> None:
+        """Telegram a full portfolio snapshot after a cycle that did work.
+
+        Operator-requested: when a cycle submits orders, they want an
+        immediate confirmation of the new state — total equity, cash by
+        currency, and every position with qty + avg cost + % weight —
+        without having to ask via /balances and /positions.
+
+        Only fires when orders were submitted; cycles with no orders are
+        silent here (the basket-preview already said "no orders").
+        """
+        equity = float(getattr(snap, "equity", 0.0) or 0.0)
+        total_cash = float(getattr(snap, "cash", 0.0) or 0.0)
+        positions = getattr(snap, "positions", {}) or {}
+
+        # Per-currency cash breakdown — only available on brokers that
+        # implement get_balances (IbkrBroker does; Simulator doesn't).
+        per_ccy: dict[str, float] = {}
+        if hasattr(self.broker, "get_balances"):
+            try:
+                per_ccy = self.broker.get_balances() or {}  # type: ignore[attr-defined]
+            except Exception:
+                logger.bind(component="cycle").exception("get_balances failed; skipping FX breakdown")
+
+        lines: list[str] = ["📈 *Portfolio after this cycle*"]
+        lines.append(f"  Equity: ${equity:,.2f}    Cash: ${total_cash:,.2f}")
+
+        if per_ccy:
+            ccy_parts = [
+                f"{ccy} {amt:,.0f}"
+                for ccy, amt in sorted(per_ccy.items())
+                if abs(amt) >= 1.0
+            ]
+            if ccy_parts:
+                lines.append("  Cash by currency: " + " | ".join(ccy_parts))
+
+        if not positions:
+            lines.append("  No open positions.")
+            self.alerts.info("\n".join(lines))
+            return
+
+        # Holdings table — same shape as /positions but live, not snapshot-read.
+        lines.append(f"  Positions: {len(positions)}")
+        header = (
+            f"  {'Symbol':<7} {'Qty':>9} {'Avg cost':>10} "
+            f"{'Mkt value':>11} {'Weight':>7}"
+        )
+        sep = "  " + "-" * (len(header) - 2)
+        rows: list[str] = []
+        for _key, pos in sorted(positions.items()):
+            qty = float(pos.quantity)
+            avg = float(pos.avg_price)
+            mv = qty * avg + float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+            w = (mv / equity) if equity > 0 else 0.0
+            rows.append(
+                f"  {pos.instrument.symbol:<7} {qty:>9.2f} {avg:>10,.2f} "
+                f"{mv:>11,.0f} {w:>6.1%}"
+            )
+        table = "```\n" + "\n".join([header, sep, *rows]) + "\n```"
+        lines.append(table)
+        self.alerts.info("\n".join(lines))
 
     @staticmethod
     def _fill_symbol(fill: Any) -> str | None:
