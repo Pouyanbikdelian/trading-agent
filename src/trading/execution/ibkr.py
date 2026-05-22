@@ -216,17 +216,103 @@ class IbkrBroker(Broker):
                 logger.bind(broker=self.name).exception(
                     f"auto-reconnect failed during {what}: {reconnect_err!r}"
                 )
+                self._trigger_gateway_restart(reason=f"reconnect failed during {what}")
                 raise first_err from None
             try:
                 return self._call_with_timeout(what, fn, timeout)
             except BrokerTimeoutError:
-                # Second timeout after fresh connect — gateway is genuinely
-                # wedged. Re-raise so the cycle aborts and the operator is
-                # alerted; auto-halt counter will tick.
+                # Second timeout after fresh CLIENT-side connect — the
+                # gateway's IBKR session is genuinely dead even though TCP
+                # is alive. Only a container restart fixes this. Trigger
+                # the restart, then re-raise so this cycle aborts cleanly;
+                # the next cycle will land on a fresh gateway.
                 logger.bind(broker=self.name).warning(
-                    f"{what} still timing out after reconnect — surrender"
+                    f"{what} still timing out after reconnect — triggering gateway restart"
                 )
+                self._trigger_gateway_restart(reason=f"{what} timed out twice")
                 raise
+
+    # Gateway-container name for `docker restart`. Matches docker-compose.yml.
+    _GATEWAY_CONTAINER_NAME: str = "ibkr-gateway"
+
+    def _trigger_gateway_restart(self, *, reason: str) -> None:
+        """Run ``docker restart <gateway-container>`` from inside the trader.
+
+        Requires the docker socket to be mounted into the trader container
+        (see docker-compose.yml). Disable by setting env
+        ``ENABLE_GATEWAY_AUTO_RESTART=false`` in .env.
+
+        Why we do this from the trader: the gateway's TCP port can stay
+        open while its IBKR API session is dead. Our compose-level TCP
+        healthcheck doesn't see that — only the trader does, because only
+        the trader makes real API calls. So the trader is the right
+        owner of the "session is dead, restart the container" decision.
+
+        Safe to call repeatedly: each call is rate-limited to one restart
+        per ``_RESTART_COOLDOWN_S`` so a bad cycle can't trigger restart
+        storms. On failure (docker not reachable, container missing) we
+        log and continue — the cycle is already aborting.
+        """
+        import os
+        import subprocess
+        import time
+
+        if os.environ.get("ENABLE_GATEWAY_AUTO_RESTART", "true").lower() in {"false", "0", "no"}:
+            logger.bind(broker=self.name).info(
+                "gateway auto-restart disabled (ENABLE_GATEWAY_AUTO_RESTART=false)"
+            )
+            return
+
+        now = time.monotonic()
+        last = getattr(self, "_last_restart_ts", 0.0)
+        if now - last < self._RESTART_COOLDOWN_S:
+            elapsed = now - last
+            logger.bind(broker=self.name).info(
+                f"gateway restart suppressed (last one was {elapsed:.0f}s ago, "
+                f"cooldown {self._RESTART_COOLDOWN_S:.0f}s)"
+            )
+            return
+
+        logger.bind(broker=self.name).warning(
+            f"triggering `docker restart {self._GATEWAY_CONTAINER_NAME}` — reason: {reason}"
+        )
+        try:
+            proc = subprocess.run(
+                ["docker", "restart", self._GATEWAY_CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except FileNotFoundError:
+            logger.bind(broker=self.name).warning(
+                "docker CLI not in container; cannot self-restart gateway. "
+                "Add `apt-get install -y docker.io-cli` to the image, or "
+                "run `docker compose restart ib-gateway` from the host."
+            )
+            return
+        except subprocess.TimeoutExpired:
+            logger.bind(broker=self.name).warning("docker restart timed out after 30s")
+            return
+        except Exception:
+            logger.bind(broker=self.name).exception("docker restart failed")
+            return
+
+        if proc.returncode != 0:
+            logger.bind(broker=self.name).warning(
+                f"docker restart returned {proc.returncode}: {proc.stderr.strip()[:200]}"
+            )
+            return
+
+        self._last_restart_ts = now
+        logger.bind(broker=self.name).info(
+            f"gateway restart issued; container will be back in ~90s. "
+            "Next cycle should land on a fresh session."
+        )
+
+    # Rate-limit gateway restarts. Repeated triggers within this window are
+    # suppressed — protects against restart storms when many things are
+    # failing at once (e.g. multiple cycles queued during a gateway outage).
+    _RESTART_COOLDOWN_S: float = 180.0
 
     def _call_with_timeout(self, what: str, fn: Any, timeout: float | None) -> Any:
         """Inner: one ThreadPoolExecutor-bounded call, no retry."""

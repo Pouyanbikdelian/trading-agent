@@ -130,6 +130,12 @@ services:
       # Mount config/ read-only so universes.yaml + risk.yaml are editable
       # from the host without rebuilding.
       - ./config:/app/config:ro
+      # Docker socket access: the trader is the only process that can
+      # tell when the IBKR API session is dead (port alive but calls
+      # hang). When that happens it issues `docker restart ibkr-gateway`
+      # so the next cycle lands on a fresh session — no operator needed.
+      # Set ENABLE_GATEWAY_AUTO_RESTART=false in .env to disable.
+      - /var/run/docker.sock:/var/run/docker.sock
     # Override CMD here so the image's default ("status") doesn't apply.
     # --use-ibkr routes fills through IB Gateway in paper mode so positions
     # land in the real IBKR paper account. Refuses to start if IBKR_PORT=4001
