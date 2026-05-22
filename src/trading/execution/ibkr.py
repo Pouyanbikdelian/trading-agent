@@ -93,6 +93,11 @@ class IbkrBroker(Broker):
         self._port = port or settings.ibkr_port
         self._client_id = client_id or settings.ibkr_client_id
         self._connected = False
+        # Background event loop owned by ib-async's transport. Populated
+        # lazily in connect() — only when we instantiate a real IB(), not
+        # when tests inject a stub. See _ensure_ib_loop_thread.
+        self._ib_loop: asyncio.AbstractEventLoop | None = None
+        self._ib_loop_thread: Any | None = None
 
     def _is_live_port(self) -> bool:
         return self._port in self._LIVE_PORTS
@@ -101,43 +106,83 @@ class IbkrBroker(Broker):
 
     def connect(self) -> None:
         if self._ib is None:
-            from ib_async import IB, util  # lazy import
+            from ib_async import IB  # lazy import
 
-            # ib-async is single-event-loop. If we let ``asyncio.run`` in
-            # ``_run`` create a transient loop just for ``connectAsync``,
-            # that loop closes after the call and every subsequent ib-async
-            # call (placeOrder, accountSummary, …) raises ``Event loop is
-            # closed``. ``util.startLoop()`` spins up a *persistent*
-            # background loop in a daemon thread so the IB instance and
-            # all its async machinery stay alive for the process lifetime.
-            # If we're already inside an async context (e.g. inside the
-            # runner's APScheduler thread), skip startLoop — ib-async will
-            # use the running loop instead.
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                util.startLoop()
+            # ib-async's transport is bound to whichever event loop awaits
+            # connectAsync. Every subsequent read/write must happen on
+            # that same loop — or the socket data goes nowhere and calls
+            # like accountSummary hang forever (prod incident 2026-05-22).
+            #
+            # We solve this with a dedicated daemon thread that runs the
+            # loop continuously, and dispatch all async work via
+            # asyncio.run_coroutine_threadsafe. Sync callers from any
+            # thread (APScheduler workers, ThreadPoolExecutor pool, etc.)
+            # safely reach the transport that way.
+            self._ensure_ib_loop_thread()
             self._ib = IB()
         if not self._ib.isConnected():
-            # Route connectAsync through ib-async's util.run, which uses
-            # the persistent background loop set up above. We can't use
-            # asyncio.run() — that creates+closes a temporary loop and
-            # leaves the IB instance with stale loop references.
-            from ib_async import util as _util
-
-            # Wrap connectAsync in asyncio.wait_for so we get a hard
-            # ceiling (60s) on the initial handshake — useful when the
-            # gateway is still in its login dance.
-            _util.run(
-                asyncio.wait_for(
-                    self._ib.connectAsync(self._host, self._port, clientId=self._client_id),
-                    timeout=60.0,
-                )
+            # Hard 60s ceiling on the handshake — useful when the gateway
+            # is still in its login dance.
+            self._await_async(
+                self._ib.connectAsync(self._host, self._port, clientId=self._client_id),
+                timeout=60.0,
             )
         self._connected = True
         logger.bind(broker=self.name).info(
             f"connected ibkr@{self._host}:{self._port} client_id={self._client_id}"
         )
+
+    def _ensure_ib_loop_thread(self) -> None:
+        """Start the daemon thread that owns ib-async's event loop.
+
+        Idempotent: only the first call creates the thread. Subsequent
+        connects (re-handshakes after gateway bounce) reuse the same loop.
+        """
+        if self._ib_loop is not None:
+            return
+        import threading
+
+        loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def _runner() -> None:
+            asyncio.set_event_loop(loop)
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=_runner, daemon=True, name="ibkr-loop")
+        thread.start()
+        if not ready.wait(timeout=5.0):
+            raise BrokerError("ibkr-loop thread did not start within 5s")
+        self._ib_loop = loop
+        self._ib_loop_thread = thread
+
+    def _await_async(self, coro: Any, *, timeout: float) -> Any:
+        """Await ``coro`` with a hard timeout, on the ib-loop thread if
+        one exists.
+
+        When the IB instance was constructed via ``connect()`` (production
+        path), ``self._ib_loop`` is set and we dispatch via
+        ``run_coroutine_threadsafe`` so the transport's owning loop runs
+        the work. When ``ib`` is a test stub injected via the constructor,
+        no loop thread exists — we run the coroutine on a transient loop
+        on the current thread; stubs don't have a real transport so this
+        is safe.
+        """
+        import concurrent.futures
+
+        wrapped = asyncio.wait_for(coro, timeout=timeout)
+        if self._ib_loop is not None:
+            fut = asyncio.run_coroutine_threadsafe(wrapped, self._ib_loop)
+            try:
+                # Small buffer over the inner timeout so the cancellation
+                # has a chance to propagate before we raise here.
+                return fut.result(timeout=timeout + 5.0)
+            except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
+                fut.cancel()
+                raise
+        # Test fallback: stubs run on whatever loop we hand them.
+        return asyncio.new_event_loop().run_until_complete(wrapped)
 
     def disconnect(self) -> None:
         if self._ib is not None and self._ib.isConnected():
@@ -346,11 +391,41 @@ class IbkrBroker(Broker):
     _RESTART_COOLDOWN_S: float = 180.0
 
     def _call_with_timeout(self, what: str, fn: Any, timeout: float | None) -> Any:
-        """Inner: one ThreadPoolExecutor-bounded call, no retry."""
+        """Inner: one bounded call, no retry.
+
+        Two paths:
+
+        * **Async-aware path** — if ``fn`` is an ib-async sync wrapper
+          like ``self._ib.accountSummary`` (which has a real coroutine
+          sibling ``self._ib.accountSummaryAsync``), we MUST run the
+          coroutine on the loop that owns the transport. Calling the
+          sync wrapper from a worker thread creates a fresh per-thread
+          event loop, sends the request on that loop, and waits forever
+          for a response that arrives on a different loop — the 30s
+          "timeout" we saw in prod was this, not a real broker hang.
+
+        * **Direct path** — for cached reads (``positions``, ``fills``,
+          ``openTrades``, ``accountValues``) and fire-and-forget sends
+          (``placeOrder``, ``cancelOrder``), no awaiting happens
+          internally. We run them on a ThreadPoolExecutor purely for
+          the hard timeout escape hatch.
+        """
+        import concurrent.futures
         from concurrent.futures import ThreadPoolExecutor
         from concurrent.futures import TimeoutError as FutTimeout
 
         timeout = timeout if timeout is not None else self.DEFAULT_API_TIMEOUT_S
+
+        async_fn = self._async_variant(fn)
+        if async_fn is not None and self._ib_loop is not None:
+            try:
+                return self._await_async(async_fn(), timeout=timeout)
+            except (asyncio.TimeoutError, concurrent.futures.TimeoutError) as e:
+                raise BrokerTimeoutError(
+                    f"IBKR {what} timed out after {timeout:.0f}s — gateway likely "
+                    "has a dead broker session (try restarting ib-gateway container)"
+                ) from e
+
         ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"ibkr-{what}")
         try:
             future = ex.submit(fn)
@@ -364,6 +439,25 @@ class IbkrBroker(Broker):
         finally:
             ex.shutdown(wait=False)
 
+    def _async_variant(self, fn: Any) -> Any | None:
+        """If ``fn`` is an ib-async sync method with an ``*Async``
+        sibling, return that sibling. Otherwise return None.
+
+        We use this so callers can keep passing the familiar sync
+        bindings (``self._ib.accountSummary``) while the broker quietly
+        routes them through the proper async-on-the-right-loop path.
+        """
+        name = getattr(fn, "__name__", None)
+        bound_to = getattr(fn, "__self__", None)
+        if not name or bound_to is None or name.endswith("Async"):
+            return None
+        if bound_to is not self._ib:
+            return None
+        async_method = getattr(self._ib, name + "Async", None)
+        if async_method is None or not asyncio.iscoroutinefunction(async_method):
+            return None
+        return async_method
+
     def _reconnect_session(self) -> None:
         """Force a fresh handshake after a session drop.
 
@@ -373,7 +467,8 @@ class IbkrBroker(Broker):
         no real ``connectAsync`` runs — the next API call then dies
         with ``ConnectionError: Not connected``. We instead disconnect
         explicitly and call ``connectAsync`` directly so the handshake
-        runs unconditionally.
+        runs unconditionally — and on the ib-loop thread so the new
+        transport is bound to the same loop our other calls use.
         """
         import contextlib
 
@@ -387,13 +482,9 @@ class IbkrBroker(Broker):
             self.connect()
             return
 
-        from ib_async import util as _util
-
-        _util.run(
-            asyncio.wait_for(
-                self._ib.connectAsync(self._host, self._port, clientId=self._client_id),
-                timeout=60.0,
-            )
+        self._await_async(
+            self._ib.connectAsync(self._host, self._port, clientId=self._client_id),
+            timeout=60.0,
         )
         self._connected = True
         logger.bind(broker=self.name).info(

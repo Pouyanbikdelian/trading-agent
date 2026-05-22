@@ -139,6 +139,57 @@ def test_bounded_auto_reconnects_and_retries(monkeypatch) -> None:
     assert snap.equity == 100_000.0
 
 
+def test_async_variant_dispatches_to_loop_thread() -> None:
+    """Regression for prod 2026-05-22.
+
+    ib-async's sync API (e.g. ``IB.accountSummary``) internally awaits
+    ``accountSummaryAsync`` via ``util.run`` which picks the calling
+    thread's event loop. If the IB transport is bound to a different
+    loop (because connect() happened on the main thread and we're now
+    on a ThreadPoolExecutor worker), requests go nowhere and the call
+    hangs until the executor timeout — looking exactly like a broker
+    timeout, except it's actually a cross-thread asyncio mismatch.
+
+    The fix detects the ``*Async`` sibling of the sync method and
+    dispatches it via ``run_coroutine_threadsafe`` to the dedicated
+    ib-loop thread. This test asserts that when an async variant
+    exists, ``_bounded`` uses it.
+    """
+    call_log: dict = {"sync": 0, "async": 0}
+
+    class _StubWithAsync:
+        async def connectAsync(self, host: str, port: int, clientId: int) -> None:
+            pass
+
+        def disconnect(self) -> None:
+            pass
+
+        def isConnected(self) -> bool:
+            return True
+
+        def accountSummary(self):
+            call_log["sync"] += 1
+            return [type("R", (), {"tag": "TotalCashValue", "value": "0"})()]
+
+        async def accountSummaryAsync(self):
+            call_log["async"] += 1
+            return [type("R", (), {"tag": "TotalCashValue", "value": "0"})()]
+
+    ib = _StubWithAsync()
+    broker = IbkrBroker(ib=ib)
+    broker._connected = True
+    # Spin up the loop thread so the async dispatch path is selected,
+    # mirroring how connect() would have set it up in production.
+    broker._ensure_ib_loop_thread()
+
+    broker._bounded("accountSummary", ib.accountSummary)
+
+    assert call_log == {"sync": 0, "async": 1}, (
+        "broker must call the *Async sibling on the loop thread, not "
+        "the sync wrapper on the calling thread (cross-thread hang)"
+    )
+
+
 def test_reconnect_session_forces_handshake_when_isconnected_lies(monkeypatch) -> None:
     """Regression for prod 2026-05-22.
 
