@@ -197,6 +197,37 @@ class TopKMomentum(Strategy):
         weights = weights.fillna(0.0)
         return weights
 
+    def top_candidates(
+        self, prices: pd.DataFrame, top_n: int = 20
+    ) -> list[tuple[str, float]] | None:
+        """Latest-bar momentum scoreboard: each candidate's formation
+        return, ranked best-first.
+
+        Same computation as ``generate``'s rebalance step, but exposed
+        as a flat ranked list so the operator can see how the strategy
+        viewed the universe — and override the selection via /pick.
+        Returns ``None`` if there isn't enough history.
+        """
+        p = self.params
+        n_t, n_n = prices.shape
+        if n_n == 0:
+            return None
+        eff_lookback = p.lookback - p.skip
+        if eff_lookback <= 0:
+            return None
+        if n_t < p.lookback + 1:
+            return None
+
+        shifted = prices.shift(p.skip)
+        formation = shifted.pct_change(eff_lookback).iloc[-1]
+
+        # Apply the same absolute-momentum gate the rebalance does — we
+        # want the operator to see what the strategy considered valid.
+        if p.abs_momentum_threshold is not None:
+            formation = formation.where(formation > p.abs_momentum_threshold)
+        ranked = formation.dropna().sort_values(ascending=False).head(top_n)
+        return [(str(sym), float(score)) for sym, score in ranked.items()]
+
 
 def _decorrelated_topk(
     candidates: pd.Series,

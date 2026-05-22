@@ -353,14 +353,56 @@ class Cycle:
 
         # 8d. Per-cycle operator approval (optional, off by default).
         # When require_cycle_approval=true, block here until the operator
-        # /approve's, /reject's, or the timeout fires. The operator can
-        # also scale down deployment (/approve 80 = use 80% of basket size)
-        # or replace the basket with a flatten (/approve flat). Default
-        # paper mode skips this entirely.
+        # /approve's, /reject's, /pick's a different basket, or the
+        # timeout fires. Default paper mode skips this entirely.
         from trading.core.config import settings as _settings
 
         if _settings.require_cycle_approval and orders:
-            orders = self._request_cycle_approval(orders, account, last_prices)
+            candidates = self._compute_top_candidates(prices, cfg=cfg)
+
+            def _rebuild_from_picks(picked_symbols: list[str]) -> list[Any]:
+                # Equal-weight the picked names at the per-position cap so
+                # the basket still respects risk limits without rebuilding
+                # the strategy from scratch. signal_to_orders applies the
+                # gross/sector/margin checks on top.
+                from trading.core.types import Signal as _Signal
+
+                if not picked_symbols:
+                    return []
+                weight_each = self.risk_manager.limits.max_position_pct
+                picked_keys: dict[str, float] = {}
+                for sym in picked_symbols:
+                    # match the strategy's symbol → instrument key namespace
+                    matching = [
+                        k for k in instruments_by_key if k.endswith(f":{sym}") or k == sym
+                    ]
+                    if not matching:
+                        continue
+                    picked_keys[matching[0]] = weight_each
+                if not picked_keys:
+                    return []
+                new_signal = _Signal(ts=signal.ts, target_weights=picked_keys)
+                new_orders, _new_decisions = self.risk_manager.signal_to_orders(
+                    new_signal,
+                    account=account,
+                    last_prices=last_prices,
+                    instruments=instruments_by_key,
+                    sector_map=cfg.sector_map or None,
+                    **(
+                        {"order_id_factory": self._order_id_factory}
+                        if self._order_id_factory
+                        else {}
+                    ),
+                )
+                return new_orders
+
+            orders = self._request_cycle_approval(
+                orders,
+                account,
+                last_prices,
+                candidates=candidates,
+                rebuild_from_picks=_rebuild_from_picks,
+            )
             if not orders:
                 return CycleReport(
                     ts=ts_start,
@@ -370,6 +412,10 @@ class Cycle:
                     decisions=decisions,
                     duration_ms=self._elapsed_ms(ts_start),
                 )
+            # Re-announce the modified basket if the operator /picked or
+            # /scaled, so the Telegram timeline shows the actual orders
+            # that will trade.
+            self._announce_basket(orders, account, last_prices)
 
         # 9. Submit each order. The cycle stops at first hard failure to
         #    avoid partial portfolio bringups, but logs and alerts.
@@ -850,19 +896,24 @@ class Cycle:
         orders: list[Any],
         account: Any,
         last_prices: dict[str, float],
+        *,
+        candidates: list[tuple[str, float]] | None = None,
+        rebuild_from_picks: Callable[[list[str]], list[Any]] | None = None,
     ) -> list[Any]:
         """Block the cycle until the operator decides via Telegram.
 
-        Writes the basket summary to ``state/cycle_approval_pending.json``
-        and waits for ``state/cycle_approval_decision.json``. The bot
-        produces the decision file in response to /approve, /approve N,
-        /approve flat, or /reject. Timeout from
-        ``settings.cycle_approval_timeout_s`` (default 600s) → treated
-        as /reject.
+        Writes the basket summary (+ optional top-N candidate scoreboard)
+        to ``state/cycle_approval_pending.json`` and waits for
+        ``state/cycle_approval_decision.json``. Bot produces the decision
+        file in response to /approve, /approve N, /approve flat,
+        /pick … or /reject.
 
-        Returns the list of orders to submit (possibly scaled or
-        replaced with flatten orders). Returns an empty list to skip
-        submission entirely.
+        ``candidates`` is the strategy's top-N ranked list (best-first,
+        with scores). When present, /pick can override which subset to
+        trade — ``rebuild_from_picks`` then rebuilds the orders from
+        those picks through the risk manager.
+
+        Returns the list of orders to submit. Empty = no submission.
         """
         import json as _json
         import time as _time
@@ -885,6 +936,21 @@ class Cycle:
         equity = float(getattr(account, "equity", 0.0) or 0.0)
         deploy_pct = (gross / equity * 100.0) if equity > 0 else 0.0
 
+        # Symbols the strategy decided to trade — used so the bot can
+        # mark them on the candidate scoreboard.
+        chosen = {getattr(o.instrument, "symbol", "") for o in orders}
+
+        candidates_payload: list[dict[str, Any]] = []
+        if candidates:
+            for sym, score in candidates:
+                candidates_payload.append(
+                    {
+                        "symbol": sym,
+                        "score": float(score),
+                        "in_basket": sym in chosen,
+                    }
+                )
+
         pending_path.parent.mkdir(parents=True, exist_ok=True)
         pending_path.write_text(
             _json.dumps(
@@ -896,22 +962,43 @@ class Cycle:
                     "currency": ccy,
                     "equity": equity,
                     "deploy_pct": deploy_pct,
+                    "can_pick": bool(candidates_payload and rebuild_from_picks),
+                    "candidates": candidates_payload,
                 },
                 indent=2,
             )
         )
 
         timeout_s = float(_settings.cycle_approval_timeout_s)
-        self.alerts.info(
-            f"⏸ *Awaiting approval* — cycle `{cycle_id[:8]}` "
-            f"({len(orders)} orders, {deploy_pct:.0f}% of equity)\n"
-            "Reply with one of:\n"
-            "  `/approve` — submit as-is\n"
-            "  `/approve 80` — scale to 80% of basket size\n"
-            "  `/approve flat` — flatten everything instead\n"
-            "  `/reject` — skip this cycle (no orders)\n"
-            f"⏱ Auto-rejects after {int(timeout_s / 60)} min."
+        prompt_lines = [
+            f"⏸ *Awaiting approval* — cycle `{cycle_id[:8]}`",
+            f"{len(orders)} orders · {deploy_pct:.0f}% of equity",
+            "",
+            "Reply with one of:",
+            "  `/approve` — submit as-is",
+            "  `/approve 80` — scale to 80% of basket size",
+        ]
+        if candidates_payload and rebuild_from_picks is not None:
+            prompt_lines.append(
+                "  `/pick 1 3 5 8 11` — replace basket with these ranks"
+            )
+        prompt_lines.extend(
+            [
+                "  `/approve flat` — flatten everything instead",
+                "  `/reject` — skip this cycle (no orders)",
+                f"⏱ Auto-rejects after {int(timeout_s / 60)} min.",
+            ]
         )
+        if candidates_payload:
+            prompt_lines.append("")
+            prompt_lines.append("*Top candidates this cycle:*")
+            for i, c in enumerate(candidates_payload[:20], start=1):
+                mark = "✅" if c["in_basket"] else "  "
+                prompt_lines.append(
+                    f"  `{i:>2}` {mark} `{c['symbol']:<6}` {c['score']:+.1%}"
+                )
+
+        self.alerts.info("\n".join(prompt_lines))
 
         deadline = _time.monotonic() + timeout_s
         decision: dict[str, Any] | None = None
@@ -963,9 +1050,53 @@ class Cycle:
                 "rescaling order quantities."
             )
             return self._rescale_orders(orders, factor)
+        if action == "pick":
+            picked_symbols = [str(s) for s in decision.get("picked_symbols", []) if s]
+            if not picked_symbols or rebuild_from_picks is None:
+                self.alerts.info(
+                    f"❌ cycle `{cycle_id[:8]}` /pick had no valid symbols — skipping."
+                )
+                return []
+            self.alerts.info(
+                f"✅ cycle `{cycle_id[:8]}` /pick → {len(picked_symbols)} names: "
+                f"`{', '.join(picked_symbols)}`. Rebuilding basket…"
+            )
+            return rebuild_from_picks(picked_symbols)
         # action == "approve"
         self.alerts.info(f"✅ cycle `{cycle_id[:8]}` approved as-is.")
         return orders
+
+    def _compute_top_candidates(
+        self,
+        prices: pd.DataFrame,
+        *,
+        cfg: RunnerConfig | None = None,
+        top_n: int = 20,
+    ) -> list[tuple[str, float]] | None:
+        """Ask the first strategy that supports it for its top-N
+        candidates. Used by the approval prompt to give the operator
+        a larger pool than just the K finally chosen.
+
+        For multi-strategy cycles, we use the first strategy's view —
+        a richer aggregation is possible but the operator override
+        (``/pick``) currently equal-weights selected names anyway, so
+        a single ranked source is enough.
+        """
+        from trading.strategies.base import get_strategy
+
+        cfg = cfg or self.config
+        for name in cfg.strategies:
+            try:
+                cls = get_strategy(name)
+                params = cls.Params(**cfg.strategy_params.get(name, {}))
+                ranked = cls(params=params).top_candidates(prices, top_n=top_n)
+                if ranked:
+                    return ranked
+            except Exception:
+                logger.bind(component="cycle").exception(
+                    f"top_candidates failed for strategy {name!r}"
+                )
+        return None
 
     def _build_cycle_id(self, account: Any) -> str:
         """Stable-ish id for this approval round. Uses the snapshot ts

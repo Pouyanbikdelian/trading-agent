@@ -86,6 +86,26 @@ class Strategy(ABC):
           * Be deterministic given the same ``prices`` input.
         """
 
+    def top_candidates(
+        self, prices: pd.DataFrame, top_n: int = 20
+    ) -> list[tuple[str, float]] | None:
+        """Return the strategy's top-N candidates *ranked* by attractiveness.
+
+        Optional — strategies that don't naturally produce a ranked
+        scoreboard (e.g. risk-parity, pairs trading) should return ``None``.
+
+        Used by the cycle to show the operator a larger candidate pool
+        than the K finally selected: they can /pick a different subset
+        from the same ranked list, or just /approve the strategy's own
+        top-K.
+
+        Returns a list of ``(symbol, score)`` tuples sorted by score
+        descending. Score units are strategy-specific (e.g. formation
+        return for momentum, alpha for cross-sectional, etc.) — the bot
+        just displays them.
+        """
+        return None
+
     def modulate(self, weights: pd.DataFrame, regime: pd.Series) -> pd.DataFrame:
         """Apply a regime overlay to a weights frame.
 

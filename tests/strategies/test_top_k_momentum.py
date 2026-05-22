@@ -183,3 +183,54 @@ def test_top_k_empty_universe_returns_zeros() -> None:
     empty = pd.DataFrame(index=idx)
     w = TopKMomentum(k=3).generate(empty)
     assert w.shape == (100, 0)
+
+
+def test_top_candidates_returns_ranked_scores() -> None:
+    """The cycle approval flow asks the strategy for the top-N candidates
+    as ``(symbol, score)`` pairs. The list must be ordered best-first by
+    formation return so the operator can compare against the K names the
+    strategy actually picked."""
+    prices = _make_panel(n_names=10)
+    strat = TopKMomentum(k=3)
+    cands = strat.top_candidates(prices, top_n=5)
+    assert cands is not None
+    assert len(cands) == 5
+    # Strictly descending by score (formation return).
+    scores = [s for _, s in cands]
+    assert scores == sorted(scores, reverse=True)
+    # No duplicates, no NaNs.
+    syms = [sym for sym, _ in cands]
+    assert len(set(syms)) == len(syms)
+    assert all(np.isfinite(s) for s in scores)
+
+
+def test_top_candidates_returns_none_when_history_insufficient() -> None:
+    """The score is the formation return — needs ``lookback`` bars. A
+    short panel has nothing meaningful to rank; return None so callers
+    skip the candidate scoreboard rather than show garbage."""
+    short = _make_panel(n=30)  # < lookback default of 252
+    cands = TopKMomentum(k=3).top_candidates(short, top_n=10)
+    assert cands is None
+
+
+def test_top_candidates_respects_absolute_momentum_gate() -> None:
+    """When ``abs_momentum_threshold`` is set, names whose formation
+    return is below the threshold should not appear in the candidate
+    list — the strategy wouldn't trade them, so they shouldn't be
+    presented as picks."""
+    rng = np.random.default_rng(7)
+    n = 500
+    idx = pd.date_range("2020-01-01", periods=n, freq="1D", tz="UTC")
+    # Half the panel drifts up, half drifts down. Threshold at 0 should
+    # keep only the up-drifters.
+    cols = {}
+    for i in range(6):
+        mu = 0.0015 if i < 3 else -0.0010
+        r = rng.normal(mu, 0.01, n)
+        cols[f"A{i}"] = 100.0 * np.exp(np.cumsum(r))
+    prices = pd.DataFrame(cols, index=idx)
+    cands = TopKMomentum(k=3, abs_momentum_threshold=0.0).top_candidates(prices, top_n=10)
+    assert cands is not None
+    # Only the up-drifters survive the gate (the down-drifters have
+    # negative formation return).
+    assert all(score > 0 for _, score in cands)

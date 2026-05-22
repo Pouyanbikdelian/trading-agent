@@ -64,7 +64,10 @@ HELP_TEXT = (
     "/approve — submit pending basket as-is\n"
     "/approve N — scale to N% (e.g. `/approve 80`)\n"
     "/approve flat — flatten instead of basket\n"
+    "/pick 1 3 5 8 — override basket with these ranks\n"
     "/reject — skip this cycle, no orders\n\n"
+    "*Regime*\n"
+    "/regime — HMM bull/bear state + SPY/VIX triggers\n\n"
     "*Trigger work*\n"
     "/cycle — force a rebalance now (~2 min)\n"
     "/refresh — queue a data refresh\n\n"
@@ -993,6 +996,70 @@ def _cmd_reconnect() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _cmd_regime() -> str:
+    r"""``/regime`` — current market regime snapshot.
+
+    Reads two state files written by the runner's background advisors:
+    ``state/hmm_advisor.json`` (daily HMM classification of SPY) and
+    ``state/advisor.json`` (hourly SPY+VIX risk triggers). These are
+    only refreshed at their schedule cadence (daily / hourly), so the
+    snapshot can be up to ~24h old for the HMM. The age is shown.
+    """
+    lines = ["*Market regime snapshot*"]
+
+    hmm_path = settings.state_dir / "hmm_advisor.json"
+    if hmm_path.exists():
+        try:
+            hmm = json.loads(hmm_path.read_text())
+            label = str(hmm.get("label", "?"))
+            emoji = {"BEAR": "🛑", "NEUTRAL": "🟡", "BULL": "🟢"}.get(label, "ℹ️")
+            as_of_iso = hmm.get("as_of", "")
+            age = ""
+            if as_of_iso:
+                try:
+                    as_of = datetime.fromisoformat(as_of_iso)
+                    if as_of.tzinfo is None:
+                        as_of = as_of.replace(tzinfo=timezone.utc)
+                    age_h = (datetime.now(tz=timezone.utc) - as_of).total_seconds() / 3600.0
+                    age = f" _({age_h:.1f}h ago)_"
+                except Exception:
+                    pass
+            lines.append(
+                f"{emoji} HMM: `{label}`{age}\n"
+                f"  P(bear)=`{hmm.get('p_bear', 0):.0%}` · "
+                f"P(neutral)=`{hmm.get('p_neutral', 0):.0%}` · "
+                f"P(bull)=`{hmm.get('p_bull', 0):.0%}`"
+            )
+        except Exception as e:
+            lines.append(f"_HMM state file unreadable: {e}_")
+    else:
+        lines.append(
+            "_HMM regime not classified yet — runs daily at 22:15 UTC. "
+            "Returns blank if the runner hasn't completed a daily fit._"
+        )
+
+    adv_path = settings.state_dir / "advisor.json"
+    if adv_path.exists():
+        try:
+            adv = json.loads(adv_path.read_text())
+            active = list(adv.get("active", []))
+            severities = dict(adv.get("severities", {}))
+            if active:
+                lines.append("\n*Active risk triggers* (SPY/VIX advisor):")
+                for name in sorted(active, key=lambda n: -severities.get(n, 0)):
+                    lines.append(f"  • `{name}` (severity `{severities.get(name, '?')}`)")
+            else:
+                lines.append("\n_No active SPY/VIX risk triggers._")
+        except Exception:
+            pass
+
+    lines.append(
+        "\n_Both advisors are informational — they don't auto-change "
+        "your mode. Use `/mode bull|neutral|defense|bear|flatten` to act._"
+    )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Cycle approval — operator gates each cycle's basket before submission
 # ---------------------------------------------------------------------------
@@ -1080,6 +1147,70 @@ def _cmd_reject() -> str:
     return f"❌ Rejected cycle `{short_id}` — no orders will be submitted."
 
 
+def _cmd_pick(args: list[str]) -> str:
+    r"""``/pick 1 3 5 8 11`` — replace the pending basket with a chosen
+    subset of the top-N candidate list.
+
+    Picks are 1-based ranks into the ``candidates`` array surfaced by the
+    approval prompt. Selected names are equal-weighted at the per-position
+    cap, then run back through the risk manager — so all the normal
+    limits (gross, sector, no-margin) still apply.
+    """
+    pending = _read_cycle_pending()
+    if pending is None:
+        return "_no cycle awaiting approval._"
+
+    if not pending.get("can_pick", False):
+        return (
+            "_this cycle doesn't expose a candidate scoreboard._\n"
+            "Use `/approve`, `/approve N`, `/approve flat`, or `/reject` instead."
+        )
+
+    if not args:
+        return (
+            "usage: `/pick 1 3 5 8 11` — ranks from the candidate list "
+            "in the approval prompt."
+        )
+
+    candidates = pending.get("candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        return "_no candidates attached to this cycle — try `/approve` instead._"
+
+    # Accept space- or comma-separated digits; deduplicate while
+    # preserving order.
+    raw_tokens: list[str] = []
+    for a in args:
+        raw_tokens.extend(t for t in a.replace(",", " ").split() if t)
+    seen: set[int] = set()
+    picked_ranks: list[int] = []
+    for t in raw_tokens:
+        try:
+            r = int(t)
+        except ValueError:
+            return f"_unrecognized rank `{t}`._ Pass integers like `/pick 1 3 5`."
+        if r < 1 or r > len(candidates):
+            return (
+                f"_rank `{r}` out of range._ "
+                f"Pick from 1..{len(candidates)}."
+            )
+        if r not in seen:
+            seen.add(r)
+            picked_ranks.append(r)
+
+    picked_symbols = [str(candidates[r - 1].get("symbol", "")) for r in picked_ranks]
+    picked_symbols = [s for s in picked_symbols if s]
+    if not picked_symbols:
+        return "_no valid symbols selected._"
+
+    short_id = str(pending.get("id", ""))[:8]
+    if not _write_cycle_decision("pick", picked_symbols=picked_symbols):
+        return "_pending cycle expired._"
+    return (
+        f"✅ /pick on `{short_id}` → {len(picked_symbols)} names: "
+        f"`{', '.join(picked_symbols)}`\nRebuilding basket…"
+    )
+
+
 async def _dispatch(text: str) -> str | None:
     """Parse a command and return a reply, or None if not a command."""
     if not text or not text.startswith("/"):
@@ -1105,6 +1236,10 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_approve(args)
     if cmd == "/reject":
         return _cmd_reject()
+    if cmd == "/pick":
+        return _cmd_pick(args)
+    if cmd in ("/regime", "/state"):
+        return _cmd_regime()
     if cmd == "/report":
         return _cmd_report()
     if cmd == "/mode":
