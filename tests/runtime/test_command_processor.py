@@ -175,3 +175,39 @@ def test_buy_passes_through_correct_order(state_dir, risk_manager) -> None:
     assert o.instrument == Instrument(symbol="MSFT", asset_class=AssetClass.EQUITY)
     assert o.quantity == 25
     assert o.limit_price == 500.0
+
+
+def test_halt_gate_picks_up_resume_from_disk_between_calls(state_dir, risk_manager) -> None:
+    """Regression for 2026-05-22 follow-up.
+
+    Trader and bot are separate processes; both read/write
+    ``state/halt.json``. After the bot's /resume rewrites the file, a
+    queued /buy must NOT still be refused by the trader's stale
+    in-memory halt state. process_pending must reload halt.json before
+    enforcing the gate.
+    """
+    broker = _FakeBroker()
+    alerts = _RecordingAlerts()
+    risk_manager.halt("test: halt then external unhalt")
+    assert risk_manager.is_halted()
+
+    # External process (bot) clears halt.json on disk while the trader
+    # still has the old state in memory.
+    halt_path = risk_manager._halt_path  # type: ignore[attr-defined]
+    halt_path.write_text(
+        '{"halted": false, "reason": "", "halted_at": null, '
+        '"equity_high_watermark": 0.0, "daily_equity_open": 0.0, '
+        '"last_day": null}'
+    )
+    # In-memory still says halted — only a reload should flip it.
+    assert risk_manager.is_halted()
+
+    cmd = Command.new(CommandType.BUY, args={"symbol": "AAPL", "qty": 10})
+    submit(cmd, state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    # process_pending must have reloaded halt.json and let the BUY through.
+    assert len(broker.submitted) == 1
+    assert broker.submitted[0].instrument.symbol == "AAPL"
+    # And the in-memory state should now reflect the on-disk reality.
+    assert not risk_manager.is_halted()

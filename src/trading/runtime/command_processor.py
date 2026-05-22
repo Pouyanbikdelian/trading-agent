@@ -99,6 +99,19 @@ def _execute_one(
 
     # Halt gate: refuse to submit orders while the risk manager is halted.
     # Operator must /resume before manual trading resumes.
+    #
+    # Reload halt.json before the check — the Telegram bot writes that
+    # file from a separate process, so the risk manager's in-memory
+    # state can be stale. Without this reload, a /resume from Telegram
+    # wouldn't unblock manual orders until the next cycle ran (the same
+    # bug that hit evaluate_intraday, fixed in commit a914db2).
+    if risk_manager is not None:
+        try:
+            risk_manager._reload_halt_state()  # noqa: SLF001
+        except Exception:
+            logger.bind(component="command_processor").exception(
+                "halt state reload failed; falling back to in-memory state"
+            )
     if (
         risk_manager is not None
         and risk_manager.is_halted()

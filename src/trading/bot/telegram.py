@@ -51,36 +51,40 @@ BOT_API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 25  # seconds — long-poll
 HELP_TEXT = (
     "*Trading bot — commands*\n\n"
-    "*Read-only*\n"
-    "/status — env, halted, heartbeat, mode\n"
-    "/positions — current positions and weights\n"
-    "/balances — cash per currency\n"
-    "/orders — recent orders (last 7d, grouped by status)\n"
-    "/pending — only orders currently in flight\n"
-    "/heartbeat — last cycle age\n"
-    "/report — generate the weekly report\n"
-    "/fx-rate FROM TO — current reference rate (e.g. `/fx-rate USD CHF`)\n\n"
-    "*Mode (rebalance posture)*\n"
-    "/mode [bull|neutral|defense|bear|flatten] — preview a mode change\n"
-    "/confirm — apply the previewed mode + run an off-cycle rebalance\n"
-    "/cancel — discard a pending mode preview\n\n"
-    "*Manual orders* (queued; runner executes within ~5s)\n"
-    "/buy SYM QTY [LIMIT] — e.g. `/buy AAPL 10` or `/buy 10 AAPL`\n"
-    "/sell SYM [QTY|all] [LIMIT] — e.g. `/sell AAPL all`\n"
-    "/close SYM — close a single position\n"
+    "*Status & data*\n"
+    "/status — env, halted, heartbeat\n"
+    "/health — broker, heartbeat, queue at a glance\n"
+    "/positions — open positions + weights\n"
+    "/balances — cash by currency, equity\n"
+    "/orders — last 7d of orders (grouped)\n"
+    "/pending — orders currently working\n"
+    "/heartbeat — age of last cycle\n"
+    "/report — weekly report\n\n"
+    "*Cycle approval* (when REQUIRE\\_CYCLE\\_APPROVAL=true)\n"
+    "/approve — submit pending basket as-is\n"
+    "/approve N — scale to N% (e.g. `/approve 80`)\n"
+    "/approve flat — flatten instead of basket\n"
+    "/reject — skip this cycle, no orders\n\n"
+    "*Trigger work*\n"
+    "/cycle — force a rebalance now (~2 min)\n"
+    "/refresh — queue a data refresh\n\n"
+    "*Manual orders* (queued, run within ~5s)\n"
+    "/buy SYM QTY \\[LIMIT] — e.g. `/buy AAPL 10 180`\n"
+    "/sell SYM \\[QTY|all] \\[LIMIT] — e.g. `/sell AAPL all`\n"
+    "/close SYM — close one position\n"
     "/flatten — close every open position\n"
-    "/cancel_order CLIENT_ID — cancel a specific pending order\n\n"
+    "/cancel\\_order CLIENT\\_ID — cancel a pending order\n\n"
+    "*Mode (rebalance posture)*\n"
+    "/mode bull|neutral|defense|bear|flatten — preview\n"
+    "/confirm — apply previewed mode + run now\n"
+    "/cancel — discard preview\n\n"
     "*FX*\n"
-    "/fx 5000 CHF to USD — convert at market (also: `/convert`)\n"
-    "/fx 5000 CHF — to USD by default\n\n"
-    "*Reliability*\n"
-    "/health — broker / heartbeat / queue at a glance\n"
-    "/cycle — force one off-cycle rebalance now\n"
-    "/refresh — queue a data refresh\n"
-    "/reconnect — bounce the broker connection\n\n"
+    "/fx 5000 CHF to USD — convert at market\n"
+    "/fx-rate USD CHF — reference rate\n\n"
     "*Safety*\n"
-    "/halt [reason] — kill switch: refuse to trade + force flatten\n"
-    "/resume — clear halt\n"
+    "/halt \\[reason] — refuse new trades; force flatten\n"
+    "/resume — clear halt, reset failure counter\n"
+    "/reconnect — bounce the broker connection\n"
 )
 
 
@@ -192,8 +196,27 @@ def _cmd_resume() -> str:
                 "flatten_on_next_cycle": False,
             },
         )
+
+    # Reset the consecutive-error counter. Without this, an operator who
+    # auto-halted at N failures and /resume'd would re-halt on the first
+    # subsequent failure (counter still at N, next failure → N+1 ≥
+    # threshold → auto-halt). The runner reloads this file at cycle
+    # start so the zero takes effect on the next cycle.
+    counter_path = settings.state_dir / "consecutive_errors.json"
+    counter_was = None
+    try:
+        if counter_path.exists():
+            existing = json.loads(counter_path.read_text())
+            counter_was = int(existing.get("count", 0))
+        _atomic_write_json(counter_path, {"count": 0})
+    except Exception:
+        logger.bind(component="bot").exception("could not reset consecutive_errors")
+
     logger.info("telegram resume")
-    return "✅ *RESUMED* — halt cleared."
+    msg = "✅ *RESUMED* — halt cleared."
+    if counter_was and counter_was > 0:
+        msg += f"\n   Failure counter reset (was {counter_was})."
+    return msg
 
 
 def _cmd_status() -> str:
@@ -211,13 +234,28 @@ def _cmd_status() -> str:
     hb_age = _heartbeat_age()
     hb_line = "unknown" if hb_age is None else f"{hb_age:.0f}s ago"
     halt_line = f"🛑 *HALTED* — `{halt_reason}`" if halted else "🟢 running"
-    return (
-        "*Trading status*\n"
-        f"env: `{settings.trading_env}`\n"
-        f"live armed: `{settings.is_live_armed()}`\n"
-        f"state: {halt_line}\n"
-        f"heartbeat: {hb_line}\n"
-    )
+    lines = [
+        "*Trading status*",
+        f"env: `{settings.trading_env}`",
+        f"live armed: `{settings.is_live_armed()}`",
+        f"state: {halt_line}",
+        f"heartbeat: {hb_line}",
+    ]
+
+    pending = _read_cycle_pending()
+    if pending is not None:
+        short_id = str(pending.get("id", ""))[:8]
+        n = int(pending.get("n_orders", 0))
+        pct = float(pending.get("deploy_pct", 0.0))
+        lines.append(
+            f"\n⏸ *Cycle `{short_id}` awaiting approval* — "
+            f"{n} orders, {pct:.0f}% of equity"
+        )
+        lines.append("Reply: `/approve` · `/approve 80` · `/approve flat` · `/reject`")
+    elif getattr(settings, "require_cycle_approval", False):
+        lines.append("\n_cycle approval required for every cycle (REQUIRE\\_CYCLE\\_APPROVAL=true)._")
+
+    return "\n".join(lines)
 
 
 def _heartbeat_age() -> float | None:
@@ -955,6 +993,93 @@ def _cmd_reconnect() -> str:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Cycle approval — operator gates each cycle's basket before submission
+# ---------------------------------------------------------------------------
+
+
+_APPROVAL_PENDING_FILE = "cycle_approval_pending.json"
+_APPROVAL_DECISION_FILE = "cycle_approval_decision.json"
+
+
+def _read_cycle_pending() -> dict[str, Any] | None:
+    path = settings.state_dir / _APPROVAL_PENDING_FILE
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def _write_cycle_decision(action: str, **extra: Any) -> bool:
+    """Write the operator's decision for the currently-pending cycle.
+
+    Returns True if a pending cycle was found, False otherwise. The
+    cycle on the trader side is polling for this file every ~2s.
+    """
+    pending = _read_cycle_pending()
+    if pending is None:
+        return False
+    payload = {
+        "id": pending.get("id"),
+        "action": action,
+        "decided_at": datetime.now(tz=timezone.utc).isoformat(),
+        **extra,
+    }
+    _atomic_write_json(settings.state_dir / _APPROVAL_DECISION_FILE, payload)
+    return True
+
+
+def _cmd_approve(args: list[str]) -> str:
+    r"""``/approve [N|flat]`` — approve the currently-pending cycle.
+
+    No arg → submit basket as-is.
+    Integer 0-100 → scale order quantities to N% of original.
+    ``flat`` → close every position instead of submitting the basket.
+    """
+    pending = _read_cycle_pending()
+    if pending is None:
+        return "_no cycle awaiting approval._ Run `/cycle` to trigger one."
+
+    short_id = str(pending.get("id", ""))[:8]
+    if not args:
+        if not _write_cycle_decision("approve"):
+            return "_pending cycle expired before approval could land._"
+        return f"✅ Approved cycle `{short_id}` as-is. Orders submitting…"
+
+    first = args[0].lower()
+    if first in ("flat", "flatten"):
+        if not _write_cycle_decision("flatten"):
+            return "_pending cycle expired._"
+        return f"⏸ Cycle `{short_id}` → flatten instead of new basket."
+
+    try:
+        pct = float(first)
+    except ValueError:
+        return (
+            f"_unrecognized argument `{args[0]}`._\n"
+            "Use: `/approve` · `/approve 80` · `/approve flat`"
+        )
+    if not 0.0 <= pct <= 100.0:
+        return "scale must be between 0 and 100 (% of basket size)."
+    factor = pct / 100.0
+    if not _write_cycle_decision("scale", scale_factor=factor):
+        return "_pending cycle expired._"
+    return f"✅ Approved cycle `{short_id}` at {pct:.0f}% — rescaling orders."
+
+
+def _cmd_reject() -> str:
+    r"""``/reject`` — refuse the currently-pending cycle; no orders go out."""
+    pending = _read_cycle_pending()
+    if pending is None:
+        return "_no cycle awaiting approval._"
+    short_id = str(pending.get("id", ""))[:8]
+    if not _write_cycle_decision("reject"):
+        return "_pending cycle expired._"
+    return f"❌ Rejected cycle `{short_id}` — no orders will be submitted."
+
+
 async def _dispatch(text: str) -> str | None:
     """Parse a command and return a reply, or None if not a command."""
     if not text or not text.startswith("/"):
@@ -975,6 +1100,11 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_halt(args)
     if cmd == "/resume":
         return _cmd_resume()
+    # --- cycle approval (only meaningful when REQUIRE_CYCLE_APPROVAL=true) ---
+    if cmd == "/approve":
+        return _cmd_approve(args)
+    if cmd == "/reject":
+        return _cmd_reject()
     if cmd == "/report":
         return _cmd_report()
     if cmd == "/mode":

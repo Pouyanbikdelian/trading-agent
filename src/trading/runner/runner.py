@@ -538,6 +538,14 @@ class Runner:
                 return
         self._last_cycle_start_ts = now
 
+        # Re-read the consecutive-error counter from disk. The Telegram bot's
+        # /resume writes a fresh zero into consecutive_errors.json — without
+        # this reload, the runner's in-memory counter stays at its old high
+        # value and the next single failure re-triggers auto-halt.
+        disk_count = self._load_error_counter()
+        if disk_count != self._consecutive_errors:
+            self._consecutive_errors = disk_count
+
         try:
             report = await asyncio.wait_for(
                 asyncio.to_thread(self.cycle.run_cycle),
@@ -621,9 +629,11 @@ class Runner:
         except Exception:
             logger.bind(component="runner").exception("auto-halt write failed")
         self.alerts.critical(
-            f"🛑 *AUTO-HALT*: {self._consecutive_errors} consecutive cycle failures.\n"
-            f"Last reason: `{reason[:200]}`\n"
-            "Investigate, then `/resume` to re-arm."
+            f"🛑 *AUTO-HALT* — {self._consecutive_errors} cycle failures in a row\n"
+            f"Last reason: `{reason[:200]}`\n\n"
+            "*Next step:* investigate the failure, then `/resume` to re-arm.\n"
+            "`/resume` also resets the failure counter, so a single fresh "
+            "failure won't immediately re-halt."
         )
 
     async def _refresh_account_snapshot(self) -> None:
