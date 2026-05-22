@@ -753,25 +753,57 @@ class Cycle:
     def _announce_fills(self, fills: list[Any]) -> None:
         """Telegram a one-shot summary of fills received this cycle.
 
-        Operator asked for "submission + execution" notifications and
-        called the queue-ack message spam. The cycle is the natural place
-        to surface fills — the cycle owns the reconciliation step and
-        we already have the data here. One alert per cycle, never per
-        fill, so a basket of 8 doesn't produce 8 pings.
+        One alert per cycle (never per fill), grouped by order, with
+        the instrument's actual currency on each line. FX trades get
+        formatted differently from equity trades — "rate" instead of
+        "price per share", and side/qty in the instrument's terms.
         """
         if not fills:
             return
-        # Group by symbol (some symbols may have multiple partial fills).
-        by_symbol: dict[str, list[Any]] = {}
-        for f in fills:
-            sym = self._fill_symbol(f) or "?"
-            by_symbol.setdefault(sym, []).append(f)
 
-        lines: list[str] = []
-        total_notional = 0.0
-        total_commission = 0.0
-        for sym in sorted(by_symbol):
-            entries = by_symbol[sym]
+        # Look up the orders we submitted recently so we can attach
+        # instrument + side context to each fill. The instrument on the
+        # Fill object can be None when the broker reports executions
+        # without populating it (FX in particular).
+        from datetime import timedelta
+
+        orders_by_id: dict[str, Any] = {}
+        try:
+            recent = self.order_store.load_orders(
+                since=datetime.now(tz=timezone.utc) - timedelta(days=1)
+            )
+            for order, _st, _bid in recent:
+                orders_by_id[order.client_order_id] = order
+        except Exception:
+            logger.bind(component="cycle").debug(
+                "order lookup for fills announcement failed; falling back to symbol-only"
+            )
+
+        # Group by order_id so partial fills aggregate cleanly.
+        by_order: dict[str, list[Any]] = {}
+        for f in fills:
+            oid = getattr(f, "order_id", None) or "?"
+            by_order.setdefault(oid, []).append(f)
+
+        parts: list[str] = ["💰 *Fills this cycle*"]
+        total_by_ccy: dict[str, float] = {}
+        fee_by_ccy: dict[str, float] = {}
+
+        for oid, entries in by_order.items():
+            order = orders_by_id.get(oid)
+            instr = getattr(order, "instrument", None) if order else None
+            sym = (
+                (getattr(instr, "symbol", None) if instr else None)
+                or self._fill_symbol(entries[0])
+                or "?"
+            )
+            side = getattr(order, "side", None)
+            side_str = getattr(side, "value", None) or "TRD"
+            ccy = getattr(instr, "currency", None) or "USD"
+            ac = getattr(instr, "asset_class", None)
+            asset_str = str(getattr(ac, "value", ac or "")).upper() or "?"
+            is_fx = asset_str == "FX"
+
             qty = sum(float(getattr(e, "quantity", 0.0) or 0.0) for e in entries)
             if qty == 0:
                 continue
@@ -784,20 +816,35 @@ class Cycle:
                 float(getattr(e, "commission", 0.0) or 0.0) for e in entries
             )
             avg_px = notional / qty if qty > 0 else 0.0
-            total_notional += notional
-            total_commission += commission
-            lines.append(
-                f"  {sym:<6} {qty:>8g} @ ${avg_px:,.2f} = ${notional:>10,.0f}"
-            )
+            total_by_ccy[ccy] = total_by_ccy.get(ccy, 0.0) + notional
+            fee_by_ccy[ccy] = fee_by_ccy.get(ccy, 0.0) + commission
 
-        if not lines:
-            return
-        header = f"💰 fills this cycle: {len(fills)} execution(s)"
-        footer = (
-            f"total notional ${total_notional:,.0f}, "
-            f"commission ${total_commission:,.2f}"
-        )
-        self.alerts.info("\n".join([header, *lines, footer]))
+            parts.append("")  # blank line between entries
+            if is_fx:
+                parts.append(f"💱 *{sym}* (FX)")
+                parts.append(f"   Side:    `{side_str}`")
+                parts.append(f"   Qty:     `{qty:,.0f}`")
+                parts.append(f"   Rate:    `{avg_px:.5f}`")
+                parts.append(f"   Total:   `{ccy} {notional:,.2f}`")
+                parts.append(f"   Fee:     `{ccy} {commission:,.2f}`")
+            else:
+                parts.append(f"📈 *{sym}*  ({asset_str})")
+                parts.append(f"   {side_str}:    `{qty:,.0f} @ {ccy} {avg_px:,.2f}`")
+                parts.append(f"   Total:   `{ccy} {notional:,.2f}`")
+                parts.append(f"   Fee:     `{ccy} {commission:,.4f}`")
+
+        parts.append("")  # separator before summary
+        # Summary aggregated per currency so mixed-currency baskets
+        # (e.g. USD stocks + a CHF FX leg) are still honest.
+        summary_lines = [f"📊 *Summary* — {len(fills)} execution(s)"]
+        for ccy in sorted(total_by_ccy):
+            summary_lines.append(
+                f"   notional: `{ccy} {total_by_ccy[ccy]:,.2f}`  "
+                f"fees: `{ccy} {fee_by_ccy.get(ccy, 0):,.2f}`"
+            )
+        parts.extend(summary_lines)
+
+        self.alerts.info("\n".join(parts))
 
     def _announce_post_cycle_state(self, snap: Any) -> None:
         """Telegram a full portfolio snapshot after a cycle that did work.
