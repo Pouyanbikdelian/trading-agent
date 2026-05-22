@@ -31,15 +31,13 @@ FROM python:3.12-slim-bookworm AS runtime
 # Minimal runtime deps:
 #   * tzdata so APScheduler crontabs in non-UTC zones work.
 #   * ca-certificates for outbound HTTPS (yfinance, Telegram, etc.).
-#   * docker-cli so the trader can issue `docker restart ibkr-gateway`
-#     when it detects a dead IBKR API session (port alive, calls hang).
-#     Only the CLI, no daemon — the daemon lives on the host and we
-#     reach it via the docker.sock bind-mount.
 # Keep this list short — every package is attack surface.
+#
+# Note: gateway auto-restart talks to /var/run/docker.sock via raw HTTP
+# (Python stdlib) — no docker CLI needed in the image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata \
         ca-certificates \
-        docker-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user. UID/GID 10001 is high enough to never collide with host users

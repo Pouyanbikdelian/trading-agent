@@ -161,10 +161,10 @@ def test_bounded_surrenders_after_second_timeout() -> None:
     assert ib._calls == 2
 
 
-def test_surrender_triggers_gateway_restart(monkeypatch) -> None:
-    """When the broker surrenders (TCP reconnect didn't help), it should
-    issue `docker restart ibkr-gateway` so the next cycle lands on a fresh
-    session. This is the recurring "port alive, API dead" failure mode."""
+def _broker_chronically_slow(monkeypatch, cooldown_s: float = 0.0) -> tuple[IbkrBroker, list[str]]:
+    """Helper: build a broker whose accountSummary always times out, and
+    monkeypatch _docker_restart_via_socket to record calls instead of
+    actually hitting the docker daemon."""
 
     class _ChronicallySlow(_FlakyIb):
         def accountSummary(self):
@@ -176,90 +176,61 @@ def test_surrender_triggers_gateway_restart(monkeypatch) -> None:
     broker = IbkrBroker(ib=ib)
     broker._connected = True
     broker.DEFAULT_API_TIMEOUT_S = 0.3  # type: ignore[misc]
-    broker._RESTART_COOLDOWN_S = 0.0  # type: ignore[misc]
+    broker._RESTART_COOLDOWN_S = cooldown_s  # type: ignore[misc]
 
-    restart_calls: list[list[str]] = []
+    restart_targets: list[str] = []
 
-    def _fake_run(cmd, **kwargs):
-        restart_calls.append(cmd)
-        from types import SimpleNamespace
+    def _fake_socket_restart(self, container_name: str, timeout: float = 30.0) -> None:
+        restart_targets.append(container_name)
 
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(IbkrBroker, "_docker_restart_via_socket", _fake_socket_restart)
+    # Pretend the socket is mounted so the os.path.exists guard doesn't skip us.
+    monkeypatch.setattr("os.path.exists", lambda p: True)
+    return broker, restart_targets
 
-    monkeypatch.setattr("subprocess.run", _fake_run)
+
+def test_surrender_triggers_gateway_restart(monkeypatch) -> None:
+    """When the broker surrenders (TCP reconnect didn't help), it should
+    POST to /containers/ibkr-gateway/restart so the next cycle lands on
+    a fresh session. This is the recurring "port alive, API dead" failure."""
     monkeypatch.setenv("ENABLE_GATEWAY_AUTO_RESTART", "true")
-
+    broker, restart_targets = _broker_chronically_slow(monkeypatch, cooldown_s=0.0)
     with pytest.raises(BrokerTimeoutError):
         broker.get_account()
-    # The trader issued a docker restart on the gateway container.
-    assert any("docker" in c[0] and "restart" in c[1] for c in restart_calls)
+    assert restart_targets == ["ibkr-gateway"]
 
 
 def test_gateway_restart_disabled_via_env(monkeypatch) -> None:
-    """Operator can opt out of the docker-side restart by setting an env var.
-    Useful when the container doesn't have docker socket access."""
-
-    class _ChronicallySlow(_FlakyIb):
-        def accountSummary(self):
-            self._calls += 1
-            time.sleep(2.0)
-            return []
-
-    ib = _ChronicallySlow()
-    broker = IbkrBroker(ib=ib)
-    broker._connected = True
-    broker.DEFAULT_API_TIMEOUT_S = 0.3  # type: ignore[misc]
-
-    restart_calls: list[list[str]] = []
-
-    def _fake_run(cmd, **kwargs):
-        restart_calls.append(cmd)
-        from types import SimpleNamespace
-
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr("subprocess.run", _fake_run)
+    """Operator can opt out by setting an env var. Useful when the container
+    doesn't have docker socket access."""
     monkeypatch.setenv("ENABLE_GATEWAY_AUTO_RESTART", "false")
-
+    broker, restart_targets = _broker_chronically_slow(monkeypatch)
     with pytest.raises(BrokerTimeoutError):
         broker.get_account()
-    # Restart was suppressed by the env var.
-    assert restart_calls == []
+    assert restart_targets == []
 
 
 def test_gateway_restart_cooldown(monkeypatch) -> None:
     """Back-to-back surrenders should only trigger ONE restart within the
     cooldown window — protects against storms when many cycles fail in a row."""
-
-    class _ChronicallySlow(_FlakyIb):
-        def accountSummary(self):
-            self._calls += 1
-            time.sleep(2.0)
-            return []
-
-    ib = _ChronicallySlow()
-    broker = IbkrBroker(ib=ib)
-    broker._connected = True
-    broker.DEFAULT_API_TIMEOUT_S = 0.3  # type: ignore[misc]
-    broker._RESTART_COOLDOWN_S = 60.0  # type: ignore[misc]
-
-    restart_calls: list[list[str]] = []
-
-    def _fake_run(cmd, **kwargs):
-        restart_calls.append(cmd)
-        from types import SimpleNamespace
-
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr("subprocess.run", _fake_run)
     monkeypatch.setenv("ENABLE_GATEWAY_AUTO_RESTART", "true")
-
-    # First call: triggers a restart.
+    broker, restart_targets = _broker_chronically_slow(monkeypatch, cooldown_s=60.0)
+    # First call triggers a restart.
     with pytest.raises(BrokerTimeoutError):
         broker.get_account()
     # Second call within cooldown: must NOT trigger another restart.
     with pytest.raises(BrokerTimeoutError):
         broker.get_account()
+    assert restart_targets == ["ibkr-gateway"]
 
-    docker_restarts = [c for c in restart_calls if len(c) >= 2 and c[1] == "restart"]
-    assert len(docker_restarts) == 1
+
+def test_gateway_restart_skipped_when_socket_missing(monkeypatch) -> None:
+    """If docker.sock isn't mounted, log + continue (don't crash the cycle)."""
+    monkeypatch.setenv("ENABLE_GATEWAY_AUTO_RESTART", "true")
+    broker, restart_targets = _broker_chronically_slow(monkeypatch, cooldown_s=0.0)
+    # Override os.path.exists to report socket missing for this test.
+    monkeypatch.setattr("os.path.exists", lambda p: False)
+    with pytest.raises(BrokerTimeoutError):
+        broker.get_account()
+    # We never reached the restart call.
+    assert restart_targets == []

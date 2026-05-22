@@ -232,11 +232,15 @@ class IbkrBroker(Broker):
                 self._trigger_gateway_restart(reason=f"{what} timed out twice")
                 raise
 
-    # Gateway-container name for `docker restart`. Matches docker-compose.yml.
+    # Gateway-container name for the docker API call. Matches docker-compose.yml.
     _GATEWAY_CONTAINER_NAME: str = "ibkr-gateway"
+    # Default location of the docker daemon socket inside the trader container.
+    # docker-compose mounts /var/run/docker.sock here.
+    _DOCKER_SOCKET_PATH: str = "/var/run/docker.sock"
 
     def _trigger_gateway_restart(self, *, reason: str) -> None:
-        """Run ``docker restart <gateway-container>`` from inside the trader.
+        """Restart the gateway container by talking to the docker daemon
+        directly via the unix socket (Python stdlib — no docker CLI needed).
 
         Requires the docker socket to be mounted into the trader container
         (see docker-compose.yml). Disable by setting env
@@ -250,11 +254,12 @@ class IbkrBroker(Broker):
 
         Safe to call repeatedly: each call is rate-limited to one restart
         per ``_RESTART_COOLDOWN_S`` so a bad cycle can't trigger restart
-        storms. On failure (docker not reachable, container missing) we
-        log and continue — the cycle is already aborting.
+        storms. On failure (socket missing, container not found) we log
+        and continue — the cycle is already aborting.
         """
+        import http.client
         import os
-        import subprocess
+        import socket
         import time
 
         if os.environ.get("ENABLE_GATEWAY_AUTO_RESTART", "true").lower() in {"false", "0", "no"}:
@@ -273,33 +278,22 @@ class IbkrBroker(Broker):
             )
             return
 
-        logger.bind(broker=self.name).warning(
-            f"triggering `docker restart {self._GATEWAY_CONTAINER_NAME}` — reason: {reason}"
-        )
-        try:
-            proc = subprocess.run(
-                ["docker", "restart", self._GATEWAY_CONTAINER_NAME],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except FileNotFoundError:
+        if not os.path.exists(self._DOCKER_SOCKET_PATH):
             logger.bind(broker=self.name).warning(
-                "docker CLI not in container; cannot self-restart gateway. "
-                "Add `apt-get install -y docker.io-cli` to the image, or "
-                "run `docker compose restart ib-gateway` from the host."
+                f"docker.sock not mounted at {self._DOCKER_SOCKET_PATH}; "
+                "cannot self-restart gateway. Add the bind-mount to docker-compose.yml "
+                "or run `docker compose restart ib-gateway` manually from the host."
             )
-            return
-        except subprocess.TimeoutExpired:
-            logger.bind(broker=self.name).warning("docker restart timed out after 30s")
-            return
-        except Exception:
-            logger.bind(broker=self.name).exception("docker restart failed")
             return
 
-        if proc.returncode != 0:
-            logger.bind(broker=self.name).warning(
-                f"docker restart returned {proc.returncode}: {proc.stderr.strip()[:200]}"
+        logger.bind(broker=self.name).warning(
+            f"triggering docker restart of {self._GATEWAY_CONTAINER_NAME} — reason: {reason}"
+        )
+        try:
+            self._docker_restart_via_socket(self._GATEWAY_CONTAINER_NAME)
+        except Exception:
+            logger.bind(broker=self.name).exception(
+                f"docker restart of {self._GATEWAY_CONTAINER_NAME} failed"
             )
             return
 
@@ -308,6 +302,43 @@ class IbkrBroker(Broker):
             f"gateway restart issued; container will be back in ~90s. "
             "Next cycle should land on a fresh session."
         )
+
+    def _docker_restart_via_socket(self, container_name: str, timeout: float = 30.0) -> None:
+        """POST /containers/<name>/restart against the docker unix socket.
+
+        Stdlib-only (http.client + socket). Cleaner than shelling out to
+        the docker CLI — no extra binary in the image. Raises on any
+        non-2xx response or transport error; caller logs.
+        """
+        import http.client
+        import socket as _socket
+
+        class _UDSConnection(http.client.HTTPConnection):
+            """HTTPConnection that talks over a unix domain socket instead of TCP."""
+
+            def __init__(self, sock_path: str, timeout: float) -> None:
+                super().__init__("localhost", timeout=timeout)
+                self._sock_path = sock_path
+
+            def connect(self) -> None:  # type: ignore[override]
+                s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                s.settimeout(self.timeout)
+                s.connect(self._sock_path)
+                self.sock = s
+
+        conn = _UDSConnection(self._DOCKER_SOCKET_PATH, timeout=timeout)
+        try:
+            # t=10 → docker SIGTERMs the container, waits up to 10s for graceful
+            # exit, then SIGKILLs. Gateway responds to TERM cleanly so 10s is fine.
+            conn.request("POST", f"/containers/{container_name}/restart?t=10")
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", errors="replace")[:300]
+            if resp.status >= 300:
+                raise RuntimeError(
+                    f"docker API returned {resp.status} {resp.reason}: {body}"
+                )
+        finally:
+            conn.close()
 
     # Rate-limit gateway restarts. Repeated triggers within this window are
     # suppressed — protects against restart storms when many things are
