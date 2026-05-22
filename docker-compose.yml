@@ -136,6 +136,16 @@ services:
       # so the next cycle lands on a fresh session — no operator needed.
       # Set ENABLE_GATEWAY_AUTO_RESTART=false in .env to disable.
       - /var/run/docker.sock:/var/run/docker.sock
+    # The trader runs as uid 10001 (non-root). The docker socket is owned
+    # by root:docker on the host (mode 660). Without supplementing the
+    # trader process with the host's docker GID we get EACCES on open.
+    # group_add accepts a numeric GID without requiring the group to
+    # exist in the container's /etc/group. Find your host GID with
+    #   stat -c %g /var/run/docker.sock
+    # and set DOCKER_GID in .env. Default 999 covers most Debian hosts;
+    # Ubuntu commonly uses 998.
+    group_add:
+      - "${DOCKER_GID:-999}"
     # Override CMD here so the image's default ("status") doesn't apply.
     # --use-ibkr routes fills through IB Gateway in paper mode so positions
     # land in the real IBKR paper account. Refuses to start if IBKR_PORT=4001
