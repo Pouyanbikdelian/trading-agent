@@ -44,6 +44,13 @@ class RiskLimits(BaseModel):
     max_drawdown_pct: float = Field(default=0.15, gt=0.0, le=1.0)
     """Halt when equity <= (1 - max_drawdown_pct) * equity_high_watermark."""
 
+    max_margin_borrowing_pct: float = Field(default=0.0, ge=0.0, le=10.0)
+    """Hard cap on per-currency cash going negative. 0.0 = cash-account
+    behavior (no margin); orders that would push any currency cash below
+    -max_margin_borrowing_pct * equity are rejected pre-submit. CHF-base
+    accounts buying USD stocks need either a pre-trade FX or this limit
+    > 0 — otherwise IBKR's auto-loan kicks in and we're on margin."""
+
     @classmethod
     def from_settings(cls, settings: Settings) -> RiskLimits:
         """Default factory honoring values from ``.env``."""
@@ -52,6 +59,7 @@ class RiskLimits(BaseModel):
             max_gross_exposure=settings.max_gross_exposure,
             max_daily_loss_pct=settings.max_daily_loss_pct,
             max_drawdown_pct=settings.max_drawdown_pct,
+            max_margin_borrowing_pct=settings.max_margin_borrowing_pct,
         )
 
 

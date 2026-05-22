@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from tests.risk.conftest import instruments_dict, signal_from
-from trading.core.types import AccountSnapshot, Position, Side
+from trading.core.types import AccountSnapshot, AssetClass, Instrument, Position, Side
 
 
 def test_per_position_cap_scales_only_offenders(mgr, aapl, msft, account_100k, t0) -> None:
@@ -187,3 +187,118 @@ def test_halted_manager_produces_no_orders(mgr, aapl, account_100k, t0) -> None:
     )
     assert orders == []
     assert decisions[0].action == "halt"
+
+
+# ---------------------------------------------------------------------------
+# No-margin enforcement (max_margin_borrowing_pct = 0.0)
+#
+# These tests prove that a basket which would push any currency cash
+# negative is rejected wholesale — the live deployment requires this so
+# IBKR doesn't auto-loan USD against a CHF base.
+# ---------------------------------------------------------------------------
+
+
+def test_no_margin_rejects_basket_that_would_overdraw_cash(mgr, aapl, msft, t0) -> None:
+    # Start with $50k cash, all in USD. Raise per-position cap so the
+    # basket can actually push USD negative; w/o raising it, the per-
+    # position scaler trims each name to 10% of equity and the basket
+    # fits in cash.
+    mgr.limits = mgr.limits.model_copy(
+        update={
+            "max_position_pct": 0.50,
+            "max_gross_exposure": 1.00,
+            "max_margin_borrowing_pct": 0.0,
+        }
+    )
+    snap = AccountSnapshot(
+        ts=t0,
+        cash=50_000.0,
+        equity=100_000.0,  # rest is in CHF cash, not represented here
+        base_currency="USD",
+        cash_by_currency={"USD": 50_000.0, "CHF": 50_000.0},
+    )
+    # 0.40 + 0.40 = 0.80 gross of equity = $80k in USD orders; only
+    # $50k USD cash available → $30k overdraw.
+    sig = signal_from(t0, {"equity:AAPL": 0.40, "equity:MSFT": 0.40})
+    prices = {"equity:AAPL": 100.0, "equity:MSFT": 100.0}
+    orders, decisions = mgr.signal_to_orders(
+        sig, account=snap, last_prices=prices, instruments=instruments_dict(aapl, msft)
+    )
+    assert orders == [], "basket must be rejected wholesale when it would overdraw"
+    reject = [d for d in decisions if d.action == "reject"]
+    assert reject, "expected a reject decision"
+    assert "no-margin" in reject[0].reason.lower()
+    assert "USD" in reject[0].reason
+
+
+def test_no_margin_allows_basket_when_cash_sufficient(mgr, aapl, msft, t0) -> None:
+    mgr.limits = mgr.limits.model_copy(update={"max_margin_borrowing_pct": 0.0})
+    snap = AccountSnapshot(
+        ts=t0,
+        cash=100_000.0,
+        equity=100_000.0,
+        base_currency="USD",
+        cash_by_currency={"USD": 100_000.0},
+    )
+    sig = signal_from(t0, {"equity:AAPL": 0.05, "equity:MSFT": 0.05})  # 10% gross
+    orders, _ = mgr.signal_to_orders(
+        sig,
+        account=snap,
+        last_prices={"equity:AAPL": 100.0, "equity:MSFT": 100.0},
+        instruments=instruments_dict(aapl, msft),
+    )
+    assert len(orders) == 2, "well-funded basket should pass margin check"
+
+
+def test_margin_budget_allows_partial_overdraw(mgr, aapl, t0) -> None:
+    """With MAX_MARGIN_BORROWING_PCT=0.50, USD can go to -50k against
+    100k equity. Basket that lands at -30k USD must be allowed."""
+    mgr.limits = mgr.limits.model_copy(
+        update={"max_margin_borrowing_pct": 0.50, "max_gross_exposure": 1.50}
+    )
+    snap = AccountSnapshot(
+        ts=t0,
+        cash=20_000.0,
+        equity=100_000.0,
+        base_currency="USD",
+        cash_by_currency={"USD": 20_000.0},
+    )
+    # Buying ~50k of stock with only 20k cash → USD ends at -30k. With
+    # the 50% budget that's allowed.
+    sig = signal_from(t0, {"equity:AAPL": 0.10})
+    orders, _ = mgr.signal_to_orders(
+        sig,
+        account=snap,
+        last_prices={"equity:AAPL": 100.0},
+        instruments={"equity:AAPL": aapl},
+    )
+    assert len(orders) == 1
+    assert orders[0].quantity > 0
+
+
+def test_cross_currency_overdraw_called_out_explicitly(mgr, t0) -> None:
+    """A CHF-base account buying USD stocks with no USD cash must be
+    rejected — reproduces today's prod scenario (CHF +840k, USD 0).
+    The rejection message should name USD so the operator knows to FX."""
+    mgr.limits = mgr.limits.model_copy(
+        update={"max_position_pct": 1.0, "max_gross_exposure": 1.0, "max_margin_borrowing_pct": 0.0}
+    )
+    usd_stock = Instrument(symbol="AAPL", asset_class=AssetClass.EQUITY, currency="USD")
+    snap = AccountSnapshot(
+        ts=t0,
+        cash=840_000.0,
+        equity=840_000.0,
+        base_currency="CHF",
+        cash_by_currency={"CHF": 840_000.0},  # no USD at all
+    )
+    sig = signal_from(t0, {"equity:AAPL": 0.50})
+    orders, decisions = mgr.signal_to_orders(
+        sig,
+        account=snap,
+        last_prices={"equity:AAPL": 100.0},
+        instruments={"equity:AAPL": usd_stock},
+    )
+    assert orders == []
+    reject = next((d for d in decisions if d.action == "reject"), None)
+    assert reject is not None
+    assert "USD" in reject.reason, "rejection should name the deficit currency"

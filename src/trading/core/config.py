@@ -64,6 +64,19 @@ class Settings(BaseSettings):
     max_position_pct: float = Field(default=0.10, alias="MAX_POSITION_PCT")
     max_daily_loss_pct: float = Field(default=0.02, alias="MAX_DAILY_LOSS_PCT")
     max_drawdown_pct: float = Field(default=0.15, alias="MAX_DRAWDOWN_PCT")
+    # Hard cap on margin borrowing. 0.0 = no margin allowed; orders that
+    # would push any currency cash below 0 are rejected by the risk
+    # manager. >0.0 allows up to that fraction of equity in margin debit.
+    # Set to 0.0 explicitly for live trading from a CHF base account
+    # buying USD-denominated stocks without an FX pre-trade.
+    max_margin_borrowing_pct: float = Field(default=0.0, alias="MAX_MARGIN_BORROWING_PCT")
+    # When true, every cycle pauses for operator approval via Telegram
+    # before submitting orders. Default off in research/paper; flip on
+    # alongside live trading.
+    require_cycle_approval: bool = Field(default=False, alias="REQUIRE_CYCLE_APPROVAL")
+    # How long the cycle waits for an /approve or /reject before
+    # auto-rejecting and submitting nothing. Default 10 minutes.
+    cycle_approval_timeout_s: int = Field(default=600, alias="CYCLE_APPROVAL_TIMEOUT_S")
 
     @field_validator("data_dir", "log_dir", "state_dir", mode="before")
     @classmethod

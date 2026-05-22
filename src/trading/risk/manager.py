@@ -359,6 +359,18 @@ class RiskManager:
                 )
             )
 
+        # --- 6. No-margin enforcement (cash-account behavior).
+        # If max_margin_borrowing_pct == 0.0, any order that would push a
+        # currency cash balance below zero is unacceptable: IBKR would
+        # auto-loan the deficit and we'd be on margin. Reject the basket
+        # rather than partially fill — operator should FX-convert or
+        # reduce sizing and try again.
+        if orders and self.limits.max_margin_borrowing_pct < 1.0:
+            margin_check = self._check_no_margin(orders, account, last_prices)
+            if margin_check is not None:
+                decisions.append(margin_check)
+                return [], decisions
+
         decisions.append(
             RiskDecision(
                 action="allow",
@@ -366,6 +378,66 @@ class RiskManager:
             )
         )
         return orders, decisions
+
+    def _check_no_margin(
+        self,
+        orders: list[Order],
+        account: AccountSnapshot,
+        last_prices: dict[str, float],
+    ) -> RiskDecision | None:
+        """Simulate the orders' effect on per-currency cash. Returns a
+        reject ``RiskDecision`` if any currency would breach the margin
+        budget; ``None`` if the basket is fundable.
+
+        Budget per currency:
+            allowed_debit = max_margin_borrowing_pct * account.equity
+                         (interpreted as a base-currency budget; we
+                          apply it independently to each currency as a
+                          conservative proxy — a true cross-currency
+                          model would need live FX rates, which we
+                          don't want to require here).
+
+        At 0.0, no currency may go below zero — strict cash account.
+        """
+        per_ccy_delta: dict[str, float] = {}
+        for o in orders:
+            px = last_prices.get(o.instrument.key, 0.0)
+            if px <= 0:
+                continue
+            ccy = o.instrument.currency or account.base_currency
+            notional = float(o.quantity) * float(px)
+            # BUY consumes cash (negative delta); SELL produces cash.
+            delta = -notional if o.side == Side.BUY else notional
+            per_ccy_delta[ccy] = per_ccy_delta.get(ccy, 0.0) + delta
+
+        # If we have a per-currency cash breakdown, use it; otherwise
+        # fall back to total cash (and assume it's all in base currency).
+        starting = dict(account.cash_by_currency) if account.cash_by_currency else {
+            account.base_currency: account.cash
+        }
+
+        allowed_debit = self.limits.max_margin_borrowing_pct * max(account.equity, 0.0)
+        breaches: list[str] = []
+        for ccy, delta in per_ccy_delta.items():
+            after = starting.get(ccy, 0.0) + delta
+            if after < -allowed_debit:
+                breaches.append(
+                    f"{ccy} {after:,.0f} (limit {-allowed_debit:,.0f})"
+                )
+
+        if not breaches:
+            return None
+
+        hint = (
+            "FX-convert into the deficit currency before re-running, "
+            "or raise MAX_MARGIN_BORROWING_PCT in .env."
+            if self.limits.max_margin_borrowing_pct == 0.0
+            else "scale down the basket or raise MAX_MARGIN_BORROWING_PCT."
+        )
+        return RiskDecision(
+            action="reject",
+            reason=f"no-margin breach — would overdraw: {', '.join(breaches)}. {hint}",
+        )
 
     # ------------------------------------------------------ force flatten
 
