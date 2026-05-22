@@ -265,8 +265,9 @@ def _snapshot_age_warning(snap_ts: datetime) -> str | None:
         age_s = f"{age_min / 60 / 24:.1f} d"
     return (
         f"⚠️ snapshot is {age_s} old — broker state may have changed.\n"
-        "   Run /cycle to refresh, or trust /flatten + /balances which "
-        "talk to the broker live.\n\n"
+        "   The runner refreshes the snapshot every 60s; if this warning "
+        "is firing, the trader's snapshot job is failing (broker down, "
+        "halt, etc.). Check `/health` or trader logs.\n\n"
     )
 
 
@@ -783,11 +784,15 @@ def _cmd_balances() -> str:
     lines = [f"*Account balances* (as of {snap.ts.strftime('%Y-%m-%d %H:%M UTC')}):"]
     lines.append(f"  total cash: `{ccy} {snap.cash:,.2f}`")
     lines.append(f"  total equity: `{ccy} {snap.equity:,.2f}`")
-    lines.append("")
-    lines.append(
-        "_Per-currency breakdown requires a live broker query. Try after "
-        "the next cycle, or send `/fx-rate USD CHF` for current rate._"
-    )
+
+    per_ccy = getattr(snap, "cash_by_currency", None) or {}
+    if per_ccy:
+        lines.append("")
+        lines.append("*Cash by currency:*")
+        for code, amt in sorted(per_ccy.items()):
+            if abs(amt) < 1.0:
+                continue
+            lines.append(f"  `{code:<5} {amt:>14,.2f}`")
     return prefix + "\n".join(lines)
 
 

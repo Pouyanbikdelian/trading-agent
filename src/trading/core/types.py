@@ -215,6 +215,11 @@ class AccountSnapshot(BaseModel):
     # We surface this so the bot can display "CHF 997k" instead of a
     # misleading hardcoded "$" prefix when the account isn't USD.
     base_currency: str = "USD"
+    # Per-currency cash balances (e.g. ``{"CHF": 140_000, "USD": 308_000}``).
+    # Populated by brokers that distinguish multi-currency cash;
+    # Simulator-backed snapshots leave this empty. The Telegram bot reads
+    # this to show per-currency breakdowns without a second broker call.
+    cash_by_currency: dict[str, float] = Field(default_factory=dict)
 
     @field_validator("ts")
     @classmethod

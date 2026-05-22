@@ -295,6 +295,24 @@ class Runner:
             replace_existing=True,
         )
 
+        # Live snapshot refresh: every 60s, pull a fresh broker account
+        # snapshot and persist it. Without this the Telegram /balances and
+        # /positions commands read stale data — only as fresh as the last
+        # successful cycle, which can be many hours ago between Friday
+        # rebalances. ib-async's wrapper keeps account/position dicts
+        # push-updated server-side, so get_account is a cache read and
+        # cheap to repeat at 1Hz. max_instances=1 + coalesce skips ticks
+        # while a previous refresh is still in flight (e.g. during a
+        # broker reconnect).
+        self._scheduler.add_job(
+            self._refresh_account_snapshot,
+            IntervalTrigger(seconds=60),
+            id="snapshot_refresh",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Advisory risk monitor: hourly poll of SPY+VIX, push a Telegram
         # alert on new triggers. NEVER auto-applies a mode change — only
         # informs the operator. Disabled if Telegram isn't configured.
@@ -607,6 +625,39 @@ class Runner:
             f"Last reason: `{reason[:200]}`\n"
             "Investigate, then `/resume` to re-arm."
         )
+
+    async def _refresh_account_snapshot(self) -> None:
+        """Pull a fresh account snapshot from the broker and persist it.
+
+        Runs on a 60s interval so the Telegram bot's /balances and
+        /positions always see near-live data without waiting for the
+        next cycle. ib-async keeps the underlying account/position
+        dicts push-updated by IBKR, so get_account is a cheap cache
+        read. Failures are logged at debug level only — a transient
+        broker hiccup shouldn't generate operator noise; the next
+        cycle's hard-fail path will alert.
+
+        Also folds in per-currency cash via get_balances() when the
+        broker supports it, so /balances can render the CHF/USD/EUR
+        split without doing a second live query from the bot process.
+        """
+        try:
+            snap = self.broker.get_account()
+            if hasattr(self.broker, "get_balances"):
+                try:
+                    per_ccy = self.broker.get_balances() or {}  # type: ignore[attr-defined]
+                except Exception as e:
+                    per_ccy = {}
+                    logger.bind(component="runner").debug(
+                        f"get_balances failed during refresh: {type(e).__name__}: {e!r}"
+                    )
+                if per_ccy:
+                    snap = snap.model_copy(update={"cash_by_currency": per_ccy})
+            self.cycle.runner_store.save_snapshot(snap)
+        except Exception as e:
+            logger.bind(component="runner").debug(
+                f"snapshot refresh skipped: {type(e).__name__}: {e!r}"
+            )
 
     async def _watchdog(self) -> None:
         """Daily: if we haven't completed a successful cycle in
