@@ -530,9 +530,18 @@ def _cmd_report() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _queue_command(cmd_type: str, args: dict[str, Any]) -> str:
-    r"""Submit a command to the runner via the file queue. Returns a
-    short Telegram-formatted ack message."""
+def _queue_command(cmd_type: str, args: dict[str, Any]) -> str | None:
+    r"""Submit a command to the runner via the file queue.
+
+    Returns ``None`` on success — the bot stays silent until the runner
+    posts the actual outcome (✅ submitted / ❌ rejected). Operators
+    flagged the previous "📋 Queued ID — runner will execute within ~5s"
+    message as spam because the real result lands ~5s later and the
+    queue ack added no useful information.
+
+    Returns an error string only when the request itself is malformed
+    (unknown command type) so the bot can tell the user immediately.
+    """
     from trading.runtime.commands import Command, CommandType, submit
 
     try:
@@ -540,7 +549,7 @@ def _queue_command(cmd_type: str, args: dict[str, Any]) -> str:
     except ValueError:
         return f"❌ unknown command `{cmd_type}`"
     submit(cmd, settings.state_dir)
-    return f"📋 Queued `{cmd.id[:8]}` ({cmd_type}) — runner will execute within ~5s and reply."
+    return None  # silent — wait for runner's result message
 
 
 def _looks_like_number(s: str) -> bool:
@@ -921,10 +930,7 @@ def _cmd_cycle_now() -> str:
             }
         )
     )
-    return (
-        "🔄 *Off-cycle trigger queued.* Runner picks it up within ~30s.\n"
-        "Cycle has a 5-min hard timeout — you'll get a Telegram message either way."
-    )
+    return "🔄 cycle triggered — basket preview + orders in ~4 minutes."
 
 
 def _cmd_refresh() -> str:

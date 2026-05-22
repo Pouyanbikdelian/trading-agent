@@ -391,6 +391,12 @@ class Cycle:
             except Exception:
                 logger.bind(component="cycle").exception("save_fill failed")
 
+        # 10b. Telegram a fill summary so the operator doesn't have to
+        # poll /positions. Aggregated to keep noise low even when 8
+        # names fill at once. Silent if no fills this cycle.
+        if fills:
+            self._announce_fills(fills)
+
         # 11. Persist the post-trade snapshot.
         try:
             post_snap = self.broker.get_account()
@@ -670,6 +676,74 @@ class Cycle:
             f"net buys, have ${cash:,.0f} — short ~${shortfall:,.0f}. "
             "IBKR may reject or auto-margin; consider `/fx` to convert."
         )
+
+    def _announce_fills(self, fills: list[Any]) -> None:
+        """Telegram a one-shot summary of fills received this cycle.
+
+        Operator asked for "submission + execution" notifications and
+        called the queue-ack message spam. The cycle is the natural place
+        to surface fills — the cycle owns the reconciliation step and
+        we already have the data here. One alert per cycle, never per
+        fill, so a basket of 8 doesn't produce 8 pings.
+        """
+        if not fills:
+            return
+        # Group by symbol (some symbols may have multiple partial fills).
+        by_symbol: dict[str, list[Any]] = {}
+        for f in fills:
+            sym = self._fill_symbol(f) or "?"
+            by_symbol.setdefault(sym, []).append(f)
+
+        lines: list[str] = []
+        total_notional = 0.0
+        total_commission = 0.0
+        for sym in sorted(by_symbol):
+            entries = by_symbol[sym]
+            qty = sum(float(getattr(e, "quantity", 0.0) or 0.0) for e in entries)
+            if qty == 0:
+                continue
+            notional = sum(
+                float(getattr(e, "quantity", 0.0) or 0.0)
+                * float(getattr(e, "price", 0.0) or 0.0)
+                for e in entries
+            )
+            commission = sum(
+                float(getattr(e, "commission", 0.0) or 0.0) for e in entries
+            )
+            avg_px = notional / qty if qty > 0 else 0.0
+            total_notional += notional
+            total_commission += commission
+            lines.append(
+                f"  {sym:<6} {qty:>8g} @ ${avg_px:,.2f} = ${notional:>10,.0f}"
+            )
+
+        if not lines:
+            return
+        header = f"💰 fills this cycle: {len(fills)} execution(s)"
+        footer = (
+            f"total notional ${total_notional:,.0f}, "
+            f"commission ${total_commission:,.2f}"
+        )
+        self.alerts.info("\n".join([header, *lines, footer]))
+
+    @staticmethod
+    def _fill_symbol(fill: Any) -> str | None:
+        """Best-effort symbol extraction from a Fill object.
+
+        Different broker adapters carry the symbol in different places
+        (some have ``instrument.symbol``, some only the ``order_id`` slug).
+        Returns None when we genuinely can't tell — caller falls back to '?'.
+        """
+        instr = getattr(fill, "instrument", None)
+        if instr is not None:
+            sym = getattr(instr, "symbol", None)
+            if sym:
+                return str(sym)
+        # Fall back: orderRef sometimes embeds the symbol after a dash.
+        oid = getattr(fill, "order_id", None) or ""
+        if "-" in oid:
+            return oid.split("-", 1)[1][:6] or None
+        return None
 
     def _announce_basket(
         self,
