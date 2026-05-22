@@ -351,6 +351,26 @@ class Cycle:
         # go to the broker so the operator can see what will trade.
         self._announce_basket(orders, account, last_prices)
 
+        # 8d. Per-cycle operator approval (optional, off by default).
+        # When require_cycle_approval=true, block here until the operator
+        # /approve's, /reject's, or the timeout fires. The operator can
+        # also scale down deployment (/approve 80 = use 80% of basket size)
+        # or replace the basket with a flatten (/approve flat). Default
+        # paper mode skips this entirely.
+        from trading.core.config import settings as _settings
+
+        if _settings.require_cycle_approval and orders:
+            orders = self._request_cycle_approval(orders, account, last_prices)
+            if not orders:
+                return CycleReport(
+                    ts=ts_start,
+                    status="no_orders",
+                    orders_submitted=0,
+                    fills_received=0,
+                    decisions=decisions,
+                    duration_ms=self._elapsed_ms(ts_start),
+                )
+
         # 9. Submit each order. The cycle stops at first hard failure to
         #    avoid partial portfolio bringups, but logs and alerts.
         orders_submitted = 0
@@ -815,6 +835,167 @@ class Cycle:
             return oid.split("-", 1)[1][:6] or None
         return None
 
+    # -------------------------------------------------- cycle approval gate
+
+    # File paths used to coordinate with the bot process. The cycle (in
+    # the trader process) writes APPROVAL_PENDING_FILE and polls for
+    # APPROVAL_DECISION_FILE; the bot (a separate process) reads pending
+    # and writes the decision when the operator sends /approve, /reject.
+    APPROVAL_PENDING_FILE: ClassVar[str] = "cycle_approval_pending.json"
+    APPROVAL_DECISION_FILE: ClassVar[str] = "cycle_approval_decision.json"
+    APPROVAL_POLL_INTERVAL_S: ClassVar[float] = 2.0
+
+    def _request_cycle_approval(
+        self,
+        orders: list[Any],
+        account: Any,
+        last_prices: dict[str, float],
+    ) -> list[Any]:
+        """Block the cycle until the operator decides via Telegram.
+
+        Writes the basket summary to ``state/cycle_approval_pending.json``
+        and waits for ``state/cycle_approval_decision.json``. The bot
+        produces the decision file in response to /approve, /approve N,
+        /approve flat, or /reject. Timeout from
+        ``settings.cycle_approval_timeout_s`` (default 600s) → treated
+        as /reject.
+
+        Returns the list of orders to submit (possibly scaled or
+        replaced with flatten orders). Returns an empty list to skip
+        submission entirely.
+        """
+        import json as _json
+        import time as _time
+
+        from trading.core.config import settings as _settings
+
+        state_dir = _settings.state_dir
+        pending_path = state_dir / self.APPROVAL_PENDING_FILE
+        decision_path = state_dir / self.APPROVAL_DECISION_FILE
+
+        # Wipe any stale decision file from a previous cycle.
+        decision_path.unlink(missing_ok=True)
+
+        cycle_id = self._build_cycle_id(account)
+        ccy = getattr(account, "base_currency", None) or "USD"
+        gross = sum(
+            float(o.quantity) * float(last_prices.get(o.instrument.key, 0.0))
+            for o in orders
+        )
+        equity = float(getattr(account, "equity", 0.0) or 0.0)
+        deploy_pct = (gross / equity * 100.0) if equity > 0 else 0.0
+
+        pending_path.parent.mkdir(parents=True, exist_ok=True)
+        pending_path.write_text(
+            _json.dumps(
+                {
+                    "id": cycle_id,
+                    "ts": datetime.now(tz=timezone.utc).isoformat(),
+                    "n_orders": len(orders),
+                    "gross": gross,
+                    "currency": ccy,
+                    "equity": equity,
+                    "deploy_pct": deploy_pct,
+                },
+                indent=2,
+            )
+        )
+
+        timeout_s = float(_settings.cycle_approval_timeout_s)
+        self.alerts.info(
+            f"⏸ *Awaiting approval* — cycle `{cycle_id[:8]}` "
+            f"({len(orders)} orders, {deploy_pct:.0f}% of equity)\n"
+            "Reply with one of:\n"
+            "  `/approve` — submit as-is\n"
+            "  `/approve 80` — scale to 80% of basket size\n"
+            "  `/approve flat` — flatten everything instead\n"
+            "  `/reject` — skip this cycle (no orders)\n"
+            f"⏱ Auto-rejects after {int(timeout_s / 60)} min."
+        )
+
+        deadline = _time.monotonic() + timeout_s
+        decision: dict[str, Any] | None = None
+        while _time.monotonic() < deadline:
+            if decision_path.exists():
+                try:
+                    decision = _json.loads(decision_path.read_text())
+                except Exception:
+                    decision = None
+                break
+            _time.sleep(self.APPROVAL_POLL_INTERVAL_S)
+
+        # Clean up the coordination files regardless of outcome.
+        pending_path.unlink(missing_ok=True)
+        decision_path.unlink(missing_ok=True)
+
+        if decision is None:
+            self.alerts.warning(
+                f"⏱ cycle `{cycle_id[:8]}` auto-rejected after "
+                f"{int(timeout_s / 60)} min — no operator response."
+            )
+            return []
+
+        action = str(decision.get("action", "reject")).lower()
+        if action == "reject":
+            self.alerts.info(f"❌ cycle `{cycle_id[:8]}` rejected by operator.")
+            return []
+        if action == "flatten":
+            self.alerts.info(
+                f"⏸ cycle `{cycle_id[:8]}` — flatten requested; "
+                "replacing basket with full close."
+            )
+            from trading.core.types import Position
+
+            positions: list[Position] = list(
+                (account.positions or {}).values()
+            )
+            return self.risk_manager.force_flatten_orders(positions, ts=datetime.now(tz=timezone.utc))
+        if action == "scale":
+            factor = float(decision.get("scale_factor", 1.0))
+            factor = max(0.0, min(factor, 1.0))
+            if factor < 0.001:
+                self.alerts.info(
+                    f"❌ cycle `{cycle_id[:8]}` scaled to ~0% — equivalent to reject."
+                )
+                return []
+            self.alerts.info(
+                f"✅ cycle `{cycle_id[:8]}` approved at {factor * 100:.0f}% — "
+                "rescaling order quantities."
+            )
+            return self._rescale_orders(orders, factor)
+        # action == "approve"
+        self.alerts.info(f"✅ cycle `{cycle_id[:8]}` approved as-is.")
+        return orders
+
+    def _build_cycle_id(self, account: Any) -> str:
+        """Stable-ish id for this approval round. Uses the snapshot ts
+        if available so the operator can correlate with /balances."""
+        import uuid as _uuid
+
+        ts = getattr(account, "ts", None)
+        if ts is None:
+            return _uuid.uuid4().hex
+        return f"{ts.strftime('%Y%m%d-%H%M%S')}-{_uuid.uuid4().hex[:6]}"
+
+    def _rescale_orders(self, orders: list[Any], factor: float) -> list[Any]:
+        """Return new orders with quantities scaled by ``factor``.
+
+        For whole-share instruments we round (not truncate) so a scale
+        of 0.8 on 169 shares = 135.2 → 135 (vs int() → 135). Orders
+        whose scaled quantity rounds to zero are dropped.
+        """
+        from trading.core.types import AssetClass
+
+        out: list[Any] = []
+        for o in orders:
+            new_qty = float(o.quantity) * factor
+            if o.instrument.asset_class in (AssetClass.EQUITY, AssetClass.ETF):
+                new_qty = float(round(new_qty))
+            if abs(new_qty) < 1e-9:
+                continue
+            out.append(o.model_copy(update={"quantity": new_qty}))
+        return out
+
     def _announce_basket(
         self,
         orders: list[Any],
@@ -863,17 +1044,19 @@ class Cycle:
                 sell_lines.append(line)
                 net -= notional
 
+        deploy_pct = (gross / equity * 100.0) if equity > 0 else 0.0
         parts: list[str] = [
-            f"📊 cycle plan: {len(orders)} order(s), gross {gross:,.0f} "
-            f"on equity {ccy} {equity:,.0f}, cash {ccy} {cash:,.0f}"
+            f"📊 *Cycle plan* — {len(orders)} order(s)",
+            f"Deploy: *{deploy_pct:.0f}%* of equity "
+            f"(gross {gross:,.0f} · equity {ccy} {equity:,.0f} · cash {ccy} {cash:,.0f})",
         ]
         if buy_lines:
-            parts.append("BUY:")
+            parts.append("\n*BUY*")
             parts.extend(buy_lines)
         if sell_lines:
-            parts.append("SELL:")
+            parts.append("\n*SELL*")
             parts.extend(sell_lines)
-        parts.append(f"net buy: {net:,.0f}")
+        parts.append(f"\nNet buy: {net:,.0f} {ccy} (positive = uses cash / margin)")
 
         self.alerts.info("\n".join(parts))
 
