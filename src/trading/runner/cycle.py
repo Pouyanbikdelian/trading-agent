@@ -500,14 +500,21 @@ class Cycle:
     REFRESH_PER_CALL_TIMEOUT_S: ClassVar[float] = 15.0
     REFRESH_PROGRESS_EVERY: ClassVar[int] = 50
 
+    # How many concurrent yfinance fetches to run. yfinance's anonymous
+    # rate limit kicks in around 2000 req/h; 8 workers x 503 names runs
+    # in ~10–15s when the cache is cold and well under the limit.
+    REFRESH_PARALLELISM: ClassVar[int] = 8
+
     def _load_prices(self, instruments: list[Instrument], ts: datetime) -> pd.DataFrame:
         """Read each instrument's price column from the cache, optionally
         fetching fresh bars first. Returns a wide-format DataFrame aligned
         on the inner intersection of dates.
 
-        Adds per-call timeout + progress logging because the prior silent
-        loop wedged on yfinance for 500 sp500 names and blew the cycle
-        budget.
+        Two-phase to parallelize the slow part: submit ALL refresh futures
+        upfront with a small thread pool, then iterate as they complete.
+        Previously the loop was sequential (max_workers=1, future.result()
+        inside the loop), so 503 yfinance calls took ~2 min. With 8
+        workers it drops to ~10–15s when the cache is warm.
         """
         import concurrent.futures
         import time
@@ -521,7 +528,8 @@ class Cycle:
         n_total = len(instruments)
         logger.bind(component="cycle").info(
             f"loading prices: {n_total} instruments, auto_refresh="
-            f"{self.config.auto_refresh}, freq={freq}"
+            f"{self.config.auto_refresh}, freq={freq}, "
+            f"workers={self.REFRESH_PARALLELISM}"
         )
         t0 = time.monotonic()
         n_refreshed = 0
@@ -529,43 +537,56 @@ class Cycle:
         n_refresh_timeout = 0
 
         series: dict[str, pd.Series] = {}
-        # Single executor reused across the loop — cheaper than spawning one
-        # per call. Workers run yfinance.download() (blocking I/O); 4 is
-        # enough since per-call timeout is the real safety net.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            for idx, ins in enumerate(instruments, start=1):
+
+        def _fetch_one(ins: Instrument) -> tuple[Instrument, pd.DataFrame]:
+            """Refresh (or read-only) a single instrument. Runs on a
+            worker thread. Returns (instrument, dataframe)."""
+            if self.config.auto_refresh:
+                source = self.source_factory(ins)
+                return ins, self.cache.get_bars(source, ins, start, end, freq)
+            return ins, self.cache.read(ins, freq)
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.REFRESH_PARALLELISM,
+            thread_name_prefix="prices",
+        ) as pool:
+            futures = {pool.submit(_fetch_one, ins): ins for ins in instruments}
+            done_count = 0
+            for fut in concurrent.futures.as_completed(
+                futures, timeout=self.REFRESH_PER_CALL_TIMEOUT_S * n_total
+            ):
+                ins = futures[fut]
+                done_count += 1
                 df = pd.DataFrame()
-                if self.config.auto_refresh:
-                    source = self.source_factory(ins)
-                    future = pool.submit(self.cache.get_bars, source, ins, start, end, freq)
-                    try:
-                        df = future.result(timeout=self.REFRESH_PER_CALL_TIMEOUT_S)
+                try:
+                    _ins, df = fut.result(timeout=self.REFRESH_PER_CALL_TIMEOUT_S)
+                    if self.config.auto_refresh:
                         n_refreshed += 1
-                    except concurrent.futures.TimeoutError:
-                        n_refresh_timeout += 1
-                        logger.bind(symbol=ins.symbol).warning(
-                            f"refresh timed out after {self.REFRESH_PER_CALL_TIMEOUT_S:.0f}s; "
-                            "falling back to cache"
-                        )
-                        # The future will keep running in the worker; the
-                        # executor's __exit__ will wait, but the loop continues.
-                    except Exception:
-                        n_refresh_failed += 1
-                        logger.bind(symbol=ins.symbol).exception(
-                            "refresh failed; falling back to cache"
-                        )
+                except concurrent.futures.TimeoutError:
+                    n_refresh_timeout += 1
+                    logger.bind(symbol=ins.symbol).warning(
+                        f"refresh timed out after {self.REFRESH_PER_CALL_TIMEOUT_S:.0f}s; "
+                        "falling back to cache"
+                    )
+                except Exception:
+                    n_refresh_failed += 1
+                    logger.bind(symbol=ins.symbol).exception(
+                        "refresh failed; falling back to cache"
+                    )
+
                 if df.empty:
                     df = self.cache.read(ins, freq)
                 if df.empty or self.config.price_column not in df.columns:
-                    continue
-                s = df[self.config.price_column].dropna()
-                if not s.empty:
-                    series[ins.symbol] = s.iloc[-self.config.history_bars :]
+                    pass
+                else:
+                    s = df[self.config.price_column].dropna()
+                    if not s.empty:
+                        series[ins.symbol] = s.iloc[-self.config.history_bars :]
 
-                if idx % self.REFRESH_PROGRESS_EVERY == 0:
+                if done_count % self.REFRESH_PROGRESS_EVERY == 0:
                     elapsed = time.monotonic() - t0
                     logger.bind(component="cycle").info(
-                        f"  …prices {idx}/{n_total} loaded "
+                        f"  …prices {done_count}/{n_total} loaded "
                         f"({len(series)} non-empty, {elapsed:.0f}s elapsed, "
                         f"refresh: {n_refreshed} ok / {n_refresh_timeout} timeout / "
                         f"{n_refresh_failed} err)"

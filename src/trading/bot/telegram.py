@@ -66,8 +66,9 @@ HELP_TEXT = (
     "/approve flat — flatten instead of basket\n"
     "/pick 1 3 5 8 — override basket with these ranks\n"
     "/reject — skip this cycle, no orders\n\n"
-    "*Regime*\n"
-    "/regime — HMM bull/bear state + SPY/VIX triggers\n\n"
+    "*Regime & signal*\n"
+    "/regime — HMM bull/bear state + SPY/VIX triggers\n"
+    "/signal \\[N] — top-N candidates the strategy would pick NOW (no order)\n\n"
     "*Trigger work*\n"
     "/cycle — force a rebalance now (~2 min)\n"
     "/refresh — queue a data refresh\n\n"
@@ -996,6 +997,119 @@ def _cmd_reconnect() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _cmd_signal(args: list[str]) -> str:
+    r"""``/signal [N]`` — top-N candidates the strategy would consider RIGHT NOW.
+
+    Out-of-cycle peek. Loads prices from the cache, runs the
+    strategy's ``top_candidates`` on the latest bar, and returns the
+    ranked list. Doesn't trigger a cycle, doesn't submit anything —
+    pure read-only "what does the strategy see today".
+    """
+    import os
+
+    n = 15
+    if args:
+        try:
+            n = max(1, min(50, int(args[0])))
+        except ValueError:
+            return "usage: `/signal [N]` — top N candidates (default 15, max 50)"
+
+    universe = os.getenv("UNIVERSE", "sp500")
+    strategy_name = os.getenv("STRATEGY", "top_k_momentum")
+
+    # Load universe symbols (try generated.yaml first for sp500 / nasdaq100,
+    # then the curated universes.yaml).
+    syms: list[str] = []
+    import yaml
+
+    for path in (
+        settings.data_dir.parent / "config" / "universes.generated.yaml",
+        settings.data_dir.parent / "config" / "universes.yaml",
+        Path("/app/config/universes.generated.yaml"),
+        Path("/app/config/universes.yaml"),
+    ):
+        try:
+            doc = yaml.safe_load(path.read_text())
+            unis = doc.get("universes", doc)
+            if universe in unis:
+                syms = list(unis[universe].get("symbols", []))
+                break
+        except Exception:
+            continue
+    if not syms:
+        return (
+            f"_universe `{universe}` not found in config/universes\\*.yaml._\n"
+            "Set `UNIVERSE=` in .env to one that exists."
+        )
+
+    # Load cached prices.
+    try:
+        from trading.core.types import AssetClass, Instrument
+        from trading.data.cache import ParquetCache
+
+        cache = ParquetCache(settings.data_dir)
+        series: dict[str, pd.Series] = {}
+        for sym in syms:
+            ins = Instrument(symbol=sym, asset_class=AssetClass.EQUITY)
+            try:
+                df = cache.read(ins, "1D")
+                if not df.empty and "close" in df.columns:
+                    series[sym] = df["close"].dropna()
+            except Exception:
+                continue
+        if not series:
+            return (
+                f"_no cached prices for `{universe}`. Backfill first:_\n"
+                f"`docker compose exec trader trading data fetch {universe} "
+                "--from 2022-01-01 --freq 1d`"
+            )
+        prices = pd.concat(series, axis=1).ffill().dropna(how="all")
+    except Exception as e:
+        return f"_failed to load prices: {e}_"
+
+    # Construct strategy with defaults + rebalance override if env is set.
+    try:
+        from trading.strategies.base import get_strategy
+
+        cls = get_strategy(strategy_name)
+        kwargs: dict[str, Any] = {}
+        # Honor REBALANCE if set, matching how the runner does it.
+        rebal = os.getenv("REBALANCE")
+        if rebal:
+            try:
+                kwargs["rebalance"] = int(rebal)
+            except ValueError:
+                pass
+        strat = cls(cls.Params(**kwargs))
+        cands = strat.top_candidates(prices, top_n=n)
+    except Exception as e:
+        return f"_strategy `{strategy_name}` couldn't rank: {e}_"
+
+    if not cands:
+        return (
+            f"_strategy `{strategy_name}` returned no candidates._\n"
+            f"Universe: `{universe}` ({len(syms)} names, "
+            f"{prices.shape[0]} bars)\n"
+            "Likely cause: insufficient history. Backfill with the command above."
+        )
+
+    last_bar = prices.index[-1]
+    lines = [
+        f"📊 *Top {len(cands)} candidates* — `{strategy_name}` on `{universe}`",
+        f"_(latest bar: {last_bar.strftime('%Y-%m-%d')}, "
+        f"{prices.shape[0]} bars loaded)_",
+        "",
+    ]
+    for i, (sym, score) in enumerate(cands, start=1):
+        lines.append(f"  `{i:>2}` `{sym:<6}` `{score:+.2%}`")
+    lines.append("")
+    lines.append(
+        "_This is informational only — to actually trade, run `/cycle`. "
+        "These ranks match the candidate list you'd see in the approval prompt._"
+    )
+    return "\n".join(lines)
+
+
 def _cmd_regime() -> str:
     r"""``/regime`` — current market regime snapshot.
 
@@ -1240,6 +1354,8 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_pick(args)
     if cmd in ("/regime", "/state"):
         return _cmd_regime()
+    if cmd in ("/signal", "/candidates", "/signals"):
+        return _cmd_signal(args)
     if cmd == "/report":
         return _cmd_report()
     if cmd == "/mode":
