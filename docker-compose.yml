@@ -126,7 +126,10 @@ services:
       # rows actually reclaim disk. Without VACUUM, SQLite holds
       # tombstoned pages indefinitely — annoying for the long tail.
       - "ofelia.job-exec.sqlite-vacuum.schedule=0 0 4 * * SUN"
-      - 'ofelia.job-exec.sqlite-vacuum.command=/bin/sh -c "for db in /app/state/runner.db /app/state/orders.db; do [ -f \"$db\" ] && python -c \"import sqlite3,sys; sqlite3.connect(sys.argv[1]).execute(''VACUUM'')\" \"$db\" && echo vacuumed $db; done"'
+      # NOTE on $$db: docker-compose expands $vars from the environment
+      # before the container ever sees the command. $$ escapes to a literal
+      # $ so the shell inside the trader interprets $db as a loop variable.
+      - 'ofelia.job-exec.sqlite-vacuum.command=/bin/sh -c "for db in /app/state/runner.db /app/state/orders.db; do [ -f \"$$db\" ] && python -c \"import sqlite3,sys; sqlite3.connect(sys.argv[1]).execute(''VACUUM'')\" \"$$db\" && echo vacuumed $$db; done"'
     # HOST NETWORKING: the trader connects to IB Gateway via 127.0.0.1.
     # Why not the docker bridge network: IB Gateway's TrustedIPs default
     # is 127.0.0.1 only. Connections from the docker bridge subnet
