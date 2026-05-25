@@ -349,11 +349,16 @@ class Cycle:
 
         # 8c. Basket preview — Telegram the planned orders *before* they
         # go to the broker so the operator can see what will trade.
-        # Distinguish "strategy has no opinion" (empty target weights —
-        # warm-up or non-rebalance bar) from "you're already there" (real
-        # signal but delta is zero). The previous message conflated them
-        # and confused the operator with weird leftover positions.
+        # Three distinct outcomes need three distinct messages:
+        #   1. strategy emitted no weights              → warm-up message
+        #   2. strategy emitted weights but ALL rejected → show reject reasons
+        #   3. strategy emitted weights, some accepted   → normal basket preview
+        # The old code conflated #2 and "you're already there" so a basket
+        # rejected by the no-margin check looked identical to a do-nothing
+        # cycle. Surface the rejection reason verbatim so the operator
+        # actually sees why nothing went through.
         strategy_has_view = bool(signal.target_weights)
+        rejections = [d for d in decisions if d.action == "reject"]
         if not orders and not strategy_has_view:
             held = list(getattr(account, "positions", {}).keys())
             self.alerts.info(
@@ -369,6 +374,21 @@ class Cycle:
                     if held
                     else "_Portfolio is flat; nothing to do._"
                 )
+            )
+        elif not orders and rejections:
+            # Strategy did decide, but the risk manager refused. Most common:
+            # no-margin breach on a CHF-base account buying USD stocks
+            # without pre-trade FX. Print every reject reason so the
+            # operator knows what to do (typically /fx convert into the
+            # deficit currency, then /cycle again).
+            reasons = "\n".join(f"  • {r.reason}" for r in rejections[:5])
+            n_picks = len(signal.target_weights)
+            self.alerts.warning(
+                f"⛔ *Cycle plan: refused by risk manager*\n"
+                f"Strategy wanted {n_picks} names, but the basket was "
+                f"rejected pre-submission:\n{reasons}\n\n"
+                "_No orders sent. Address the cause above (e.g. `/fx 500000 "
+                "CHF to USD` for margin breaches) and run `/cycle` again._"
             )
         else:
             self._announce_basket(orders, account, last_prices)
