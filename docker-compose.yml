@@ -201,6 +201,14 @@ services:
     volumes:
       - state:/app/state
       - logs:/app/logs
+      # Read-only access to the parquet price cache so /signal,
+      # /candidates and any other "what does the strategy see"
+      # commands can run without bouncing through the trader. The
+      # trader is the only writer; mounting `:ro` here guarantees the
+      # bot can't corrupt the cache.
+      - data:/app/data:ro
+      # Same for config/ so /signal can resolve UNIVERSE -> symbols.
+      - ./config:/app/config:ro
     command: ["bot", "run"]
     networks:
       - trading
