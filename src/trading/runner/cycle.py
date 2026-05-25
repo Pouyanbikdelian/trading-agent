@@ -349,7 +349,29 @@ class Cycle:
 
         # 8c. Basket preview — Telegram the planned orders *before* they
         # go to the broker so the operator can see what will trade.
-        self._announce_basket(orders, account, last_prices)
+        # Distinguish "strategy has no opinion" (empty target weights —
+        # warm-up or non-rebalance bar) from "you're already there" (real
+        # signal but delta is zero). The previous message conflated them
+        # and confused the operator with weird leftover positions.
+        strategy_has_view = bool(signal.target_weights)
+        if not orders and not strategy_has_view:
+            held = list(getattr(account, "positions", {}).keys())
+            self.alerts.info(
+                "📊 *Cycle plan: no orders*\n"
+                "Strategy emitted no target weights this cycle — "
+                "likely still in warm-up (insufficient price history) or "
+                "today isn't a rebalance bar.\n\n"
+                + (
+                    f"_Current positions ({len(held)}) are untouched: "
+                    f"`{', '.join(h.split(':')[-1] for h in held[:8])}`._\n"
+                    "Use `/flatten` to clear them, `/signal` to see what "
+                    "the strategy would pick once it has data."
+                    if held
+                    else "_Portfolio is flat; nothing to do._"
+                )
+            )
+        else:
+            self._announce_basket(orders, account, last_prices)
 
         # 8d. Per-cycle operator approval (optional, off by default).
         # When require_cycle_approval=true, block here until the operator
