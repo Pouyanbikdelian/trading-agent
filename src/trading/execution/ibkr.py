@@ -663,12 +663,30 @@ class IbkrBroker(Broker):
             else "USD"
         )
         positions = {p.instrument.key: p for p in self.get_positions()}
+        # Per-currency cash MUST ride along on the snapshot: the risk
+        # manager's no-margin check reads account.cash_by_currency and,
+        # when it's empty, falls back to {base_currency: cash}. On a
+        # CHF-base account buying USD stocks that fallback sees zero USD
+        # forever, so every cycle is rejected at full basket notional —
+        # and FX conversions can't fix it because the check never sees
+        # the USD side (June 2026 incident: 3+ weeks of refused cycles).
+        # Best-effort: a failed accountValues read leaves the dict empty,
+        # which keeps the old (conservative) fallback behaviour.
+        cash_by_currency: dict[str, float] = {}
+        try:
+            cash_by_currency = self.get_balances()
+        except Exception as e:
+            logger.bind(broker=self.name).warning(
+                f"get_balances failed in get_account ({type(e).__name__}: {e!r}); "
+                "cash_by_currency left empty — no-margin check will use base-ccy fallback"
+            )
         return AccountSnapshot(
             ts=ts,
             cash=cash,
             equity=equity,
             positions=positions,
             base_currency=base_currency,
+            cash_by_currency=cash_by_currency,
         )
 
     # --------------------------------------------------------------- FX

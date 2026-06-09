@@ -114,7 +114,23 @@ class RunnerStore:
                 # at a small fraction of FULL's fsync cost.
                 self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate(self._conn)
         return self._conn
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Idempotent column additions for databases created by older
+        versions. ALTER TABLE ADD COLUMN is cheap in SQLite and a no-op
+        guard via pragma keeps re-opens fast."""
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(account_snapshots)")}
+        if "base_currency" not in cols:
+            conn.execute(
+                "ALTER TABLE account_snapshots ADD COLUMN base_currency TEXT NOT NULL DEFAULT 'USD'"
+            )
+        if "cash_by_currency_json" not in cols:
+            conn.execute(
+                "ALTER TABLE account_snapshots ADD COLUMN cash_by_currency_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def close(self) -> None:
         if self._conn is not None:
@@ -127,8 +143,19 @@ class RunnerStore:
         if snap.ts.tzinfo is None:
             raise ValueError("AccountSnapshot.ts must be timezone-aware")
         self.conn.execute(
-            "INSERT INTO account_snapshots (ts, cash, equity, positions_json) VALUES (?, ?, ?, ?)",
-            (snap.ts.timestamp(), snap.cash, snap.equity, _positions_to_json(snap.positions)),
+            """
+            INSERT INTO account_snapshots
+                (ts, cash, equity, positions_json, base_currency, cash_by_currency_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snap.ts.timestamp(),
+                snap.cash,
+                snap.equity,
+                _positions_to_json(snap.positions),
+                snap.base_currency,
+                json.dumps(snap.cash_by_currency or {}),
+            ),
         )
 
     def latest_snapshot(self) -> AccountSnapshot | None:
@@ -137,11 +164,18 @@ class RunnerStore:
         ).fetchone()
         if row is None:
             return None
+        keys = row.keys()
         return AccountSnapshot(
             ts=datetime.fromtimestamp(row["ts"], tz=timezone.utc),
             cash=row["cash"],
             equity=row["equity"],
             positions=_positions_from_json(row["positions_json"]),
+            base_currency=(row["base_currency"] if "base_currency" in keys else "USD"),
+            cash_by_currency=(
+                json.loads(row["cash_by_currency_json"])
+                if "cash_by_currency_json" in keys
+                else {}
+            ),
         )
 
     def equity_curve(self) -> list[tuple[datetime, float]]:

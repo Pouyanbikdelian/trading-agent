@@ -37,6 +37,7 @@ class _FakeIb:
         self._positions: list[object] = []
         self._fills: list[object] = []
         self._account_summary: list[object] = []
+        self._account_values: list[object] = []
 
     # connection
     def isConnected(self) -> bool:
@@ -70,6 +71,9 @@ class _FakeIb:
 
     def accountSummary(self) -> list[object]:
         return list(self._account_summary)
+
+    def accountValues(self) -> list[object]:
+        return list(self._account_values)
 
 
 @pytest.fixture
@@ -236,6 +240,45 @@ def test_get_account_reads_summary(broker: IbkrBroker, fake_ib: _FakeIb) -> None
     snap = broker.get_account()
     assert snap.cash == 50_000
     assert snap.equity == 125_000
+
+
+def test_get_account_folds_in_per_currency_cash(
+    broker: IbkrBroker, fake_ib: _FakeIb
+) -> None:
+    """Regression for prod 2026-06: the no-margin check reads
+    ``account.cash_by_currency``; ``get_account`` never populated it, so
+    on a CHF-base account the check fell back to ``{CHF: total}``, saw
+    zero USD forever, and rejected every cycle. ``get_account`` must
+    fold ``get_balances()`` (CashBalance rows) into the snapshot."""
+    fake_ib._account_summary = [
+        SimpleNamespace(tag="TotalCashValue", value="1023000", currency="CHF"),
+        SimpleNamespace(tag="NetLiquidation", value="1024000", currency="CHF"),
+    ]
+    fake_ib._account_values = [
+        SimpleNamespace(tag="CashBalance", value="815000", currency="CHF"),
+        SimpleNamespace(tag="CashBalance", value="208000", currency="USD"),
+        SimpleNamespace(tag="NetLiquidationByCurrency", value="999", currency="USD"),  # ignored
+    ]
+    snap = broker.get_account()
+    assert snap.cash_by_currency == {"CHF": 815_000.0, "USD": 208_000.0}
+
+
+def test_get_account_survives_missing_accountValues(
+    broker: IbkrBroker, fake_ib: _FakeIb
+) -> None:
+    """A wedged/old gateway where accountValues raises must not break
+    get_account — empty dict keeps the conservative fallback."""
+    fake_ib._account_summary = [
+        SimpleNamespace(tag="TotalCashValue", value="100", currency="USD"),
+        SimpleNamespace(tag="NetLiquidation", value="100", currency="USD"),
+    ]
+
+    def _boom() -> list[object]:
+        raise RuntimeError("gateway wedge")
+
+    fake_ib.accountValues = _boom  # type: ignore[method-assign]
+    snap = broker.get_account()
+    assert snap.cash_by_currency == {}
 
 
 def test_get_account_uses_netliquidation_currency_as_base(

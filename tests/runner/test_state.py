@@ -133,3 +133,56 @@ def test_save_rejects_naive_datetime(store: RunnerStore, aapl: Instrument) -> No
     )
     with pytest.raises(ValueError, match="timezone-aware"):
         store.save_snapshot(naive_snap)
+
+
+def test_snapshot_round_trips_currency_fields(store: RunnerStore) -> None:
+    """Regression: June 2026 — save_snapshot dropped base_currency and
+    cash_by_currency, so /balances could never show the per-currency
+    split and the operator was blind to the CHF/USD margin standoff."""
+    snap = AccountSnapshot(
+        ts=datetime(2026, 6, 9, 22, 0, tzinfo=timezone.utc),
+        cash=1_023_000.0,
+        equity=1_024_000.0,
+        base_currency="CHF",
+        cash_by_currency={"CHF": 815_000.0, "USD": 208_000.0},
+    )
+    store.save_snapshot(snap)
+    out = store.latest_snapshot()
+    assert out is not None
+    assert out.base_currency == "CHF"
+    assert out.cash_by_currency == {
+        "CHF": pytest.approx(815_000.0),
+        "USD": pytest.approx(208_000.0),
+    }
+
+
+def test_migration_tolerates_pre_currency_rows(tmp_path) -> None:
+    """Old databases (rows written before the currency columns existed)
+    must read back with defaults instead of raising."""
+    import sqlite3
+
+    db = tmp_path / "runner.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE account_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            cash REAL NOT NULL,
+            equity REAL NOT NULL,
+            positions_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO account_snapshots (ts, cash, equity, positions_json) VALUES (?, ?, ?, ?)",
+        (datetime(2026, 5, 1, tzinfo=timezone.utc).timestamp(), 1.0, 2.0, "{}"),
+    )
+    conn.commit()
+    conn.close()
+
+    store = RunnerStore(db)
+    out = store.latest_snapshot()
+    assert out is not None
+    assert out.base_currency == "USD"  # column default
+    assert out.cash_by_currency == {}
