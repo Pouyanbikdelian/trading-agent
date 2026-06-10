@@ -342,6 +342,16 @@ class Runner:
                 id="options_monitor",
                 replace_existing=True,
             )
+            # Macro financial-conditions monitor: daily 13:30 UTC
+            # (pre-US-open, after Europe has priced overnight macro).
+            # Rates/dollar/energy/BTC z-score dial from the 2018-2026
+            # lead-lag study (docs/research_macro_leadlag.md). Advisory.
+            self._scheduler.add_job(
+                self._run_macro_monitor_async,
+                CronTrigger(hour=13, minute=30, timezone="UTC"),
+                id="macro_monitor",
+                replace_existing=True,
+            )
             # Style-rotation advisor: weekly, Sunday 12:00 UTC (market
             # closed, cache warm from Friday's cycle). Ranks all
             # registered strategies on trailing 3/6/9-month Sharpe and
@@ -801,6 +811,16 @@ class Runner:
             await poll_and_alert()
         except Exception:
             logger.bind(component="options_monitor").exception("options monitor poll failed")
+
+    async def _run_macro_monitor_async(self) -> None:
+        """Daily: rates/dollar/energy/BTC financial-conditions dial.
+        Advisory only; failures logged and swallowed."""
+        try:
+            from trading.runtime.macro_monitor import poll_and_alert
+
+            await poll_and_alert()
+        except Exception:
+            logger.bind(component="macro_monitor").exception("macro monitor poll failed")
 
     async def _run_style_advisor_async(self) -> None:
         """Weekly: rank registered strategies on trailing 3/6/9-month
