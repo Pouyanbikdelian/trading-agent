@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 import signal
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -332,6 +332,27 @@ class Runner:
                 id="hmm_advisor",
                 replace_existing=True,
             )
+            # Options-structure monitor: twice per US session (post-open,
+            # pre-close). Watches SPY's IV level/skew/term slope and
+            # put-call OI for stress signatures the spot-only advisors
+            # can't see. Advisory only — debounced like the others.
+            self._scheduler.add_job(
+                self._run_options_monitor_async,
+                CronTrigger(hour="15,19", minute=45, timezone="UTC"),
+                id="options_monitor",
+                replace_existing=True,
+            )
+            # Style-rotation advisor: weekly, Sunday 12:00 UTC (market
+            # closed, cache warm from Friday's cycle). Ranks all
+            # registered strategies on trailing 3/6/9-month Sharpe and
+            # proposes a switch when the leader changes. NEVER applies
+            # anything — the deployed strategy only changes via .env.
+            self._scheduler.add_job(
+                self._run_style_advisor_async,
+                CronTrigger(day_of_week="sun", hour=12, minute=0, timezone="UTC"),
+                id="style_advisor",
+                replace_existing=True,
+            )
 
         self._scheduler.start()
         self.alerts.info(self._format_runner_started_message())
@@ -341,7 +362,7 @@ class Runner:
 
         # Startup reconciliation. Today (May 2026) we shipped a bug where
         # broker.get_account silently returned a zero-position snapshot on
-        # IBKR timeout, and three cycles stacked to 3× target. The cycle
+        # IBKR timeout, and three cycles stacked to 3x target. The cycle
         # itself now fails-closed on that path, but a sibling failure
         # mode is: container restarts mid-cycle, local order_store is
         # empty, broker still holds positions, next cycle thinks book is
@@ -769,6 +790,37 @@ class Runner:
             await poll_and_alert(spy=spy, vix=vix)
         except Exception:
             logger.bind(component="advisor").exception("advisor poll failed")
+
+    async def _run_options_monitor_async(self) -> None:
+        """Twice-daily: poll SPY's option-chain structure (ATM IV, put
+        skew, term slope, put/call OI) and alert on new stress triggers.
+        Advisory only; any failure is logged and swallowed."""
+        try:
+            from trading.runtime.options_monitor import poll_and_alert
+
+            await poll_and_alert()
+        except Exception:
+            logger.bind(component="options_monitor").exception("options monitor poll failed")
+
+    async def _run_style_advisor_async(self) -> None:
+        """Weekly: rank registered strategies on trailing 3/6/9-month
+        performance from the local price cache and propose a switch when
+        the leader changes. Advisory only — never applies anything."""
+        try:
+            from trading.core.universes import load_universe
+            from trading.runtime.style_advisor import poll_and_alert
+
+            instruments = load_universe(self.config.universe)
+            prices = await asyncio.to_thread(
+                self.cycle._load_prices, instruments, datetime.now(tz=timezone.utc)
+            )
+            if prices.empty:
+                logger.bind(component="style_advisor").info("price cache empty; skipping")
+                return
+            current = self.config.strategies[0] if self.config.strategies else None
+            await poll_and_alert(prices=prices, current_strategy=current)
+        except Exception:
+            logger.bind(component="style_advisor").exception("style advisor poll failed")
 
     async def _process_pending_commands(self) -> None:
         """Every 5s: pick up Telegram-queued commands, execute them.
