@@ -86,9 +86,7 @@ def compute_readings(closes: pd.DataFrame, asof: datetime | None = None) -> Macr
     rates = _trail_z(closes["y_5y"].dropna().diff(), 5)
     dollar = _trail_z(np.log(closes["dxy"].dropna()).diff(), 5)
     energy_parts = [
-        _trail_z(np.log(closes[c].dropna()).diff(), 21)
-        for c in ("natgas", "wti")
-        if c in closes
+        _trail_z(np.log(closes[c].dropna()).diff(), 21) for c in ("natgas", "wti") if c in closes
     ]
     energy = float(np.mean(energy_parts)) if energy_parts else 0.0
     btc = _trail_z(np.log(closes["btc"].dropna()).diff(), 21) if "btc" in closes else 0.0
@@ -111,14 +109,22 @@ def evaluate(r: MacroReadings, threshold: float = 1.5) -> list[tuple[str, str]]:
         )
     if r.dollar_z >= threshold:
         out.append(
-            ("DOLLAR_SQUEEZE", f"DXY 5d move at {r.dollar_z:+.1f}σ — tightening financial conditions")
+            (
+                "DOLLAR_SQUEEZE",
+                f"DXY 5d move at {r.dollar_z:+.1f}σ — tightening financial conditions",
+            )
         )
     if r.energy_z >= threshold:
         out.append(
-            ("ENERGY_SHOCK", f"energy 21d momentum at {r.energy_z:+.1f}σ — slow-burn squeeze channel")
+            (
+                "ENERGY_SHOCK",
+                f"energy 21d momentum at {r.energy_z:+.1f}σ — slow-burn squeeze channel",
+            )
         )
     if r.composite >= threshold:
-        out.append(("MACRO_COMPOSITE", f"composite at {r.composite:+.1f}σ — multiple channels stressed"))
+        out.append(
+            ("MACRO_COMPOSITE", f"composite at {r.composite:+.1f}σ — multiple channels stressed")
+        )
     return out
 
 
@@ -145,9 +151,7 @@ def fetch_closes(lookback_days: int = 700) -> pd.DataFrame | None:
             return None
         return pd.DataFrame(cols).sort_index().ffill(limit=3)
     except Exception as e:
-        logger.bind(component="macro_monitor").info(
-            f"macro fetch failed: {type(e).__name__}: {e}"
-        )
+        logger.bind(component="macro_monitor").info(f"macro fetch failed: {type(e).__name__}: {e}")
         return None
 
 

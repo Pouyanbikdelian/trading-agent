@@ -94,9 +94,7 @@ class RunnerStore:
             # this flag SQLite raises ProgrammingError mid-cycle. Safe
             # because we serialise writes through the runner — no real
             # concurrent access — and WAL handles concurrent reads.
-            self._conn = sqlite3.connect(
-                self.path, isolation_level=None, check_same_thread=False
-            )
+            self._conn = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             if self.path != ":memory:":
                 # Audit fix #14: verify WAL actually took effect. WAL can
@@ -172,9 +170,7 @@ class RunnerStore:
             positions=_positions_from_json(row["positions_json"]),
             base_currency=(row["base_currency"] if "base_currency" in keys else "USD"),
             cash_by_currency=(
-                json.loads(row["cash_by_currency_json"])
-                if "cash_by_currency_json" in keys
-                else {}
+                json.loads(row["cash_by_currency_json"]) if "cash_by_currency_json" in keys else {}
             ),
         )
 

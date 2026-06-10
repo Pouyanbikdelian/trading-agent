@@ -242,9 +242,7 @@ def test_get_account_reads_summary(broker: IbkrBroker, fake_ib: _FakeIb) -> None
     assert snap.equity == 125_000
 
 
-def test_get_account_folds_in_per_currency_cash(
-    broker: IbkrBroker, fake_ib: _FakeIb
-) -> None:
+def test_get_account_folds_in_per_currency_cash(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
     """Regression for prod 2026-06: the no-margin check reads
     ``account.cash_by_currency``; ``get_account`` never populated it, so
     on a CHF-base account the check fell back to ``{CHF: total}``, saw
@@ -263,9 +261,7 @@ def test_get_account_folds_in_per_currency_cash(
     assert snap.cash_by_currency == {"CHF": 815_000.0, "USD": 208_000.0}
 
 
-def test_get_account_survives_missing_accountValues(
-    broker: IbkrBroker, fake_ib: _FakeIb
-) -> None:
+def test_get_account_survives_missing_accountValues(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
     """A wedged/old gateway where accountValues raises must not break
     get_account — empty dict keeps the conservative fallback."""
     fake_ib._account_summary = [
@@ -312,9 +308,7 @@ def test_get_account_uses_multiple_rows_to_detect_base_currency(
     assert snap.base_currency == "CHF"
 
 
-def test_get_account_ignores_BASE_pseudo_currency(
-    broker: IbkrBroker, fake_ib: _FakeIb
-) -> None:
+def test_get_account_ignores_BASE_pseudo_currency(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
     """IBKR's accountValues uses ``currency='BASE'`` as a pseudo-code
     on consolidated rows. That isn't a real ISO code; we must skip it
     so the detector lands on the actual base currency instead."""
@@ -386,7 +380,6 @@ def test_submit_order_refuses_on_live_port_without_arming(
     monkeypatch, fake_ib: _FakeIb, aapl: Instrument
 ) -> None:
     """Live-port + not-armed must raise BEFORE placeOrder runs."""
-    from trading.core import config as config_module
     from trading.execution.base import BrokerError
 
     b = IbkrBroker(ib=fake_ib, port=4001)  # 4001 = live IB Gateway
@@ -461,9 +454,7 @@ def _rejecting_trade_log() -> list[object]:
     ]
 
 
-def test_convert_currency_raises_on_async_rejection(
-    broker: IbkrBroker, fake_ib: _FakeIb
-) -> None:
+def test_convert_currency_raises_on_async_rejection(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
     """The exact prod failure: 5000 USD→CHF rejected with currency-leverage."""
     from trading.execution.base import BrokerError
 
@@ -483,9 +474,7 @@ def test_convert_currency_raises_on_async_rejection(
         broker.convert_currency(from_ccy="USD", to_ccy="CHF", from_amount=5000.0)
 
 
-def test_convert_currency_returns_when_no_rejection(
-    broker: IbkrBroker, fake_ib: _FakeIb
-) -> None:
+def test_convert_currency_returns_when_no_rejection(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
     """Happy path: no rejection in the trade log → returns submission details."""
 
     def _place_clean(_contract: object, _order: object) -> object:

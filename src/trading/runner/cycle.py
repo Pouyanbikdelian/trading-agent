@@ -415,9 +415,7 @@ class Cycle:
                 picked_keys: dict[str, float] = {}
                 for sym in picked_symbols:
                     # match the strategy's symbol → instrument key namespace
-                    matching = [
-                        k for k in instruments_by_key if k.endswith(f":{sym}") or k == sym
-                    ]
+                    matching = [k for k in instruments_by_key if k.endswith(f":{sym}") or k == sym]
                     if not matching:
                         continue
                     picked_keys[matching[0]] = weight_each
@@ -536,7 +534,7 @@ class Cycle:
 
     # Per-instrument refresh hard ceiling. yfinance has no built-in timeout;
     # before this we silently hung for >5min on the sp500 universe, blowing
-    # the cycle's outer 300s budget. 15s per ticker × 500 = max 125min, but
+    # the cycle's outer 300s budget. 15s per ticker x 500 = max 125min, but
     # in practice most calls return in ~500ms so totals are ~5min worst case.
     # The cycle's own 300s timeout still backstops the whole thing.
     REFRESH_PER_CALL_TIMEOUT_S: ClassVar[float] = 15.0
@@ -544,7 +542,7 @@ class Cycle:
 
     # How many concurrent yfinance fetches to run. yfinance's anonymous
     # rate limit kicks in around 2000 req/h; 8 workers x 503 names runs
-    # in ~10–15s when the cache is cold and well under the limit.
+    # in ~10-15s when the cache is cold and well under the limit.
     REFRESH_PARALLELISM: ClassVar[int] = 8
 
     def _load_prices(self, instruments: list[Instrument], ts: datetime) -> pd.DataFrame:
@@ -594,11 +592,13 @@ class Cycle:
         ) as pool:
             futures = {pool.submit(_fetch_one, ins): ins for ins in instruments}
             done_count = 0
-            for fut in concurrent.futures.as_completed(
-                futures, timeout=self.REFRESH_PER_CALL_TIMEOUT_S * n_total
+            for done_count, fut in enumerate(
+                concurrent.futures.as_completed(
+                    futures, timeout=self.REFRESH_PER_CALL_TIMEOUT_S * n_total
+                ),
+                start=1,
             ):
                 ins = futures[fut]
-                done_count += 1
                 df = pd.DataFrame()
                 try:
                     _ins, df = fut.result(timeout=self.REFRESH_PER_CALL_TIMEOUT_S)
@@ -871,13 +871,10 @@ class Cycle:
             if qty == 0:
                 continue
             notional = sum(
-                float(getattr(e, "quantity", 0.0) or 0.0)
-                * float(getattr(e, "price", 0.0) or 0.0)
+                float(getattr(e, "quantity", 0.0) or 0.0) * float(getattr(e, "price", 0.0) or 0.0)
                 for e in entries
             )
-            commission = sum(
-                float(getattr(e, "commission", 0.0) or 0.0) for e in entries
-            )
+            commission = sum(float(getattr(e, "commission", 0.0) or 0.0) for e in entries)
             avg_px = notional / qty if qty > 0 else 0.0
             total_by_ccy[ccy] = total_by_ccy.get(ccy, 0.0) + notional
             fee_by_ccy[ccy] = fee_by_ccy.get(ccy, 0.0) + commission
@@ -931,7 +928,9 @@ class Cycle:
             try:
                 per_ccy = self.broker.get_balances() or {}  # type: ignore[attr-defined]
             except Exception:
-                logger.bind(component="cycle").exception("get_balances failed; skipping FX breakdown")
+                logger.bind(component="cycle").exception(
+                    "get_balances failed; skipping FX breakdown"
+                )
 
         ccy = getattr(snap, "base_currency", None) or "USD"
         lines: list[str] = ["📈 *Portfolio after this cycle*"]
@@ -939,9 +938,7 @@ class Cycle:
 
         if per_ccy:
             ccy_parts = [
-                f"{ccy} {amt:,.0f}"
-                for ccy, amt in sorted(per_ccy.items())
-                if abs(amt) >= 1.0
+                f"{ccy} {amt:,.0f}" for ccy, amt in sorted(per_ccy.items()) if abs(amt) >= 1.0
             ]
             if ccy_parts:
                 lines.append("  Cash by currency: " + " | ".join(ccy_parts))
@@ -953,10 +950,7 @@ class Cycle:
 
         # Holdings table — same shape as /positions but live, not snapshot-read.
         lines.append(f"  Positions: {len(positions)}")
-        header = (
-            f"  {'Symbol':<7} {'Qty':>9} {'Avg cost':>10} "
-            f"{'Mkt value':>11} {'Weight':>7}"
-        )
+        header = f"  {'Symbol':<7} {'Qty':>9} {'Avg cost':>10} {'Mkt value':>11} {'Weight':>7}"
         sep = "  " + "-" * (len(header) - 2)
         rows: list[str] = []
         for _key, pos in sorted(positions.items()):
@@ -965,8 +959,7 @@ class Cycle:
             mv = qty * avg + float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
             w = (mv / equity) if equity > 0 else 0.0
             rows.append(
-                f"  {pos.instrument.symbol:<7} {qty:>9.2f} {avg:>10,.2f} "
-                f"{mv:>11,.0f} {w:>6.1%}"
+                f"  {pos.instrument.symbol:<7} {qty:>9.2f} {avg:>10,.2f} {mv:>11,.0f} {w:>6.1%}"
             )
         table = "```\n" + "\n".join([header, sep, *rows]) + "\n```"
         lines.append(table)
@@ -1040,8 +1033,7 @@ class Cycle:
         cycle_id = self._build_cycle_id(account)
         ccy = getattr(account, "base_currency", None) or "USD"
         gross = sum(
-            float(o.quantity) * float(last_prices.get(o.instrument.key, 0.0))
-            for o in orders
+            float(o.quantity) * float(last_prices.get(o.instrument.key, 0.0)) for o in orders
         )
         equity = float(getattr(account, "equity", 0.0) or 0.0)
         deploy_pct = (gross / equity * 100.0) if equity > 0 else 0.0
@@ -1089,9 +1081,7 @@ class Cycle:
             "  `/approve 80` — scale to 80% of basket size",
         ]
         if candidates_payload and rebuild_from_picks is not None:
-            prompt_lines.append(
-                "  `/pick 1 3 5 8 11` — replace basket with these ranks"
-            )
+            prompt_lines.append("  `/pick 1 3 5 8 11` — replace basket with these ranks")
         prompt_lines.extend(
             [
                 "  `/approve flat` — flatten everything instead",
@@ -1104,9 +1094,7 @@ class Cycle:
             prompt_lines.append("*Top candidates this cycle:*")
             for i, c in enumerate(candidates_payload[:20], start=1):
                 mark = "✅" if c["in_basket"] else "  "
-                prompt_lines.append(
-                    f"  `{i:>2}` {mark} `{c['symbol']:<6}` {c['score']:+.1%}"
-                )
+                prompt_lines.append(f"  `{i:>2}` {mark} `{c['symbol']:<6}` {c['score']:+.1%}")
 
         self.alerts.info("\n".join(prompt_lines))
 
@@ -1138,22 +1126,19 @@ class Cycle:
             return []
         if action == "flatten":
             self.alerts.info(
-                f"⏸ cycle `{cycle_id[:8]}` — flatten requested; "
-                "replacing basket with full close."
+                f"⏸ cycle `{cycle_id[:8]}` — flatten requested; replacing basket with full close."
             )
             from trading.core.types import Position
 
-            positions: list[Position] = list(
-                (account.positions or {}).values()
+            positions: list[Position] = list((account.positions or {}).values())
+            return self.risk_manager.force_flatten_orders(
+                positions, ts=datetime.now(tz=timezone.utc)
             )
-            return self.risk_manager.force_flatten_orders(positions, ts=datetime.now(tz=timezone.utc))
         if action == "scale":
             factor = float(decision.get("scale_factor", 1.0))
             factor = max(0.0, min(factor, 1.0))
             if factor < 0.001:
-                self.alerts.info(
-                    f"❌ cycle `{cycle_id[:8]}` scaled to ~0% — equivalent to reject."
-                )
+                self.alerts.info(f"❌ cycle `{cycle_id[:8]}` scaled to ~0% — equivalent to reject.")
                 return []
             self.alerts.info(
                 f"✅ cycle `{cycle_id[:8]}` approved at {factor * 100:.0f}% — "
@@ -1250,9 +1235,7 @@ class Cycle:
         fills or grep order_store.
         """
         if not orders:
-            self.alerts.info(
-                "📊 cycle plan: no orders — portfolio already on target."
-            )
+            self.alerts.info("📊 cycle plan: no orders — portfolio already on target.")
             return
 
         from trading.core.types import Side as _Side

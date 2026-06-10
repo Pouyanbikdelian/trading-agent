@@ -107,7 +107,7 @@ def _execute_one(
     # bug that hit evaluate_intraday, fixed in commit a914db2).
     if risk_manager is not None:
         try:
-            risk_manager._reload_halt_state()  # noqa: SLF001
+            risk_manager._reload_halt_state()
         except Exception:
             logger.bind(component="command_processor").exception(
                 "halt state reload failed; falling back to in-memory state"
@@ -117,7 +117,7 @@ def _execute_one(
         and risk_manager.is_halted()
         and cmd.type in _ORDER_SUBMITTING_COMMANDS
     ):
-        reason = getattr(risk_manager._state, "reason", "") or "halted"  # noqa: SLF001
+        reason = getattr(risk_manager._state, "reason", "") or "halted"
         msg = f"refused — risk manager halted: {reason}. /resume first."
         logger.bind(component="command_processor").warning(
             f"halt gate blocked {cmd.type.value} command {cmd.id}"
@@ -272,7 +272,6 @@ def _h_reconnect_broker(_cmd: Command, broker: Broker) -> dict[str, Any]:
     subscription level) and triggers a docker restart, since the
     timeout-driven self-heal in _bounded only fires on wedged calls.
     Falls back gracefully on non-IBKR brokers."""
-    import socket
 
     with contextlib.suppress(Exception):
         broker.disconnect()

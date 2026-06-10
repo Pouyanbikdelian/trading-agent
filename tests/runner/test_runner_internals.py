@@ -10,8 +10,6 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import pytest
-
 from trading.runner import Runner, RunnerConfig
 from trading.runner.alerts import TelegramAlerts
 

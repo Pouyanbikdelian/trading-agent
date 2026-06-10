@@ -143,8 +143,7 @@ def _humanize_strategy(slug: str, params: dict[str, Any]) -> str:
         skip = params.get("skip", 21)
         rebal = params.get("rebalance", 63)
         return (
-            f"Top-{k} momentum (lookback {lookback}d, skip {skip}d, "
-            f"rebalance every {rebal} bars)"
+            f"Top-{k} momentum (lookback {lookback}d, skip {skip}d, rebalance every {rebal} bars)"
         )
     if not params:
         return slug
@@ -460,8 +459,7 @@ class Runner:
             broker_positions = self.broker.get_positions()
         except Exception as e:
             logger.bind(component="runner").warning(
-                f"startup reconciliation: broker.get_positions failed ({e!r}); "
-                "skipping drift check"
+                f"startup reconciliation: broker.get_positions failed ({e!r}); skipping drift check"
             )
             return
 

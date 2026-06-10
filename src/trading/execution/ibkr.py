@@ -377,9 +377,7 @@ class IbkrBroker(Broker):
             resp = conn.getresponse()
             body = resp.read().decode("utf-8", errors="replace")[:300]
             if resp.status >= 300:
-                raise RuntimeError(
-                    f"docker API returned {resp.status} {resp.reason}: {body}"
-                )
+                raise RuntimeError(f"docker API returned {resp.status} {resp.reason}: {body}")
         finally:
             conn.close()
 
@@ -656,9 +654,7 @@ class IbkrBroker(Broker):
                 if ccy and ccy != "BASE":
                     currency_votes[str(ccy)] = currency_votes.get(str(ccy), 0) + 1
         base_currency = (
-            max(currency_votes.items(), key=lambda kv: kv[1])[0]
-            if currency_votes
-            else "USD"
+            max(currency_votes.items(), key=lambda kv: kv[1])[0] if currency_votes else "USD"
         )
         positions = {p.instrument.key: p for p in self.get_positions()}
         # Per-currency cash MUST ride along on the snapshot: the risk

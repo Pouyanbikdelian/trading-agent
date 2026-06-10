@@ -46,9 +46,7 @@ def test_rank_styles_skips_broken_strategy(prices: pd.DataFrame) -> None:
     assert list(table.index) == ["donchian"]
 
 
-def test_poll_alerts_only_on_leader_change(
-    prices: pd.DataFrame, tmp_path, monkeypatch
-) -> None:
+def test_poll_alerts_only_on_leader_change(prices: pd.DataFrame, tmp_path, monkeypatch) -> None:
     sent: list[str] = []
 
     async def _fake_send(text: str) -> bool:

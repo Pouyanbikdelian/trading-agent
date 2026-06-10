@@ -34,6 +34,7 @@ Commands
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shlex
 import tempfile
@@ -252,12 +253,13 @@ def _cmd_status() -> str:
         n = int(pending.get("n_orders", 0))
         pct = float(pending.get("deploy_pct", 0.0))
         lines.append(
-            f"\n⏸ *Cycle `{short_id}` awaiting approval* — "
-            f"{n} orders, {pct:.0f}% of equity"
+            f"\n⏸ *Cycle `{short_id}` awaiting approval* — {n} orders, {pct:.0f}% of equity"
         )
         lines.append("Reply: `/approve` · `/approve 80` · `/approve flat` · `/reject`")
     elif getattr(settings, "require_cycle_approval", False):
-        lines.append("\n_cycle approval required for every cycle (REQUIRE\\_CYCLE\\_APPROVAL=true)._")
+        lines.append(
+            "\n_cycle approval required for every cycle (REQUIRE\\_CYCLE\\_APPROVAL=true)._"
+        )
 
     return "\n".join(lines)
 
@@ -353,8 +355,7 @@ def _cmd_positions() -> str:
         )
 
     header = (
-        f"{'Symbol':<7} {'Qty':>10} {'Avg cost':>11} "
-        f"{'Mkt value':>12} {'Weight':>7} {'P&L':>11}"
+        f"{'Symbol':<7} {'Qty':>10} {'Avg cost':>11} {'Mkt value':>12} {'Weight':>7} {'P&L':>11}"
     )
     sep = "-" * len(header)
     body = [
@@ -1076,10 +1077,8 @@ def _cmd_signal(args: list[str]) -> str:
         # Honor REBALANCE if set, matching how the runner does it.
         rebal = os.getenv("REBALANCE")
         if rebal:
-            try:
+            with contextlib.suppress(ValueError):
                 kwargs["rebalance"] = int(rebal)
-            except ValueError:
-                pass
         strat = cls(cls.Params(**kwargs))
         cands = strat.top_candidates(prices, top_n=n)
     except Exception as e:
@@ -1096,8 +1095,7 @@ def _cmd_signal(args: list[str]) -> str:
     last_bar = prices.index[-1]
     lines = [
         f"📊 *Top {len(cands)} candidates* — `{strategy_name}` on `{universe}`",
-        f"_(latest bar: {last_bar.strftime('%Y-%m-%d')}, "
-        f"{prices.shape[0]} bars loaded)_",
+        f"_(latest bar: {last_bar.strftime('%Y-%m-%d')}, {prices.shape[0]} bars loaded)_",
         "",
     ]
     for i, (sym, score) in enumerate(cands, start=1):
@@ -1281,10 +1279,7 @@ def _cmd_pick(args: list[str]) -> str:
         )
 
     if not args:
-        return (
-            "usage: `/pick 1 3 5 8 11` — ranks from the candidate list "
-            "in the approval prompt."
-        )
+        return "usage: `/pick 1 3 5 8 11` — ranks from the candidate list in the approval prompt."
 
     candidates = pending.get("candidates") or []
     if not isinstance(candidates, list) or not candidates:
@@ -1303,10 +1298,7 @@ def _cmd_pick(args: list[str]) -> str:
         except ValueError:
             return f"_unrecognized rank `{t}`._ Pass integers like `/pick 1 3 5`."
         if r < 1 or r > len(candidates):
-            return (
-                f"_rank `{r}` out of range._ "
-                f"Pick from 1..{len(candidates)}."
-            )
+            return f"_rank `{r}` out of range._ Pick from 1..{len(candidates)}."
         if r not in seen:
             seen.add(r)
             picked_ranks.append(r)

@@ -14,8 +14,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from trading.core.types import (
     AccountSnapshot,
     AssetClass,
@@ -101,9 +99,7 @@ def test_clean_book_emits_ok_message(tmp_path: Path) -> None:
 def test_broker_has_positions_snapshot_has_none_alerts(tmp_path: Path) -> None:
     """The 3x-overbuy scenario: snapshot says zero, broker says 8 positions.
     This is the failure mode we just lived through — the alert must fire."""
-    broker = _FakeBroker(
-        positions=[_pos("CIEN", 51), _pos("MRNA", 623), _pos("LITE", 30)]
-    )
+    broker = _FakeBroker(positions=[_pos("CIEN", 51), _pos("MRNA", 623), _pos("LITE", 30)])
     snap = AccountSnapshot(ts=datetime.now(tz=timezone.utc), cash=100_000, equity=100_000)
     runner = _make_runner(tmp_path, broker, snap)
 

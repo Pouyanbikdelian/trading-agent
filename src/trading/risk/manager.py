@@ -412,18 +412,18 @@ class RiskManager:
 
         # If we have a per-currency cash breakdown, use it; otherwise
         # fall back to total cash (and assume it's all in base currency).
-        starting = dict(account.cash_by_currency) if account.cash_by_currency else {
-            account.base_currency: account.cash
-        }
+        starting = (
+            dict(account.cash_by_currency)
+            if account.cash_by_currency
+            else {account.base_currency: account.cash}
+        )
 
         allowed_debit = self.limits.max_margin_borrowing_pct * max(account.equity, 0.0)
         breaches: list[str] = []
         for ccy, delta in per_ccy_delta.items():
             after = starting.get(ccy, 0.0) + delta
             if after < -allowed_debit:
-                breaches.append(
-                    f"{ccy} {after:,.0f} (limit {-allowed_debit:,.0f})"
-                )
+                breaches.append(f"{ccy} {after:,.0f} (limit {-allowed_debit:,.0f})")
 
         if not breaches:
             return None
