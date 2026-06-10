@@ -194,3 +194,60 @@ sync one.
 - **Hardcoded `$` in bot/cycle status messages on a CHF-base account**
   — `AccountSnapshot` now carries `base_currency`, populated from
   IBKR's `NetLiquidation` row. Commit `b6f2b45`.
+
+---
+
+## 2026-06-10 — Three weeks of refused cycles: no-margin check was blind to per-currency cash
+
+**Symptom.** Every scheduled and manual `/cycle` since late May ended with
+`Cycle plan: refused by risk manager — no-margin breach — would overdraw:
+USD -816k (limit -0)`. The watchdog escalated to "no successful cycle in
+165h". Operator `/fx` conversions (600k CHF → USD) changed the reported
+deficit by *zero dollars* — the tell that the check wasn't reading cash
+at all.
+
+**Root cause (three stacked bugs).**
+
+1. `IbkrBroker.get_account()` never populated
+   `AccountSnapshot.cash_by_currency` (only the separate `get_balances()`
+   read CashBalance rows). The risk manager's `_check_no_margin` falls
+   back to `{base_currency: cash}` when the dict is empty. On this
+   CHF-base account that meant *USD cash = 0 forever*, so any USD basket
+   breached at full notional. FX conversions could never unblock it —
+   the check structurally couldn't see the USD side. Fix: `get_account`
+   now folds `get_balances()` into the snapshot. Commit `a8e458d`.
+
+2. `RunnerStore.save_snapshot()` dropped `base_currency` and
+   `cash_by_currency` (columns didn't exist), so `/balances` never showed
+   the per-currency split — the operator had no way to see the standoff.
+   Fix: idempotent `ALTER TABLE` migration + round-trip. Same commit.
+
+3. `runner.py` used `datetime.now(tz=timezone.utc)` in the snapshot-
+   refresh heartbeat touch **without importing `timezone`** — a silent
+   (debug-logged) NameError every 60s. heartbeat.json stayed stale, so
+   `/health` and the watchdog reported the system dead even while the
+   broker link was fine, burying the real signal in alert noise.
+   Commit `c820dd2`.
+
+**Lessons.**
+
+1. **A deficit that doesn't move when you fund it is not a funding
+   problem.** The June 6 and June 10 rejections differed only by market
+   drift (-812,534 → -816,421) across a 605k CHF conversion. Constancy
+   under intervention localizes the bug to the *measurement*, not the
+   state.
+
+2. **Fallbacks that silently change semantics are landmines.** The
+   `{base_currency: cash}` fallback was reasonable for a USD account and
+   catastrophic for a CHF one. If a fallback can invert a safety
+   decision, log it loudly at decision time ("margin check using
+   base-ccy fallback — per-currency cash unavailable").
+
+3. **Every advisory channel that lies costs trust in the ones that
+   don't.** The watchdog crying wolf (bug 3) made it easy to ignore the
+   one alert that mattered (the risk-manager rejection).
+
+**Operator runbook after redeploy.** `git pull && docker compose build
+trader && docker compose up -d trader bot`, then `/balances` (now shows
+the CHF/USD split), `/fx <amount> CHF to USD` to fund the USD leg fully,
+`/cycle`, and confirm the basket submits.
