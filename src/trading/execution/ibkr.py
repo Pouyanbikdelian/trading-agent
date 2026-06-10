@@ -302,9 +302,7 @@ class IbkrBroker(Broker):
         storms. On failure (socket missing, container not found) we log
         and continue — the cycle is already aborting.
         """
-        import http.client
         import os
-        import socket
         import time
 
         if os.environ.get("ENABLE_GATEWAY_AUTO_RESTART", "true").lower() in {"false", "0", "no"}:
@@ -344,7 +342,7 @@ class IbkrBroker(Broker):
 
         self._last_restart_ts = now
         logger.bind(broker=self.name).info(
-            f"gateway restart issued; container will be back in ~90s. "
+            "gateway restart issued; container will be back in ~90s. "
             "Next cycle should land on a fresh session."
         )
 
