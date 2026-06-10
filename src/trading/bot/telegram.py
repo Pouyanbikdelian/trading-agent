@@ -79,6 +79,8 @@ HELP_TEXT = (
     "/close SYM — close one position\n"
     "/flatten — close every open position\n"
     "/hold SYM | /unhold SYM | /holds — pin/release positions the cycle must not touch\n"
+    "/k N | /k clear — override the strategy top-K at runtime\n"
+    "/correlation — 12m correlation matrix of current holdings\n"
     "/cancel\\_order CLIENT\\_ID — cancel a pending order\n\n"
     "*Mode (rebalance posture)*\n"
     "/mode bull|neutral|defense|bear|flatten — preview\n"
@@ -233,6 +235,52 @@ def _cmd_holds() -> str:
     return "\U0001f4cc *Pinned positions* (cycle won't touch):\n" + "\n".join(
         f"  • `{s}`" for s in sorted(holds)
     )
+
+
+def _cmd_k(args: list[str]) -> str:
+    """``/k 12`` — override the strategy's top-K at runtime; ``/k`` shows;
+    ``/k clear`` reverts to the configured default."""
+    from trading.runner.holds import load_holds, load_k_override, save_k_override
+
+    current = load_k_override(settings.state_dir)
+    held = len(load_holds(settings.state_dir))
+    if not args:
+        base = f"`{current}`" if current else "_not set (strategy default applies)_"
+        tail = f"\n_{held} pinned position(s) each reserve one slot on top._" if held else ""
+        return f"Top-K override: {base}{tail}"
+    if args[0].lower() in ("clear", "off", "none", "reset"):
+        save_k_override(settings.state_dir, None)
+        return "Top-K override cleared — next cycle uses the configured default."
+    try:
+        k = int(args[0])
+    except ValueError:
+        return "usage: `/k 12` to set, `/k` to show, `/k clear` to reset"
+    if not 1 <= k <= 50:
+        return "k must be between 1 and 50"
+    save_k_override(settings.state_dir, k)
+    note = f" ({held} held position(s) will reserve slots on top)" if held else ""
+    return f"Top-K set to `{k}` from the next cycle{note}."
+
+
+def _cmd_correlation() -> str:
+    """``/correlation`` — pairwise 12m correlation of current holdings."""
+    from trading.runner.state import RunnerStore
+    from trading.runtime.portfolio_stats import format_correlation, holdings_correlation
+
+    try:
+        store = RunnerStore(settings.state_dir / "runner.db")
+        snap = store.latest_snapshot()
+    except Exception as e:
+        return f"could not read snapshot: `{e}`"
+    if snap is None or not snap.positions:
+        return "_portfolio is flat — nothing to correlate._"
+    syms = sorted({p.instrument.symbol for p in snap.positions.values()})
+    if len(syms) < 2:
+        return f"_only one holding (`{syms[0]}`) — correlation needs at least two._"
+    corr = holdings_correlation(syms, settings.data_dir)
+    if corr is None:
+        return "_not enough cached price history for these names — run a data fetch first._"
+    return format_correlation(corr)
 
 
 def _cmd_resume() -> str:
@@ -1389,6 +1437,10 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_unhold(args)
     if cmd == "/holds":
         return _cmd_holds()
+    if cmd == "/k":
+        return _cmd_k(args)
+    if cmd in ("/correlation", "/corr"):
+        return _cmd_correlation()
     if cmd == "/resume":
         return _cmd_resume()
     # --- cycle approval (only meaningful when REQUIRE_CYCLE_APPROVAL=true) ---

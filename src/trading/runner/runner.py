@@ -840,9 +840,28 @@ class Runner:
             snap = self.cycle.runner_store.latest_snapshot()
             ccy = getattr(snap, "base_currency", None) or "USD" if snap else "USD"
             arrow, verb = ("📈", "up") if pct >= 0 else ("📉", "down")
-            self.alerts.info(
-                f"{arrow} Equity {verb} {pct:+.2%} today\nTotal equity: {ccy} {last:,.0f}"
-            )
+            lines = [
+                f"{arrow} Equity {verb} {pct:+.2%} today",
+                f"Total equity: {ccy} {last:,.0f}",
+            ]
+            # Portfolio beta vs SPY — cache reads only; skip silently if
+            # the book is flat or the cache lacks the names.
+            try:
+                if snap and snap.positions:
+                    from trading.runtime.portfolio_stats import _read_close, portfolio_beta
+
+                    values: dict[str, float] = {}
+                    for pos in snap.positions.values():
+                        s = _read_close(settings.data_dir, pos.instrument.symbol)
+                        if s is not None and len(s):
+                            values[pos.instrument.symbol] = float(pos.quantity) * float(s.iloc[-1])
+                    result = portfolio_beta(values, settings.data_dir)
+                    if result is not None:
+                        beta, used = result
+                        lines.append(f"Portfolio beta vs SPY: {beta:.2f} ({used} names, 12m)")
+            except Exception:
+                logger.bind(component="daily_summary").debug("beta computation skipped")
+            self.alerts.info("\n".join(lines))
         except Exception:
             logger.bind(component="daily_summary").exception("daily summary failed")
 
@@ -925,7 +944,7 @@ class Runner:
     async def _shutdown(self) -> None:
         if self._scheduler is not None:
             self._scheduler.shutdown(wait=False)
-        self.alerts.info("runner stopped")
+        self.alerts.info("👋 Runner stopped — no further cycles until restart.")
         logger.bind(component="runner").info("scheduler stopped")
         try:
             self.broker.disconnect()

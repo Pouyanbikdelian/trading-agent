@@ -68,6 +68,75 @@ def save_holds(state_dir: Path, symbols: set[str]) -> None:
         os.replace(tmp, path)
 
 
+OVERRIDES_FILENAME = "strategy_overrides.json"
+
+
+def load_k_override(state_dir: Path) -> int | None:
+    """Operator's runtime ``k`` override (set via ``/k N``), or None."""
+    path = Path(state_dir) / OVERRIDES_FILENAME
+    if not path.exists():
+        return None
+    try:
+        k = json.loads(path.read_text()).get("k")
+        return int(k) if k else None
+    except Exception:
+        return None
+
+
+def save_k_override(state_dir: Path, k: int | None) -> None:
+    import os
+    import tempfile
+
+    from trading.core.file_lock import file_lock
+
+    path = Path(state_dir) / OVERRIDES_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(path):
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.")
+        with os.fdopen(fd, "w") as f:
+            json.dump(
+                {"k": k, "updated_at": datetime.now(tz=timezone.utc).isoformat()},
+                f,
+                indent=2,
+            )
+        os.replace(tmp, path)
+
+
+def apply_runtime_overrides(params: object, state_dir: Path) -> tuple[object, list[str]]:
+    """Adjust a strategy's params for operator runtime state.
+
+    Two adjustments, both only when the params object has a ``k`` field
+    (top-K style strategies; everything else passes through untouched):
+
+    1. ``/k N`` override replaces the configured k.
+    2. Each held symbol (``/hold``) reserves one basket slot:
+       effective_k = max(1, k - n_holds). The strategy then picks fewer
+       names because the operator's pinned positions occupy the rest of
+       the book — "if I hold 2, cycle 6 more".
+
+    Returns (params, notes) where notes are human-readable lines for
+    the basket message.
+    """
+    if not hasattr(params, "k"):
+        return params, []
+    notes: list[str] = []
+    k = int(params.k)  # type: ignore[attr-defined]
+    override = load_k_override(state_dir)
+    if override is not None and override != k:
+        notes.append(f"k overridden via /k: {k} → {override}")
+        k = override
+    held = load_holds(state_dir)
+    if held:
+        reserved = min(len(held), k - 1)
+        if reserved > 0:
+            notes.append(
+                f"{len(held)} pinned position(s) reserve basket slots: k {k} → {k - reserved}"
+            )
+            k = k - reserved
+    new_params = params.model_copy(update={"k": k})  # type: ignore[attr-defined]
+    return new_params, notes
+
+
 def filter_held_orders(orders: list[Order], held: set[str]) -> tuple[list[Order], list[Order]]:
     """Split orders into (kept, dropped) by held symbols. Pure function."""
     if not held:

@@ -1205,6 +1205,10 @@ class Cycle:
             try:
                 cls = get_strategy(name)
                 params = cls.Params(**cfg.strategy_params.get(name, {}))
+                from trading.core.config import settings as _settings_k2
+                from trading.runner.holds import apply_runtime_overrides
+
+                params, _ = apply_runtime_overrides(params, _settings_k2.state_dir)
                 ranked = cls(params=params).top_candidates(prices, top_n=top_n)
                 if ranked:
                     return ranked
@@ -1358,6 +1362,14 @@ class Cycle:
         for name in cfg.strategies:
             cls = get_strategy(name)
             params = cls.Params(**cfg.strategy_params.get(name, {}))
+            # Operator runtime state: /k override + held-position slot
+            # reservation. No-op for strategies without a k parameter.
+            from trading.core.config import settings as _settings_k
+            from trading.runner.holds import apply_runtime_overrides
+
+            params, notes = apply_runtime_overrides(params, _settings_k.state_dir)
+            for note in notes:
+                logger.bind(component="cycle", strategy=name).info(note)
             strat = cls(params=params)
             weights_by_strategy[name] = strat.generate(prices)
 
