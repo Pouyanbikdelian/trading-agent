@@ -78,6 +78,7 @@ HELP_TEXT = (
     "/sell SYM \\[QTY|all] \\[LIMIT] — e.g. `/sell AAPL all`\n"
     "/close SYM — close one position\n"
     "/flatten — close every open position\n"
+    "/hold SYM | /unhold SYM | /holds — pin/release positions the cycle must not touch\n"
     "/cancel\\_order CLIENT\\_ID — cancel a pending order\n\n"
     "*Mode (rebalance posture)*\n"
     "/mode bull|neutral|defense|bear|flatten — preview\n"
@@ -185,6 +186,53 @@ def _cmd_halt(args: list[str]) -> str:
         )
     logger.bind(reason=reason).warning("telegram halt")
     return f"🛑 *HALTED* — reason: `{reason}`\nNext cycle will force-flatten positions."
+
+
+def _cmd_hold(args: list[str]) -> str:
+    """``/hold NVDA`` — pin a symbol: the cycle will neither sell nor add
+    to it until ``/unhold``. Manual /buy /sell /close /flatten still work."""
+    from trading.runner.holds import load_holds, save_holds
+
+    if not args:
+        return "usage: `/hold NVDA` — freeze a position out of the rebalance cycle"
+    sym = args[0].upper()
+    holds = load_holds(settings.state_dir)
+    if sym in holds:
+        return f"`{sym}` is already held. `/holds` to list."
+    holds.add(sym)
+    save_holds(settings.state_dir, holds)
+    logger.bind(symbol=sym).info("telegram hold added")
+    return (
+        f"\U0001f4cc `{sym}` pinned — the cycle will not touch it (no sells, no adds).\n"
+        f"_Manual `/sell {sym} ...` and `/flatten` still work. "
+        f"`/unhold {sym}` to release._"
+    )
+
+
+def _cmd_unhold(args: list[str]) -> str:
+    from trading.runner.holds import load_holds, save_holds
+
+    if not args:
+        return "usage: `/unhold NVDA`"
+    sym = args[0].upper()
+    holds = load_holds(settings.state_dir)
+    if sym not in holds:
+        return f"`{sym}` is not held. `/holds` to list."
+    holds.discard(sym)
+    save_holds(settings.state_dir, holds)
+    logger.bind(symbol=sym).info("telegram hold removed")
+    return f"\U0001f513 `{sym}` released — the next cycle manages it normally again."
+
+
+def _cmd_holds() -> str:
+    from trading.runner.holds import load_holds
+
+    holds = load_holds(settings.state_dir)
+    if not holds:
+        return "_no pinned positions — `/hold <sym>` to pin one._"
+    return "\U0001f4cc *Pinned positions* (cycle won't touch):\n" + "\n".join(
+        f"  • `{s}`" for s in sorted(holds)
+    )
 
 
 def _cmd_resume() -> str:
@@ -1335,6 +1383,12 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_positions()
     if cmd == "/halt":
         return _cmd_halt(args)
+    if cmd == "/hold":
+        return _cmd_hold(args)
+    if cmd == "/unhold":
+        return _cmd_unhold(args)
+    if cmd == "/holds":
+        return _cmd_holds()
     if cmd == "/resume":
         return _cmd_resume()
     # --- cycle approval (only meaningful when REQUIRE_CYCLE_APPROVAL=true) ---

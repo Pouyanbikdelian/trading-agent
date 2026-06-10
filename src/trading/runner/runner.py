@@ -341,6 +341,15 @@ class Runner:
                 id="options_monitor",
                 replace_existing=True,
             )
+            # Daily P&L note: just after the US close (20:10 UTC during
+            # DST; harmlessly mid-evening in winter). One read of
+            # runner.db + one Telegram message — negligible load.
+            self._scheduler.add_job(
+                self._run_daily_summary_async,
+                CronTrigger(day_of_week="mon-fri", hour=20, minute=10, timezone="UTC"),
+                id="daily_summary",
+                replace_existing=True,
+            )
             # Macro financial-conditions monitor: daily 13:30 UTC
             # (pre-US-open, after Europe has priced overnight macro).
             # Rates/dollar/energy/BTC z-score dial from the 2018-2026
@@ -809,6 +818,33 @@ class Runner:
             await poll_and_alert()
         except Exception:
             logger.bind(component="options_monitor").exception("options monitor poll failed")
+
+    async def _run_daily_summary_async(self) -> None:
+        """Daily after the US close: one-glance equity P&L note.
+
+        Reads the day's first and last snapshot from runner.db (the
+        60s refresh keeps those current) — no broker call, no market
+        data, so the cost is one SQL read and one Telegram message.
+        Silent when there isn't enough data to say something true.
+        """
+        try:
+            now = datetime.now(tz=timezone.utc)
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            bounds = await asyncio.to_thread(self.cycle.runner_store.day_equity_bounds, day_start)
+            if bounds is None:
+                return
+            first, last = bounds
+            if first <= 0:
+                return
+            pct = last / first - 1.0
+            snap = self.cycle.runner_store.latest_snapshot()
+            ccy = getattr(snap, "base_currency", None) or "USD" if snap else "USD"
+            arrow, verb = ("📈", "up") if pct >= 0 else ("📉", "down")
+            self.alerts.info(
+                f"{arrow} Equity {verb} {pct:+.2%} today\nTotal equity: {ccy} {last:,.0f}"
+            )
+        except Exception:
+            logger.bind(component="daily_summary").exception("daily summary failed")
 
     async def _run_macro_monitor_async(self) -> None:
         """Daily: rates/dollar/energy/BTC financial-conditions dial.

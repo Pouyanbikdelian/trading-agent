@@ -186,3 +186,14 @@ def test_migration_tolerates_pre_currency_rows(tmp_path) -> None:
     assert out is not None
     assert out.base_currency == "USD"  # column default
     assert out.cash_by_currency == {}
+
+
+def test_day_equity_bounds(store: RunnerStore) -> None:
+    base = datetime(2026, 6, 10, tzinfo=timezone.utc)
+    for hour, eq in [(1, 100_000.0), (12, 101_500.0), (20, 99_700.0)]:
+        store.save_snapshot(AccountSnapshot(ts=base + timedelta(hours=hour), cash=eq, equity=eq))
+    bounds = store.day_equity_bounds(base)
+    assert bounds == (pytest.approx(100_000.0), pytest.approx(99_700.0))
+    # Window with <2 snapshots -> None (silence beats a fabricated 0.0%).
+    assert store.day_equity_bounds(base + timedelta(hours=19)) is None
+    assert store.day_equity_bounds(base + timedelta(days=2)) is None

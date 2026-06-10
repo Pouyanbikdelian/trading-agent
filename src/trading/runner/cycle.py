@@ -341,6 +341,27 @@ class Cycle:
             **({"order_id_factory": self._order_id_factory} if self._order_id_factory else {}),
         )
 
+        # 8a-bis. Operator holds (/hold SYM): pinned positions are frozen —
+        # the cycle neither sells nor adds to them. We filter ORDERS rather
+        # than weights because zeroing a held name's target weight would
+        # make signal_to_orders emit a SELL for the existing position,
+        # which is exactly what /hold exists to prevent.
+        from trading.core.config import settings as _settings_holds
+        from trading.runner.holds import filter_held_orders, load_holds
+
+        held_syms = load_holds(_settings_holds.state_dir)
+        if held_syms and orders:
+            orders, dropped = filter_held_orders(orders, held_syms)
+            if dropped:
+                names = ", ".join(sorted({o.instrument.symbol for o in dropped}))
+                logger.bind(component="cycle").info(
+                    f"holds: dropped {len(dropped)} order(s) on pinned symbols: {names}"
+                )
+                self.alerts.info(
+                    f"📌 Holds respected — skipped {len(dropped)} order(s) on "
+                    f"pinned position(s): `{names}`. Use `/unhold <sym>` to release."
+                )
+
         # 8b. Buying-power preflight. Estimate notional required vs cash
         # available; warn (don't refuse) if we're going to run short. The
         # broker will issue the actual rejection if margin doesn't permit

@@ -174,6 +174,34 @@ class RunnerStore:
             ),
         )
 
+    def day_equity_bounds(self, since: datetime) -> tuple[float, float] | None:
+        """(first, last) equity among snapshots at/after ``since``.
+
+        Powers the daily P&L Telegram summary: ``since`` is the start of
+        the trading day (UTC). Returns None when fewer than two
+        snapshots exist in the window — a fresh deploy or a dead feed
+        should yield silence, not a fabricated 0.0% day.
+        """
+        if since.tzinfo is None:
+            raise ValueError("since must be timezone-aware")
+        ts0 = since.timestamp()
+        first = self.conn.execute(
+            "SELECT equity FROM account_snapshots WHERE ts >= ? ORDER BY ts ASC LIMIT 1",
+            (ts0,),
+        ).fetchone()
+        last = self.conn.execute(
+            "SELECT equity FROM account_snapshots WHERE ts >= ? ORDER BY ts DESC LIMIT 1",
+            (ts0,),
+        ).fetchone()
+        if first is None or last is None:
+            return None
+        n = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM account_snapshots WHERE ts >= ?", (ts0,)
+        ).fetchone()["c"]
+        if n < 2:
+            return None
+        return float(first["equity"]), float(last["equity"])
+
     def equity_curve(self) -> list[tuple[datetime, float]]:
         rows = self.conn.execute(
             "SELECT ts, equity FROM account_snapshots ORDER BY ts ASC"
