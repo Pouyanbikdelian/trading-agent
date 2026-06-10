@@ -17,15 +17,19 @@ _ASSET_DIRS = ("equity", "etf")
 
 
 def _read_close(data_dir: Path, symbol: str) -> pd.Series | None:
+    # The cache names files after the Frequency literal "1D", but older
+    # CLI fetches wrote "1d". macOS hides the difference (case-insensitive
+    # filesystem); Linux does not — so try both spellings explicitly.
     for sub in _ASSET_DIRS:
-        p = Path(data_dir) / sub / symbol.upper() / "1d.parquet"
-        if p.exists():
-            try:
-                s = pd.read_parquet(p)["close"].dropna()
-                s.index = pd.to_datetime(s.index)
-                return s.sort_index()
-            except Exception:
-                return None
+        for fname in ("1D.parquet", "1d.parquet"):
+            p = Path(data_dir) / sub / symbol.upper() / fname
+            if p.exists():
+                try:
+                    s = pd.read_parquet(p)["close"].dropna()
+                    s.index = pd.to_datetime(s.index)
+                    return s.sort_index()
+                except Exception:
+                    return None
     return None
 
 
