@@ -81,6 +81,7 @@ HELP_TEXT = (
     "/hold SYM | /unhold SYM | /holds — pin/release positions the cycle must not touch\n"
     "/k N | /k clear — override the strategy top-K at runtime\n"
     "/correlation — 12m correlation matrix of current holdings\n"
+    "/memory — permanent-memory vitals: calibration, trust, lessons\n"
     "/cancel\\_order CLIENT\\_ID — cancel a pending order\n\n"
     "*Mode (rebalance posture)*\n"
     "/mode bull|neutral|defense|bear|flatten — preview\n"
@@ -281,6 +282,42 @@ def _cmd_correlation() -> str:
     if corr is None:
         return "_not enough cached price history for these names — run a data fetch first._"
     return format_correlation(corr)
+
+
+def _cmd_memory() -> str:
+    """``/memory`` — permanent-memory vitals: counts, calibration, trust."""
+    from trading.memory.store import default_store
+
+    try:
+        mem = default_store()
+        s = mem.stats()
+    except Exception as e:
+        return f"could not open memory: `{e}`"
+    lines = [
+        "\U0001f9e0 *Permanent memory*",
+        f"  journal `{s['journal']}` | episodes `{s['episodes']}` | "
+        f"lessons `{s['lessons']}` | dossiers `{s['dossiers']}`",
+        f"  predictions `{s['predictions']}` | sources tracked `{s['sources']}`",
+    ]
+    cal = mem.calibration()
+    if cal:
+        lines.append("")
+        lines.append("*Agent calibration* (graded, hit rate, Brier):")
+        for c in cal[:6]:
+            lines.append(
+                f"  `{c['agent']:<10}` n={c['n']}  hit {c['hit_rate']:.0%}  brier {c['brier']:.2f}"
+            )
+    trust = mem.trust_table(min_graded=2)
+    if trust:
+        lines.append("")
+        lines.append("*Source trust* (top by evidence):")
+        for r in trust[:6]:
+            lines.append(f"  `{r['source']:<16}` {r['trust']:.2f} ({r['graded']} graded)")
+    est = mem.lessons(status="established")
+    if est:
+        lines.append("")
+        lines.append(f"*Top lesson:* {est[0]['statement'][:140]}")
+    return "\n".join(lines)
 
 
 def _cmd_resume() -> str:
@@ -1441,6 +1478,8 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_k(args)
     if cmd in ("/correlation", "/corr"):
         return _cmd_correlation()
+    if cmd == "/memory":
+        return _cmd_memory()
     if cmd == "/resume":
         return _cmd_resume()
     # --- cycle approval (only meaningful when REQUIRE_CYCLE_APPROVAL=true) ---

@@ -341,6 +341,14 @@ class Runner:
                 id="options_monitor",
                 replace_existing=True,
             )
+            # Memory grader: nightly, grade due predictions against
+            # cached prices and journal the day. Cheap; advisory infra.
+            self._scheduler.add_job(
+                self._run_memory_grader_async,
+                CronTrigger(hour=22, minute=30, timezone="UTC"),
+                id="memory_grader",
+                replace_existing=True,
+            )
             # Daily P&L note: just after the US close (20:10 UTC during
             # DST; harmlessly mid-evening in winter). One read of
             # runner.db + one Telegram message — negligible load.
@@ -632,6 +640,17 @@ class Runner:
             self._consecutive_errors = 0
             self._save_error_counter()
             self._last_success_ts = datetime.now()
+            with contextlib.suppress(Exception):
+                from trading.memory.store import default_store
+
+                default_store().journal(
+                    "cycle",
+                    {
+                        "status": report.status,
+                        "orders": report.orders_submitted,
+                        "fills": report.fills_received,
+                    },
+                )
 
     # Tracked by _run_cycle_async to enable "auto-halt after N consecutive
     # failures" and the heartbeat watchdog. The runner is the only writer.
@@ -818,6 +837,42 @@ class Runner:
             await poll_and_alert()
         except Exception:
             logger.bind(component="options_monitor").exception("options monitor poll failed")
+
+    async def _run_memory_grader_async(self) -> None:
+        """Nightly: grade due predictions using cached closes, and journal
+        a daily heartbeat into permanent memory. Failures are swallowed —
+        memory must never break trading."""
+        try:
+            from trading.memory.store import default_store
+            from trading.runtime.portfolio_stats import _read_close
+
+            mem = default_store()
+            graded = 0
+            for row in mem.due_predictions():
+                s = _read_close(settings.data_dir, row["subject"])
+                if s is None or len(s) < 5:
+                    continue
+                ts0 = datetime.fromtimestamp(row["ts"], tz=timezone.utc)
+                hist = s[s.index <= ts0.replace(tzinfo=None)]
+                if hist.empty:
+                    continue
+                base = float(hist.iloc[-1])
+                realized = float(s.iloc[-1]) / base - 1.0
+                mem.grade_prediction(row["id"], realized)
+                graded += 1
+            snap = self.cycle.runner_store.latest_snapshot()
+            mem.journal(
+                "daily",
+                {
+                    "equity": getattr(snap, "equity", None) if snap else None,
+                    "positions": len(getattr(snap, "positions", {}) or {}) if snap else 0,
+                    "graded_today": graded,
+                },
+            )
+            if graded:
+                logger.bind(component="memory").info(f"graded {graded} due prediction(s)")
+        except Exception:
+            logger.bind(component="memory").exception("memory grader failed")
 
     async def _run_daily_summary_async(self) -> None:
         """Daily after the US close: one-glance equity P&L note.
