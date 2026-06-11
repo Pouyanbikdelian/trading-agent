@@ -674,6 +674,21 @@ def _report_weekly(
 # ---------------------------------------------------------------------------
 
 
+dashboard_app = typer.Typer(help="Live web dashboard (stdlib HTTP, basic auth).")
+app.add_typer(dashboard_app, name="dashboard")
+
+
+@dashboard_app.command("run")
+def _dashboard_run(
+    host: str = typer.Option("0.0.0.0", help="Bind address."),
+    port: int = typer.Option(8787, help="Port."),
+) -> None:
+    """Serve the dashboard. Requires DASHBOARD_PASS in .env."""
+    from trading.dashboard import serve
+
+    serve(host=host, port=port)
+
+
 bot_app = typer.Typer(help="Telegram command bot (long-polling).")
 app.add_typer(bot_app, name="bot")
 

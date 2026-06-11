@@ -213,6 +213,28 @@ services:
     networks:
       - trading
 
+  # Live dashboard: read-only view over state/data, basic-auth protected.
+  # Reachable at http://<vps-ip>:8787 after `ufw allow 8787/tcp`.
+  # Requires DASHBOARD_PASS in .env (refuses to start without it).
+  dashboard:
+    image: trading-agent:latest
+    container_name: trader-dashboard
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      - trader
+    env_file:
+      - .env
+    volumes:
+      - state:/app/state
+      - data:/app/data:ro
+      - ./config:/app/config:ro
+    ports:
+      - "8787:8787"
+    command: ["dashboard", "run"]
+    networks:
+      - trading
+
   # Live profile flips the command. Activate with `--profile live`.
   trader-live:
     profiles: ["live"]
