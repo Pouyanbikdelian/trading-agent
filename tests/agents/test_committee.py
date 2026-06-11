@@ -112,3 +112,44 @@ def test_extract_json_handles_prose_wrapping() -> None:
     assert _extract_json('Sure! Here: {"a": {"b": 1}} hope that helps')["a"]["b"] == 1
     with pytest.raises(ValueError):
         _extract_json("no json here")
+
+
+def test_compact_digest_is_short_and_pointed(mem: MemoryStore) -> None:
+    from trading.agents.committee import format_digest_compact
+
+    llm, _ = make_fake_llm()
+    digest = run_committee({}, mem, llm=llm)
+    text = format_digest_compact(digest)
+    assert "Committee" in text and "Conclusion" in text and "/detail" in text
+    assert len(text) < 1200  # executive summary, not a transcript
+    # Compact is meaningfully shorter than the full rendering.
+    assert len(text) < len(format_digest(digest))
+
+
+def test_challenger_sees_all_takes_and_market_context(mem: MemoryStore) -> None:
+    seen: dict[str, str] = {}
+
+    base_llm, _ = make_fake_llm()
+
+    def spy_llm(system: str, prompt: str):
+        if "Challenger" in system and "Fund Manager" not in system:
+            seen["prompt"] = prompt
+            return {
+                "objections": [
+                    {
+                        "target_agent": "committee",
+                        "objection": "consensus is crowded",
+                        "falsifier": "breadth expansion",
+                    }
+                ],
+                "market_phase_caveat": "late-stage rallies punish chasing",
+            }
+        return base_llm(system, prompt)
+
+    digest = run_committee({"macro_dial": {"composite": 1.2}}, mem, llm=spy_llm)
+    # Challenger received market context AND every agent's take.
+    assert "Market context" in seen["prompt"]
+    for name in CHARTERS:
+        assert name in seen["prompt"] or name in str(digest["takes"])
+    assert digest["market_caveat"].startswith("late-stage")
+    assert digest["objections"][0]["target_agent"] == "committee"

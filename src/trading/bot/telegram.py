@@ -82,6 +82,7 @@ HELP_TEXT = (
     "/k N | /k clear — override the strategy top-K at runtime\n"
     "/correlation — 12m correlation matrix of current holdings\n"
     "/memory — permanent-memory vitals: calibration, trust, lessons\n"
+    "/detail — full transcript of the latest committee debate\n"
     "/cancel\\_order CLIENT\\_ID — cancel a pending order\n\n"
     "*Mode (rebalance posture)*\n"
     "/mode bull|neutral|defense|bear|flatten — preview\n"
@@ -318,6 +319,23 @@ def _cmd_memory() -> str:
         lines.append("")
         lines.append(f"*Top lesson:* {est[0]['statement'][:140]}")
     return "\n".join(lines)
+
+
+def _cmd_detail() -> str:
+    """``/detail`` — full transcript of the latest committee debate."""
+    import json as _json
+
+    from trading.agents.committee import format_digest
+
+    path = settings.state_dir / "last_committee.json"
+    if not path.exists():
+        return "_no committee run recorded yet — the committee convenes weekdays 14:00 UTC._"
+    try:
+        digest = _json.loads(path.read_text())
+    except Exception as e:
+        return f"could not read last committee run: `{e}`"
+    text = format_digest(digest)
+    return text[:3900] + ("\n…(truncated)" if len(text) > 3900 else "")
 
 
 def _cmd_resume() -> str:
@@ -1480,6 +1498,8 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_correlation()
     if cmd == "/memory":
         return _cmd_memory()
+    if cmd == "/detail":
+        return _cmd_detail()
     if cmd == "/resume":
         return _cmd_resume()
     # --- cycle approval (only meaningful when REQUIRE_CYCLE_APPROVAL=true) ---

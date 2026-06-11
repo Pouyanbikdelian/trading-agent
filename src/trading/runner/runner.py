@@ -857,14 +857,20 @@ class Runner:
         the digest. Advisory only — writes to memory and Telegram, never
         to the order path. Failures are logged and swallowed."""
         try:
-            from trading.agents.committee import format_digest, run_committee
+            from trading.agents.committee import format_digest_compact, run_committee
             from trading.agents.context import build_context
             from trading.memory.store import default_store
 
             mem = default_store()
             ctx = await asyncio.to_thread(build_context, settings.state_dir, settings.data_dir)
             digest = await asyncio.to_thread(run_committee, ctx, mem, calibration=mem.calibration())
-            self.alerts.info(format_digest(digest))
+            # Persist the full debate for /detail; send only the summary.
+            import json as _json
+
+            (settings.state_dir / "last_committee.json").write_text(
+                _json.dumps(digest, default=str, indent=1)
+            )
+            self.alerts.info(format_digest_compact(digest))
         except Exception:
             logger.bind(component="agents").exception("committee run failed")
 

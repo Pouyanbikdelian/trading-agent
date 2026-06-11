@@ -71,11 +71,17 @@ CHARTERS: dict[str, str] = {
 
 CHALLENGER_CHARTER = (
     "You are the Challenger — professionally disagreeable. You will be shown "
-    "the committee's takes. Attack the TWO highest-confidence takes: cite "
-    "base rates, ways the thesis fails, and what evidence would falsify it. "
-    "Steelman the opposite side. Respond ONLY with JSON: "
-    '{"objections": [{"target_agent": "<name>", "objection": "<3-4 sentences>", '
-    '"falsifier": "<what evidence would prove them wrong>"}]}'
+    "ALL committee takes plus today's market context. Your job: attack the "
+    "committee's OVERALL direction and expose every material weakness — "
+    "overconfident takes, crowding, stale theses, risks specific to the "
+    "current market phase (late-cycle, post-rally, pre-event), and anything "
+    "the committee is collectively ignoring. Cite base rates; steelman the "
+    "opposite side. Use target_agent='committee' for direction-level "
+    "objections. Respond ONLY with JSON: "
+    '{"objections": [{"target_agent": "<name or committee>", '
+    '"objection": "<3-4 sentences>", '
+    '"falsifier": "<what evidence would prove them wrong>"}], '
+    '"market_phase_caveat": "<1-2 sentences on what this market phase punishes>"}'
 )
 
 MANAGER_CHARTER = (
@@ -137,18 +143,22 @@ def run_committee(
     if not takes:
         return {"ok": False, "reason": "no agent produced a valid take"}
 
-    # --- Challenger round
+    # --- Challenger round: sees ALL takes + market context
     objections: list[dict[str, Any]] = []
+    market_caveat = ""
     try:
-        ranked = sorted(
-            takes.items(), key=lambda kv: kv[1]["prediction"]["confidence"], reverse=True
-        )
-        target_block = json.dumps(dict(ranked[:4]), default=str)[:6000]
+        target_block = json.dumps(takes, default=str)[:6000]
         ch = llm(
-            CHALLENGER_CHARTER, f"Committee takes (attack the top-confidence two):\n{target_block}"
+            CHALLENGER_CHARTER,
+            f"Market context:\n{ctx_block[:3000]}\n\nCommittee takes:\n{target_block}",
         )
-        objections = list(ch.get("objections", []))[:3]
-        mem.journal("debate", {"objections": objections}, actor="challenger")
+        objections = list(ch.get("objections", []))[:5]
+        market_caveat = str(ch.get("market_phase_caveat", ""))[:300]
+        mem.journal(
+            "debate",
+            {"objections": objections, "market_caveat": market_caveat},
+            actor="challenger",
+        )
     except Exception as e:
         logger.bind(component="agents", agent="challenger").warning(f"challenge failed: {e}")
 
@@ -182,14 +192,49 @@ def run_committee(
         "takes": takes,
         "objections": objections,
         "ruling": ruling,
+        "market_caveat": market_caveat,
         "disagreement_index": disagreement,
     }
     mem.journal("committee", {"ruling": ruling, "disagreement": disagreement}, actor="manager")
     return digest
 
 
+def format_digest_compact(digest: dict[str, Any]) -> str:
+    """Executive summary — a few bullets + conclusion. Full debate via /detail."""
+    if not digest.get("ok"):
+        return f"🤖 Committee did not convene: {digest.get('reason', 'unknown')}"
+    icons = {"bullish": "🟢", "neutral": "⚪", "bearish": "🔴"}
+    r = digest.get("ruling", {})
+    posture = str(r.get("posture", "neutral")).replace("_", " ").upper()
+    posture_icon = {"RISK ON": "🟢", "NEUTRAL": "⚪", "RISK OFF": "🔴"}.get(posture, "⚪")
+    lines = [
+        f"🏛 *Committee* — {posture_icon} *{posture}*  (dissent {digest['disagreement_index']:.1f})",
+        "",
+    ]
+    # One bullet per non-neutral voice, the strongest first; max 5.
+    voiced = [
+        (n, t) for n, t in digest["takes"].items() if t.get("stance") in ("bullish", "bearish")
+    ]
+    voiced.sort(key=lambda kv: float(kv[1]["prediction"]["confidence"]), reverse=True)
+    for name, t in voiced[:5]:
+        lines.append(
+            f"  {icons[t['stance']]} *{name}*: {str(t.get('take', '')).split('.')[0][:110]}"
+        )
+    if digest.get("objections"):
+        o = digest["objections"][0]
+        lines.append(f"  ⚔️ *challenger*: {str(o.get('objection', '')).split('.')[0][:110]}")
+    if digest.get("market_caveat"):
+        lines.append(f"  ⚠️ {digest['market_caveat'][:120]}")
+    lines += [
+        "",
+        f"*Conclusion:* {str(r.get('proposal', ''))[:240]}",
+        f"_Watching: {str(r.get('watch', ''))[:100]} · `/detail` for the full debate_",
+    ]
+    return "\n".join(lines)
+
+
 def format_digest(digest: dict[str, Any]) -> str:
-    """Telegram-ready rendering of a committee run."""
+    """Full Telegram rendering of a committee run (served by /detail)."""
     if not digest.get("ok"):
         return f"🤖 Committee did not convene: {digest.get('reason', 'unknown')}"
     icons = {"bullish": "🟢", "neutral": "⚪", "bearish": "🔴"}
@@ -208,6 +253,9 @@ def format_digest(digest: dict[str, Any]) -> str:
             lines.append(
                 f"  vs *{o.get('target_agent', '?')}*: {str(o.get('objection', ''))[:180]}"
             )
+    if digest.get("market_caveat"):
+        lines.append("")
+        lines.append(f"⚠️ *Market phase:* {digest['market_caveat']}")
     r = digest["ruling"]
     posture_icon = {"risk_on": "🟢", "neutral": "⚪", "risk_off": "🔴"}.get(
         r.get("posture", "neutral"), "⚪"
