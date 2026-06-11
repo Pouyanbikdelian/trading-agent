@@ -135,3 +135,71 @@ that apply. You decide via Telegram.
   system, but the operator should read the quarterly audits.
 * Cost discipline: frontier model for the Manager + conferences, cheap
   model for daily agent chatter.
+
+---
+
+## Addendum (2026-06-11, second pass with Yan)
+
+### Source-trust ledger ("learn who to trust, still hear the gossip")
+
+Every ingested news/claim is logged with its **source**. When a dossier
+expectation or agent prediction is later graded, the sources that
+informed it get credited or debited. Each source accumulates a trust
+score (Bayesian beta prior, so new sources start neutral and converge
+with evidence). Retrieval never drops low-trust sources — it *labels*
+them: agents see `[trust 0.81] Reuters: ...` next to `[gossip 0.34]
+@fintwit_anon: ...` and must weigh accordingly. Gossip that keeps being
+early-and-right earns its way up; prestige outlets that lag decay down.
+The trust table is itself memory: inspectable, versioned, never reset.
+
+### Debate protocol (agents challenge each other)
+
+Two roles added; two requests already covered:
+
+* **Trader** (new) — tactical voice: entries/exits, what the tape says
+  this week, liquidity and timing. Short horizon by charter.
+* **Challenger** (new) — professionally disagreeable red team. Charter:
+  attack the strongest current consensus take, surface base rates and
+  past episodes where similar confidence failed, steelman the opposite
+  position. Scored not on direction but on *whether its objections
+  predicted the misses*.
+* Pure strategist → covered by Quant + Narrator. Neutral arbiter →
+  covered by the Fund Manager (explicitly neutral charter).
+
+Protocol per cycle: (1) specialists post takes → (2) Challenger files
+objections against the 2 highest-conviction takes → (3) authors reply
+once → (4) Manager rules, recording the **disagreement index** (spread
+of agent views). Disagreement is stored with the episode: over years we
+learn whether committee discord is itself a risk signal. Full debate
+transcripts go to the Journal.
+
+### Tooling decisions
+
+* **Memory format**: SQLite (journal/scorecard) + **markdown dossiers
+  and lesson cards** in a folder — deliberately Obsidian-compatible.
+  Yan can open `state/memory/` as an Obsidian vault and browse lessons
+  with backlinks; no Obsidian dependency in code.
+* Embeddings: sqlite-vec or plain numpy over local files; no external
+  vector DB until the corpus outgrows it (years away).
+* Orchestration: plain Python in this repo (matches house style); no
+  LangChain/LangGraph dependency.
+
+### Live dashboard (personal website)
+
+Host on the EXISTING VPS — Caddy is already terminating TLS for n8n,
+so this is a new docker service + one Caddyfile route + a subdomain
+(only new cost: a domain if Yan wants a custom one). FastAPI serving a
+static page + small JSON API that reads runner.db/state read-only.
+Basic-auth via Caddy.
+
+Panels (v1 → v2):
+1. Equity P&L line (from `equity_curve`) + drawdown ribbon  [small]
+2. Top positions with entry-vs-52w-range markers            [small]
+3. Macro dial gauges (rates/dollar/energy/composite z)
+4. Vol-surface tiles (ATM IV, skew, term slope, P/C OI)
+5. Regime strip (HMM state + VIX bucket over time)
+6. Agent room: latest takes, Challenger objections, Manager ruling,
+   disagreement index sparkline
+7. Scorecard leaderboard: per-agent calibration, per-source trust
+8. Lessons feed: newest + recently reinforced/retired
+9. Next events: rebalance countdown, FOMC/CPI calendar
