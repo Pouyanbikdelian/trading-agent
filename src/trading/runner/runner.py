@@ -341,6 +341,20 @@ class Runner:
                 id="options_monitor",
                 replace_existing=True,
             )
+            # Agent committee: weekdays 14:00 UTC (pre-US-open, after
+            # the macro monitor refreshes its dial). Advisory only;
+            # requires AGENTS_ENABLED=true + an LLM API key in .env.
+            import os as _os
+
+            if _os.getenv("AGENTS_ENABLED", "false").lower() in ("true", "1", "yes") and (
+                _os.getenv("ANTHROPIC_API_KEY") or _os.getenv("OPENAI_API_KEY")
+            ):
+                self._scheduler.add_job(
+                    self._run_committee_async,
+                    CronTrigger(day_of_week="mon-fri", hour=14, minute=0, timezone="UTC"),
+                    id="agent_committee",
+                    replace_existing=True,
+                )
             # Memory grader: nightly, grade due predictions against
             # cached prices and journal the day. Cheap; advisory infra.
             self._scheduler.add_job(
@@ -837,6 +851,22 @@ class Runner:
             await poll_and_alert()
         except Exception:
             logger.bind(component="options_monitor").exception("options monitor poll failed")
+
+    async def _run_committee_async(self) -> None:
+        """Daily agent committee: gather context, run the debate, send
+        the digest. Advisory only — writes to memory and Telegram, never
+        to the order path. Failures are logged and swallowed."""
+        try:
+            from trading.agents.committee import format_digest, run_committee
+            from trading.agents.context import build_context
+            from trading.memory.store import default_store
+
+            mem = default_store()
+            ctx = await asyncio.to_thread(build_context, settings.state_dir, settings.data_dir)
+            digest = await asyncio.to_thread(run_committee, ctx, mem, calibration=mem.calibration())
+            self.alerts.info(format_digest(digest))
+        except Exception:
+            logger.bind(component="agents").exception("committee run failed")
 
     async def _run_memory_grader_async(self) -> None:
         """Nightly: grade due predictions using cached closes, and journal
