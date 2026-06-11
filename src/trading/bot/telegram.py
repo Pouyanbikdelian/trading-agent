@@ -83,6 +83,7 @@ HELP_TEXT = (
     "/correlation — 12m correlation matrix of current holdings\n"
     "/memory — permanent-memory vitals: calibration, trust, lessons\n"
     "/detail — full transcript of the latest committee debate\n"
+    "/committee — convene the agents for a fresh debate right now\n"
     "/cancel\\_order CLIENT\\_ID — cancel a pending order\n\n"
     "*Mode (rebalance posture)*\n"
     "/mode bull|neutral|defense|bear|flatten — preview\n"
@@ -336,6 +337,19 @@ def _cmd_detail() -> str:
         return f"could not read last committee run: `{e}`"
     text = format_digest(digest)
     return text[:3900] + ("\n…(truncated)" if len(text) > 3900 else "")
+
+
+def _cmd_committee() -> str:
+    """``/committee`` — convene the agent committee now (fresh debate)."""
+    flag = settings.state_dir / "committee_now.flag"
+    try:
+        flag.write_text(datetime.now(tz=timezone.utc).isoformat())
+    except Exception as e:
+        return f"could not request committee: `{e}`"
+    return (
+        "\U0001f3db Committee convening — fresh debate underway.\n"
+        "_Summary lands here in ~2 minutes; `/detail` for the full transcript._"
+    )
 
 
 def _cmd_resume() -> str:
@@ -1500,6 +1514,8 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_memory()
     if cmd == "/detail":
         return _cmd_detail()
+    if cmd == "/committee":
+        return _cmd_committee()
     if cmd == "/resume":
         return _cmd_resume()
     # --- cycle approval (only meaningful when REQUIRE_CYCLE_APPROVAL=true) ---

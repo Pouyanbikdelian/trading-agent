@@ -355,6 +355,14 @@ class Runner:
                     id="agent_committee",
                     replace_existing=True,
                 )
+                # On-demand convening via /committee (flag file, 30s poll).
+                self._scheduler.add_job(
+                    self._check_committee_flag,
+                    IntervalTrigger(seconds=30),
+                    id="committee_trigger",
+                    replace_existing=True,
+                    max_instances=1,
+                )
             # Memory grader: nightly, grade due predictions against
             # cached prices and journal the day. Cheap; advisory infra.
             self._scheduler.add_job(
@@ -370,6 +378,15 @@ class Runner:
                 self._run_daily_summary_async,
                 CronTrigger(day_of_week="mon-fri", hour=20, minute=10, timezone="UTC"),
                 id="daily_summary",
+                replace_existing=True,
+            )
+            # Market watch collector: daily 20:20 UTC (post-close) —
+            # yield curve, VIX term structure, breadth, risk ratios.
+            # Feeds the dashboard's Macro tab; history is bounded.
+            self._scheduler.add_job(
+                self._run_market_watch_async,
+                CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone="UTC"),
+                id="market_watch",
                 replace_existing=True,
             )
             # Macro financial-conditions monitor: daily 13:30 UTC
@@ -851,6 +868,26 @@ class Runner:
             await poll_and_alert()
         except Exception:
             logger.bind(component="options_monitor").exception("options monitor poll failed")
+
+    async def _run_market_watch_async(self) -> None:
+        """Daily macro instrument panel refresh. Failures swallowed."""
+        try:
+            from trading.runtime.market_watch import collect
+
+            await asyncio.to_thread(collect, settings.state_dir, settings.data_dir)
+        except Exception:
+            logger.bind(component="market_watch").exception("market watch failed")
+
+    async def _check_committee_flag(self) -> None:
+        """Operator asked for a fresh debate via /committee: the bot drops
+        state/committee_now.flag; we consume it and convene immediately."""
+        flag = settings.state_dir / "committee_now.flag"
+        if not flag.exists():
+            return
+        with contextlib.suppress(Exception):
+            flag.unlink()
+        logger.bind(component="agents").info("on-demand committee triggered")
+        await self._run_committee_async()
 
     async def _run_committee_async(self) -> None:
         """Daily agent committee: gather context, run the debate, send
