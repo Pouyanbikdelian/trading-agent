@@ -36,7 +36,10 @@ from trading.memory.store import MemoryStore
 
 LlmFn = Callable[[str, str], dict[str, Any]]
 
-START_EQUITY = 100_000.0
+# Match the paper strategy's capital so the dashboard race compares like
+# for like. Override with AGENT_PM_START_EQUITY; takes effect on a fresh
+# book (delete state/agent_pm/ to restart the sim).
+START_EQUITY = float(os.getenv("AGENT_PM_START_EQUITY", "1000000"))
 COST_BPS = 10.0  # commission + slippage on turnover, charitable but not free
 MAX_WEIGHT_PER_NAME = 0.25  # ETFs are diversified; a quarter is the ceiling
 MAX_WEIGHT_PER_STOCK = 0.10  # single names carry idiosyncratic risk — tighter
@@ -220,7 +223,10 @@ def performance(state_dir: Path) -> dict[str, Any]:
         return out
     eq = [float(h["equity"]) for h in hist]
     out["equity"] = eq[-1]
-    out["return_pct"] = (eq[-1] / START_EQUITY - 1.0) * 100
+    # Base on the first recorded mark, not the constant — survives a
+    # START_EQUITY change without corrupting an existing book's stats.
+    out["start_equity"] = eq[0]
+    out["return_pct"] = (eq[-1] / eq[0] - 1.0) * 100
     peak, mdd = eq[0], 0.0
     for v in eq:
         peak = max(peak, v)

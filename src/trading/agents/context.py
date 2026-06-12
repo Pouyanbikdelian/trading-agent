@@ -89,6 +89,17 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     except Exception as e:
         logger.bind(component="agents").warning(f"context: memory unavailable ({e})")
 
+    # --- slow macro (FRED): CPI, claims, HY spreads etc. Compact latest
+    # readings only — the dashboard owns the full history.
+    try:
+        from trading.runtime.econ_watch import latest_block
+
+        econ = latest_block(state_dir)
+        if econ:
+            ctx["economy"] = econ
+    except Exception as e:
+        logger.bind(component="agents").warning(f"context: economy unavailable ({e})")
+
     # --- outside world, last: if the serialized context must be cut to fit
     # the prompt budget, gossip is the right thing to lose first.
     # Collected by news_watch on its own schedule; stale collections are

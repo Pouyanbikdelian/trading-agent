@@ -355,6 +355,14 @@ class Runner:
                     id="agent_committee",
                     replace_existing=True,
                 )
+                # Economy watch: slow FRED series (CPI, claims, HY OAS...).
+                # Weekdays 11:00 UTC — well before the committee.
+                self._scheduler.add_job(
+                    self._run_econ_watch_async,
+                    CronTrigger(day_of_week="mon-fri", hour=11, minute=0, timezone="UTC"),
+                    id="econ_watch",
+                    replace_existing=True,
+                )
                 # News watch: feeds the scout. 13:40 UTC weekdays — fresh
                 # headlines + sector momentum land just before the 14:00
                 # committee. Pure RSS/yfinance; failures degrade, not break.
@@ -929,6 +937,15 @@ class Runner:
             await asyncio.to_thread(collect, settings.state_dir)
         except Exception:
             logger.bind(component="news_watch").exception("news watch failed")
+
+    async def _run_econ_watch_async(self) -> None:
+        """Collect FRED macro series for the Economy tab + agent context."""
+        try:
+            from trading.runtime.econ_watch import collect
+
+            await asyncio.to_thread(collect, settings.state_dir)
+        except Exception:
+            logger.bind(component="econ_watch").exception("econ watch failed")
 
     async def _check_committee_flag(self) -> None:
         """Operator asked for a fresh debate via /committee: the bot drops

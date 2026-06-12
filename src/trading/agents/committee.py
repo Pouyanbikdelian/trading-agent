@@ -121,8 +121,16 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
         "vol_surface",
         "style_leader",
         "sector_momentum_vs_spy_pct",
+        "economy",
     ),
-    "narrator": ("macro_dial", "dossiers", "source_trust", "established_lessons", "headlines"),
+    "narrator": (
+        "macro_dial",
+        "dossiers",
+        "source_trust",
+        "established_lessons",
+        "headlines",
+        "economy",
+    ),
     "street": ("positions", "style_leader", "sector_momentum_vs_spy_pct", "headlines"),
     "position_coach": ("account", "positions", "holds", "k_override", "established_lessons"),
     "risk_officer": (
@@ -132,6 +140,7 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
         "macro_dial",
         "spy_vix_triggers",
         "holds",
+        "economy",
     ),
     "trader": (
         "positions",
