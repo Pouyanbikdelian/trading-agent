@@ -48,6 +48,12 @@ _QUERIES: dict[str, str] = {
     # note is words. The scout's charter weights these accordingly.
     "capital_flows": "billion investment fund launch acquisition stake",
     "ai_capex": "AI infrastructure data center investment billion",
+    # Standing operator directive: permanent quantum-computing watch.
+    "quantum": "quantum computing breakthrough stocks investment",
+    # Government money is the highest-trust clue in this theme: defense,
+    # national-lab and procurement deals reveal who is actually in the
+    # supply chain before revenue shows it.
+    "quantum_gov": "quantum computing government contract defense award partnership",
 }
 
 # Relative-momentum universe: 11 SPDRs + liquid theme ETFs.
@@ -116,7 +122,12 @@ def fetch_headlines() -> list[dict[str, str]]:
 
 
 def fetch_sector_momentum() -> dict[str, dict[str, float | None]]:
-    """{sector: {ret_1m_vs_spy, ret_3m_vs_spy}} — relative, in percent."""
+    """{sector: {ret_1m_vs_spy, ret_3m_vs_spy, off_52w_high_pct}}.
+
+    off_52w_high_pct is the rotation lens: a sector at −1% off its high is
+    extended (no valuation cushion); one at −20% with improving 1m momentum
+    is a recovery candidate. Momentum says what's strong; this says what's
+    stretched versus washed out — the agents debate the difference."""
     out: dict[str, dict[str, float | None]] = {}
     try:
         import yfinance as yf
@@ -124,35 +135,45 @@ def fetch_sector_momentum() -> dict[str, dict[str, float | None]]:
         tickers = [*SECTOR_ETFS, "SPY"]
         raw = yf.download(
             " ".join(tickers),
-            period="4mo",
+            period="1y",
             auto_adjust=True,
             progress=False,
             group_by="ticker",
             threads=False,
         )
 
-        def _rets(tkr: str) -> tuple[float, float] | None:
+        def _stats(tkr: str) -> tuple[float, float, float] | None:
             try:
                 s = raw[tkr]["Close"].dropna()
                 if len(s) < 63:
                     return None
                 last = float(s.iloc[-1])
-                return last / float(s.iloc[-21]) - 1.0, last / float(s.iloc[-63]) - 1.0
+                return (
+                    last / float(s.iloc[-21]) - 1.0,
+                    last / float(s.iloc[-63]) - 1.0,
+                    last / float(s.max()) - 1.0,  # distance from 52w high (<= 0)
+                )
             except Exception:
                 return None
 
-        spy = _rets("SPY")
+        spy = _stats("SPY")
         if spy is None:
             return out
         for tkr, name in SECTOR_ETFS.items():
-            r = _rets(tkr)
+            r = _stats(tkr)
             if r is None:
-                out[name] = {"etf": tkr, "ret_1m_vs_spy": None, "ret_3m_vs_spy": None}
+                out[name] = {
+                    "etf": tkr,
+                    "ret_1m_vs_spy": None,
+                    "ret_3m_vs_spy": None,
+                    "off_52w_high_pct": None,
+                }
                 continue
             out[name] = {
                 "etf": tkr,
                 "ret_1m_vs_spy": round((r[0] - spy[0]) * 100, 2),
                 "ret_3m_vs_spy": round((r[1] - spy[1]) * 100, 2),
+                "off_52w_high_pct": round(r[2] * 100, 2),
             }
     except Exception as e:
         logger.bind(component="news_watch").info(f"sector momentum fetch failed: {e}")

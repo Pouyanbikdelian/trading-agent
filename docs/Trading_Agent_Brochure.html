@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trading Agent — System Brochure</title>
+<style>
+  @page { size: A4; margin: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --navy:#0e2238; --teal:#0e7d6e; --green:#1fa37a; --amber:#c98b2d; --red:#c0455a;
+    --ink:#22303e; --mut:#67788a; --line:#dde5ec; --bg:#f6f9fb; --card:#ffffff;
+  }
+  body { font: 10.5pt/1.5 "Avenir Next","Segoe UI",Helvetica,Arial,sans-serif; color: var(--ink); background:#e9edf1; }
+  .page { width: 210mm; min-height: 296mm; background: var(--card); margin: 8mm auto; padding: 16mm 17mm 14mm;
+          position: relative; box-shadow: 0 2px 14px rgba(0,0,0,.12); }
+  @media print { body { background:#fff } .page { margin:0; box-shadow:none; page-break-after: always } .page:last-child{page-break-after:auto} }
+
+  h1 { font-size: 23pt; font-weight: 700; color: var(--navy); letter-spacing:-.3pt; }
+  h2 { font-size: 13pt; font-weight: 700; color: var(--navy); margin: 14pt 0 6pt; display:flex; align-items:center; gap:7pt; }
+  h2 .n { display:inline-flex; align-items:center; justify-content:center; width:16pt; height:16pt; border-radius:4pt;
+          background:var(--teal); color:#fff; font-size:9.5pt; }
+  h3 { font-size: 10.5pt; font-weight: 700; color: var(--teal); margin: 8pt 0 3pt; }
+  p { margin: 4pt 0; }
+  .kicker { color: var(--teal); font-weight: 700; font-size: 9pt; text-transform: uppercase; letter-spacing: 1.6pt; }
+  .sub { color: var(--mut); font-size: 10.5pt; margin-top: 3pt; }
+  .rule { height: 2.5pt; background: linear-gradient(90deg, var(--teal), var(--green) 55%, transparent); margin: 9pt 0 12pt; border-radius:2pt; }
+
+  .cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12pt; }
+  .box { background: var(--bg); border: 1px solid var(--line); border-left: 3pt solid var(--teal); border-radius: 5pt; padding: 8pt 10pt; }
+  .box.warn { border-left-color: var(--amber); }
+  .box.red { border-left-color: var(--red); }
+  .box h3 { margin-top: 0; }
+
+  .stats { display:grid; grid-template-columns: repeat(4,1fr); gap:8pt; margin: 10pt 0; }
+  .stat { background: var(--navy); color:#fff; border-radius:6pt; padding:8pt 10pt; }
+  .stat b { display:block; font-size:14pt; }
+  .stat span { font-size:8pt; opacity:.75; text-transform:uppercase; letter-spacing:.8pt; }
+
+  table { width:100%; border-collapse: collapse; font-size: 9pt; margin: 6pt 0; }
+  th { text-align:left; font-size:8pt; text-transform: uppercase; letter-spacing:.7pt; color:var(--mut);
+       border-bottom: 1.5pt solid var(--navy); padding: 3pt 6pt; }
+  td { padding: 4pt 6pt; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.k { font-family: "SF Mono",Menlo,Consolas,monospace; font-size:8.4pt; color: var(--navy); font-weight:600; white-space:nowrap; }
+  tr:nth-child(even) td { background: #fafcfd; }
+  .tag { display:inline-block; font-size:7.5pt; font-weight:700; padding:1pt 5pt; border-radius:8pt; color:#fff; }
+  .tag.on { background: var(--green); } .tag.off { background: var(--mut); } .tag.live { background: var(--amber); }
+
+  .foot { position:absolute; bottom: 8mm; left: 17mm; right: 17mm; display:flex; justify-content:space-between;
+          font-size:8pt; color:var(--mut); border-top:1px solid var(--line); padding-top:4pt; }
+  svg text { font-family: "Avenir Next","Segoe UI",Helvetica,Arial,sans-serif; }
+  .figcap { font-size:8.2pt; color:var(--mut); text-align:center; margin-top:2pt; }
+  ul.tight { margin: 4pt 0 4pt 14pt; } ul.tight li { margin: 2.5pt 0; }
+  .small { font-size: 9pt; color: var(--mut); }
+</style>
+</head>
+<body>
+
+<!-- ============================ PAGE 1 ============================ -->
+<div class="page">
+  <div class="kicker">System Brochure · June 2026</div>
+  <h1>The Trading Agent</h1>
+  <p class="sub">An automated, multi-agent trading system for Interactive Brokers — a committee of AI analysts that debates daily,
+     a simulated portfolio manager that trades weekly, and mechanical guards that protect capital around the clock.</p>
+  <div class="rule"></div>
+
+  <div class="stats">
+    <div class="stat"><b>8</b><span>debating agents</span></div>
+    <div class="stat"><b>$1M</b><span>simulated PM sleeve</span></div>
+    <div class="stat"><b>15 min</b><span>intraday watch cycle</span></div>
+    <div class="stat"><b>~$5/mo</b><span>typical LLM cost</span></div>
+  </div>
+
+  <h2><span class="n">1</span>What it is</h2>
+  <p>Two systems share one brain. The <b>paper trader</b> — a rules-based momentum strategy (Top-8, S&amp;P 500) — places real orders
+     in an IBKR paper account every Friday. Alongside it, an <b>agent layer</b> reads markets, news and macro data, debates, and runs
+     its own fully simulated $1M portfolio. The agents <b>never touch the real order path</b>: a hard-blocking risk manager is the only
+     gateway to orders, and every agent output is advisory, journaled, and graded. After an observation period, the agent PM either
+     earns real (paper) capital on evidence — or doesn't.</p>
+
+  <h2><span class="n">2</span>How a trading day flows</h2>
+  <svg viewBox="0 0 760 150" style="width:100%">
+    <defs><marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#67788a"/></marker></defs>
+    <line x1="20" y1="105" x2="745" y2="105" stroke="#dde5ec" stroke-width="2"/>
+    <g font-size="10.5" fill="#22303e" text-anchor="middle">
+      <g><circle cx="60" cy="105" r="5" fill="#0e7d6e"/><text x="60" y="128" font-weight="700">11:00</text><text x="60" y="140" fill="#67788a" font-size="9">economy (FRED)</text><text x="60" y="88" fill="#0e7d6e" font-size="9">CPI · rates · credit</text></g>
+      <g><circle cx="165" cy="105" r="5" fill="#0e7d6e"/><text x="165" y="128" font-weight="700">13:40</text><text x="165" y="140" fill="#67788a" font-size="9">news + sectors</text><text x="165" y="88" fill="#0e7d6e" font-size="9">headlines · momentum</text></g>
+      <g><circle cx="270" cy="105" r="7" fill="#0e2238"/><text x="270" y="128" font-weight="700">14:00</text><text x="270" y="140" fill="#67788a" font-size="9">committee debate</text><text x="270" y="88" fill="#0e2238" font-size="9" font-weight="700">8 agents argue</text></g>
+      <g><circle cx="375" cy="105" r="5" fill="#c98b2d"/><text x="375" y="128" font-weight="700">Mon 14:30</text><text x="375" y="140" fill="#67788a" font-size="9">agent PM trades (sim)</text><text x="375" y="88" fill="#c98b2d" font-size="9">weekly rebalance</text></g>
+      <g><circle cx="480" cy="105" r="5" fill="#c0455a"/><text x="480" y="128" font-weight="700">13:30–20:00</text><text x="480" y="140" fill="#67788a" font-size="9">sentinel + guards</text><text x="480" y="88" fill="#c0455a" font-size="9">every 15 min</text></g>
+      <g><circle cx="585" cy="105" r="5" fill="#0e7d6e"/><text x="585" y="128" font-weight="700">Fri 21:05</text><text x="585" y="140" fill="#67788a" font-size="9">paper trader rebalances</text><text x="585" y="88" fill="#0e7d6e" font-size="9">real orders (paper)</text></g>
+      <g><circle cx="690" cy="105" r="5" fill="#0e2238"/><text x="690" y="128" font-weight="700">22:30 / Fri 22:45</text><text x="690" y="140" fill="#67788a" font-size="9">grading · historian</text><text x="690" y="88" fill="#0e2238" font-size="9">the system learns</text></g>
+    </g>
+  </svg>
+  <div class="figcap">All times UTC, weekdays. Quiet markets cost nothing — the LLM only runs when scheduled or when a tripwire fires.</div>
+
+  <h2><span class="n">3</span>The committee — eight voices, one verdict</h2>
+  <p>Each weekday (and on demand via <b>/committee</b>), seven specialists read <i>different slices</i> of the data — deliberately, to
+     prevent echo chambers — and publish a stance plus a <b>falsifiable prediction</b> (ticker, direction, horizon, confidence).</p>
+  <div class="cols2" style="margin-top:6pt">
+    <div class="box">
+      <h3>The specialists</h3>
+      <ul class="tight">
+        <li><b>Quant</b> — trusts numbers: momentum, vol surface, macro dial</li>
+        <li><b>Narrator</b> — geopolitics, central banks, crowd psychology</li>
+        <li><b>Street</b> — sell-side consensus vs. price action</li>
+        <li><b>Position Coach</b> — our book only: entries, P&amp;L, thesis drift</li>
+        <li><b>Risk Officer</b> — what can hurt us this week</li>
+        <li><b>Trader</b> — the tape, liquidity, this-week timing</li>
+        <li><b>Scout</b> — hunts the next big sector from headlines + momentum; <i>committed capital outranks commentary</i></li>
+      </ul>
+    </div>
+    <div class="box warn">
+      <h3>Then the adversaries</h3>
+      <p><b>The Challenger</b> attacks the committee's consensus — crowding, overconfidence, what everyone is ignoring — and states
+         what evidence would prove each take wrong.</p>
+      <p style="margin-top:5pt"><b>The Manager</b> weighs every voice by its <i>graded track record</i> (not eloquence) and rules:
+         risk-on, neutral, or risk-off — with the one thing that would change its mind.</p>
+      <p class="small" style="margin-top:5pt">Digest → Telegram. Full transcript → <b>/detail</b>. Every prediction → the scorecard.</p>
+    </div>
+  </div>
+
+  <div class="foot"><span>Trading Agent · Yan</span><span>Page 1 of 4</span></div>
+</div>
+
+<!-- ============================ PAGE 2 ============================ -->
+<div class="page">
+  <h2 style="margin-top:0"><span class="n">4</span>The agent PM — a $1M sleeve on probation</h2>
+  <p>Every Monday the PM reads the <b>week's rulings</b>, each agent's <b>calibration</b>, its own performance vs SPY, and fresh market
+     context — then sets target weights over a whitelist of 21 liquid ETFs plus every S&amp;P 500 / Nasdaq-100 / Russell 1000 stock.
+     Hard caps it cannot argue with: <b>25%</b> per ETF, <b>10%</b> per stock, <b>40%</b> per correlated cluster (semis + mega-tech
+     count as one), long-only, no leverage. Hallucinated tickers are silently dropped to cash. Fills are simulated at the close with
+     10 bps costs; equity is marked daily against SPY. The dashboard's <b>Strategy Race</b> chart is its public trial.</p>
+
+  <div class="cols2">
+    <div>
+      <h2><span class="n">5</span>Protection — three independent layers</h2>
+      <div class="box red">
+        <h3>① Sentinel (intraday tripwires)</h3>
+        <p class="small">Free mechanical checks every 15 min: SPY ≤ −1.5%, VIX +20%, any holding −5%. Only a tripped wire wakes the
+        AI to judge: noise or systemic? Real trouble → Telegram alert + auto-convened committee, minutes after the shock.</p>
+      </div>
+      <div class="box red" style="margin-top:6pt">
+        <h3>② Trailing stops (auto-exit)</h3>
+        <p class="small">Each position's stop follows its peak at a distance sized to that stock's own volatility (3× daily move,
+        floor 8%, cap 20% — squeeze-resistant). Never sells strength; exits flow through the same audited pipeline as a manual
+        /close. <b>/hold</b> exempts any position.</p>
+      </div>
+      <div class="box red" style="margin-top:6pt">
+        <h3>③ Profit ratchet (portfolio)</h3>
+        <p class="small">Arms once equity is up <b>20%</b>; warns loudly after giving back <b>40%</b> of the peak gain.
+        "Secure what you made" — the decision stays human.</p>
+      </div>
+    </div>
+    <div>
+      <h3 style="margin-top:2pt">How a trailing stop rides a winner</h3>
+      <svg viewBox="0 0 360 215" style="width:100%">
+        <rect x="0" y="0" width="360" height="215" fill="#f6f9fb" rx="6"/>
+        <g stroke="#dde5ec" stroke-width="1">
+          <line x1="40" y1="30" x2="40" y2="180"/><line x1="40" y1="180" x2="340" y2="180"/>
+          <line x1="40" y1="80" x2="340" y2="80" stroke-dasharray="3 3"/>
+          <line x1="40" y1="130" x2="340" y2="130" stroke-dasharray="3 3"/>
+        </g>
+        <path d="M40,165 L80,150 L110,155 L150,120 L185,95 L215,60 L245,48 L275,70 L300,82 L320,96"
+              fill="none" stroke="#0e7d6e" stroke-width="2.6"/>
+        <path d="M40,178 L80,166 L110,166 L150,138 L185,115 L215,80 L245,68 L245,68 L320,68"
+              fill="none" stroke="#c0455a" stroke-width="2" stroke-dasharray="5 3"/>
+        <circle cx="245" cy="48" r="4" fill="#0e7d6e"/>
+        <circle cx="312" cy="68" r="5" fill="#c0455a"/>
+        <text x="245" y="38" font-size="10" fill="#0e7d6e" text-anchor="middle" font-weight="700">peak</text>
+        <text x="318" y="58" font-size="10" fill="#c0455a" text-anchor="middle" font-weight="700">exit</text>
+        <text x="95" y="205" font-size="10" fill="#22303e">price <tspan fill="#0e7d6e" font-weight="700">———</tspan></text>
+        <text x="220" y="205" font-size="10" fill="#22303e">trailing stop <tspan fill="#c0455a" font-weight="700">- - -</tspan></text>
+        <text x="36" y="34" font-size="9" fill="#67788a" text-anchor="end">$</text>
+      </svg>
+      <p class="figcap">The stop only rises. A +140% runner is never sold on the way up — only on a real breakdown from its peak, keeping most of the gain.</p>
+      <div class="box" style="margin-top:8pt">
+        <h3>The learning loop</h3>
+        <p class="small">Every prediction is <b>graded nightly</b> against real prices → per-agent calibration (hit rate, Brier score)
+        → the Manager trusts proven voices more. Each Friday the <b>Historian</b> distills ≤2 candidate lessons from the week
+        ("gold breaking down while equities hold = risk-on rotation"); a lesson must survive <b>3 weeks of supporting evidence</b>
+        before agents may treat it as truth. The system gets harder to fool every week.</p>
+      </div>
+    </div>
+  </div>
+
+  <h2><span class="n">6</span>Safety principles (non-negotiable)</h2>
+  <ul class="tight">
+    <li><b>One gate to orders.</b> Strategies and agents emit signals; only the hard-blocking risk manager creates orders. Nothing bypasses it.</li>
+    <li><b>Paper until proven.</b> Live trading requires two explicit flags (<span class="k" style="font-family:monospace">TRADING_ENV=live</span> + <span style="font-family:monospace">ALLOW_LIVE_TRADING=true</span>) and is never enabled by automation.</li>
+    <li><b>Agents advise, humans decide.</b> Defensive moves (<b>/mode defense</b>, <b>/flatten</b>, <b>/halt</b>) are operator commands; the system makes them timely, not automatic.</li>
+    <li><b>Everything is journaled.</b> Takes, objections, rulings, trades, lessons — auditable, graded, and visible on the dashboard.</li>
+  </ul>
+
+  <div class="foot"><span>Trading Agent · Yan</span><span>Page 2 of 4</span></div>
+</div>
+
+<!-- ============================ PAGE 3 — ANNEX A ============================ -->
+<div class="page">
+  <div class="kicker">Annex A</div>
+  <h1 style="font-size:17pt">Configuration reference</h1>
+  <p class="sub">All settings live in <span style="font-family:monospace">.env</span> on the server (<span style="font-family:monospace">/opt/trading-agent</span>).
+  Changes apply after <span style="font-family:monospace">docker compose up -d --force-recreate trader</span>.</p>
+  <div class="rule"></div>
+
+  <h3>Core &amp; broker</h3>
+  <table>
+    <tr><th style="width:34%">Key</th><th style="width:14%">Current</th><th>What it does</th></tr>
+    <tr><td class="k">TRADING_ENV</td><td><span class="tag on">paper</span></td><td>research / paper / live. Stays paper until the system earns otherwise.</td></tr>
+    <tr><td class="k">ALLOW_LIVE_TRADING</td><td><span class="tag off">false</span></td><td>Second key of the live-trading double lock. Both must be set for real money.</td></tr>
+    <tr><td class="k">IBKR_PORT</td><td>4002</td><td>4002 = paper gateway, 4001 = live. The paper runner refuses to start on 4001.</td></tr>
+    <tr><td class="k">UNIVERSE / STRATEGY</td><td>sp500 / top-8</td><td>What the rules-based paper trader trades and how.</td></tr>
+    <tr><td class="k">TELEGRAM_BOT_TOKEN / CHAT_ID</td><td>set</td><td>Where every digest, alert and command lives.</td></tr>
+    <tr><td class="k">DASHBOARD_PASS</td><td>set</td><td>Dashboard login (port 8787). Refuses to serve without a password.</td></tr>
+  </table>
+
+  <h3>Agents &amp; committee</h3>
+  <table>
+    <tr><th style="width:34%">Key</th><th style="width:14%">Current</th><th>What it does</th></tr>
+    <tr><td class="k">AGENTS_ENABLED</td><td><span class="tag on">true</span></td><td>Master switch for the entire agent layer.</td></tr>
+    <tr><td class="k">ANTHROPIC_API_KEY</td><td>set</td><td>Pays for the agents' thinking. No credit = silent committee (HTTP 400).</td></tr>
+    <tr><td class="k">AGENTS_MODEL</td><td>default</td><td>Empty = claude-sonnet-4-6. Set a haiku-class model to cut costs ~5×.</td></tr>
+  </table>
+
+  <h3>Agent PM (simulated sleeve)</h3>
+  <table>
+    <tr><th style="width:34%">Key</th><th style="width:14%">Current</th><th>What it does</th></tr>
+    <tr><td class="k">AGENT_PM_START_EQUITY</td><td>1,000,000</td><td>Virtual starting capital. Change requires deleting state/agent_pm/ to restart the experiment.</td></tr>
+    <tr><td class="k">AGENT_PM_STOCK_UNIVERSE</td><td>sp500+ndx+r1000</td><td>'+'-joined universes the PM may pick stocks from. Empty = ETFs only.</td></tr>
+    <tr><td class="k">MAX_WEIGHT_PER_NAME <span class="small">(code)</span></td><td>25%</td><td>Cap per ETF position.</td></tr>
+    <tr><td class="k">MAX_WEIGHT_PER_STOCK <span class="small">(code)</span></td><td>10%</td><td>Cap per single stock — idiosyncratic risk is tighter.</td></tr>
+    <tr><td class="k">MAX_CLUSTER <span class="small">(code)</span></td><td>40%</td><td>Cap per correlated cluster (semis + mega-tech = one cluster). Excess goes to cash, never redistributed.</td></tr>
+  </table>
+
+  <h3>Protection — guards &amp; ratchet</h3>
+  <table>
+    <tr><th style="width:34%">Key</th><th style="width:14%">Current</th><th>What it does</th></tr>
+    <tr><td class="k">GUARDS_ENABLED</td><td><span class="tag on">true</span></td><td>Trailing stops on the real paper book. Exits auto-submit via the audited command pipeline + Telegram note.</td></tr>
+    <tr><td class="k">GUARD_ATR_MULT</td><td>3.0</td><td>Stop distance = 3× the stock's average daily move. Bigger = more room, fewer shake-outs.</td></tr>
+    <tr><td class="k">GUARD_TRAIL_MIN_PCT</td><td>8</td><td>Anti-squeeze floor — a stop is never tighter than 8% from the peak.</td></tr>
+    <tr><td class="k">GUARD_TRAIL_MAX_PCT</td><td>20</td><td>Disaster cap — never wider than 20%, however volatile the name.</td></tr>
+    <tr><td class="k">GUARD_TP_PCT</td><td><span class="tag off">off</span></td><td>Optional static take-profit. Left off deliberately: it is the setting that sells NVDA at +20% before the +100%.</td></tr>
+    <tr><td class="k">GUARD_LOCK_ARM_PCT</td><td>20</td><td>Profit ratchet arms once equity is +20% from baseline.</td></tr>
+    <tr><td class="k">GUARD_LOCK_GIVEBACK_PCT</td><td>40</td><td>Loud warning after giving back 40% of the peak gain.</td></tr>
+  </table>
+
+  <h3>Sentinel tripwires <span class="small">(constants in code — sentinel.py)</span></h3>
+  <table>
+    <tr><th style="width:34%">Constant</th><th style="width:14%">Value</th><th>What it does</th></tr>
+    <tr><td class="k">SPY_TRIGGER_PCT</td><td>−1.5%</td><td>Index drop that wakes the sentinel.</td></tr>
+    <tr><td class="k">VIX_TRIGGER_RATIO</td><td>+20%</td><td>Fear-gauge spike vs yesterday's close.</td></tr>
+    <tr><td class="k">HOLDING_TRIGGER_PCT</td><td>−5.0%</td><td>Single-position day-drop trigger (real book and sim).</td></tr>
+    <tr><td class="k">DEBOUNCE_HOURS</td><td>2</td><td>One escalation per shock, not sixteen.</td></tr>
+  </table>
+
+  <div class="foot"><span>Trading Agent · Annex A — Configuration</span><span>Page 3 of 4</span></div>
+</div>
+
+<!-- ============================ PAGE 4 — ANNEX B ============================ -->
+<div class="page">
+  <div class="kicker">Annex B</div>
+  <h1 style="font-size:17pt">Schedules, commands &amp; operations</h1>
+  <div class="rule"></div>
+
+  <div class="cols2">
+    <div>
+      <h3>The automatic week (UTC, weekdays)</h3>
+      <table>
+        <tr><th>When</th><th>Job</th><th>Cost</th></tr>
+        <tr><td>11:00</td><td>Economy collector — 16 FRED series (CPI, claims, HY spreads, Fed/ECB/BoJ rates)</td><td>free</td></tr>
+        <tr><td>13:30–20:00 /15min</td><td>Sentinel tripwires + trailing-stop guards</td><td>free*</td></tr>
+        <tr><td>13:40</td><td>News + sector momentum (incl. capital-flows queries)</td><td>free</td></tr>
+        <tr><td>14:00</td><td><b>Committee debate</b> → Telegram digest</td><td>~$0.10</td></tr>
+        <tr><td>Mon 14:30</td><td><b>Agent PM rebalance</b> (simulated)</td><td>~$0.05</td></tr>
+        <tr><td>21:05 Fri</td><td>Paper trader rebalance (real orders, paper account)</td><td>free</td></tr>
+        <tr><td>21:15</td><td>PM daily mark-to-market vs SPY</td><td>free</td></tr>
+        <tr><td>22:30</td><td>Prediction grading → agent calibration</td><td>free</td></tr>
+        <tr><td>Fri 22:45</td><td><b>Historian</b> — weekly lesson distillation</td><td>~$0.03</td></tr>
+      </table>
+      <p class="small">*LLM only when a wire trips (~$0.02). Typical month: <b>$3–6 total</b>.</p>
+
+      <h3 style="margin-top:10pt">Reading the dashboard</h3>
+      <ul class="tight small">
+        <li><b>Portfolio</b> — equity, Strategy Race (paper vs agent PM vs SPY, rebased to 100), posture history, sector momentum, headlines, schedule, system health.</li>
+        <li><b>Macro</b> — yield curve, VIX structure, breadth, credit; each card carries a plain-language interpretation, color-coded.</li>
+        <li><b>Economy</b> — inflation vs policy rate, US/ECB/Japan rates, housing, labor, credit &amp; liquidity, consumer.</li>
+        <li><b>Memory</b> — agent calibration, source trust, the lesson book.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Telegram commands</h3>
+      <table>
+        <tr><th>Command</th><th>Does</th></tr>
+        <tr><td class="k">/committee</td><td>Fresh debate now (news refreshed first)</td></tr>
+        <tr><td class="k">/detail</td><td>Full transcript of the last debate</td></tr>
+        <tr><td class="k">/pm · /pm run</td><td>Sim book + performance · rebalance now</td></tr>
+        <tr><td class="k">/memory</td><td>Calibration, trust, top lessons</td></tr>
+        <tr><td class="k">/hold SYM</td><td>Pin a position — guards &amp; cycles won't touch it</td></tr>
+        <tr><td class="k">/mode defense → /confirm</td><td>Shift the rebalance posture defensively</td></tr>
+        <tr><td class="k">/halt · /resume</td><td>Stop / restart all trading</td></tr>
+        <tr><td class="k">/flatten</td><td>Close every open position</td></tr>
+      </table>
+
+      <h3 style="margin-top:10pt">Deploying a change</h3>
+      <div class="box" style="font-family:Menlo,Consolas,monospace; font-size:8.3pt; line-height:1.7">
+        <span class="small" style="font-family:inherit"># Mac — test &amp; ship</span><br>
+        make fmt &amp;&amp; make lint &amp;&amp; uv run pytest -q \<br>&nbsp;&nbsp;&amp;&amp; git add -A &amp;&amp; git commit -m "…" &amp;&amp; git push<br>
+        <span class="small" style="font-family:inherit"># VPS — deploy</span><br>
+        ssh trading-vps<br>
+        cd /opt/trading-agent &amp;&amp; git pull \<br>&nbsp;&nbsp;&amp;&amp; docker compose build trader \<br>&nbsp;&nbsp;&amp;&amp; docker compose up -d --force-recreate
+      </div>
+
+      <div class="box warn" style="margin-top:8pt">
+        <h3>The road to "pro"</h3>
+        <p class="small"><b>Now → mid-July:</b> observe. Judge the agent PM on the Strategy Race: alpha vs SPY, max drawdown, rationale quality.<br>
+        <b>If it earns it:</b> wire the PM to emit signals through the real risk manager as a small (~20%) paper sleeve.<br>
+        <b>Only after ≥30 clean paper days:</b> discuss live, sized down, double-locked.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot"><span>Trading Agent · Annex B — Operations</span><span>Page 4 of 4</span></div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Watchlist — names you want charted on the dashboard's Holdings & Watchlist
+# card alongside actual positions. Hand-curated; edit freely, takes effect on
+# the next dashboard refresh (config/ is bind-mounted, no rebuild needed).
+watchlist:
+  - NVDA
+  - GOOG
+  - GEV
+  - EME
+  - CCJ
+  - LLY
+  - WMT
+  - NEE
+  - AVAV
+  # quantum computing — standing theme (operator directive)
+  - IONQ
+  - RGTI
+  - QBTS
+  # quantum supply chain / enablers — test, vision, cryo-probe collaborators
+  - TER     # Teradyne — test systems, quantum/robotics adjacency
+  - CGNX    # Cognex — machine vision in the advanced-manufacturing chain
+  - FORM    # FormFactor — cryogenic probe systems used by quantum labs

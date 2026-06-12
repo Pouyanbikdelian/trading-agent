@@ -90,6 +90,67 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     except Exception:
         out["market_watch"] = {}
 
+    # Holdings + watchlist: 6 months of closes per symbol, normalized
+    # client-side. Held names from the snapshot; extras from
+    # config/watchlist.yaml (cache-served via yfinance fallback).
+    try:
+        from trading.runtime.portfolio_stats import _read_close
+
+        held = [p["symbol"] for p in out.get("context", {}).get("positions", [])]
+        wl: list[str] = []
+        try:
+            import yaml as _yaml
+
+            from trading.core.config import PROJECT_ROOT
+
+            wfile = PROJECT_ROOT / "config" / "watchlist.yaml"
+            if wfile.exists():
+                wl = [
+                    str(s).upper()
+                    for s in (_yaml.safe_load(wfile.read_text()) or {}).get("watchlist", [])
+                ]
+        except Exception:
+            wl = []
+        symbols = list(dict.fromkeys([*held, *wl]))[:24]
+        series: dict[str, list[dict[str, Any]]] = {}
+        missing: list[str] = []
+        for sym in symbols:
+            s = _read_close(data_dir, sym)
+            if s is not None and len(s) > 20:
+                tail = s.iloc[-126:]
+                series[sym] = [
+                    {"t": str(ix)[:10], "v": round(float(v), 4)} for ix, v in tail.items()
+                ]
+            else:
+                missing.append(sym)
+        if missing:
+            try:
+                import yfinance as yf
+
+                raw = yf.download(
+                    " ".join(missing),
+                    period="6mo",
+                    auto_adjust=True,
+                    progress=False,
+                    group_by="ticker",
+                    threads=False,
+                )
+                for sym in missing:
+                    try:
+                        s = raw[sym]["Close"].dropna()
+                        if len(s) > 20:
+                            series[sym] = [
+                                {"t": str(ix)[:10], "v": round(float(v), 4)} for ix, v in s.items()
+                            ]
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        out["tickers"] = {"held": held, "watchlist": wl, "series": series}
+    except Exception as e:
+        logger.bind(component="dashboard").warning(f"tickers failed: {e}")
+        out["tickers"] = {}
+
     # Economy (FRED) — full trimmed history for the Economy tab.
     try:
         ec = state_dir / "econ_watch.json"
@@ -246,6 +307,9 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
    <button data-r="6m">6M</button><button data-r="ytd">YTD</button>
    <button data-r="1y" class="on">1Y</button><button data-r="all">All</button>
   </div><canvas id="eq" height="84"></canvas></div>
+ <div class="card big"><h2>Holdings & watchlist · 6M, normalized to 100
+  <span class="muted" style="text-transform:none;letter-spacing:0">— solid = held, dashed = watchlist; click legend to toggle</span></h2>
+  <div class="chartbox" style="height:min(50vh,420px)"><canvas id="tick"></canvas></div></div>
  <div class="card big"><h2>Strategy race · normalized to 100
   <span class="muted" style="text-transform:none;letter-spacing:0">— click legend entries to toggle series</span></h2>
   <div id="raceEmpty" class="muted" style="display:none;padding:18px 0"></div>
@@ -271,6 +335,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 
 <div class="tab" id="tab-economy"><div class="grid">
  <div class="card"><h2>Inflation vs policy</h2><div id="ecInfT"></div><div class="chartbox"><canvas id="ecInf"></canvas></div></div>
+ <div class="card"><h2>Inflation complex · the five measures</h2><div id="ecIcxT"></div><div class="chartbox"><canvas id="ecIcx"></canvas></div></div>
  <div class="card"><h2>Policy rates · US / ECB / Japan</h2><div id="ecPolT"></div><div class="chartbox"><canvas id="ecPol"></canvas></div></div>
  <div class="card"><h2>Housing</h2><div id="ecHouT"></div><div class="chartbox"><canvas id="ecHou"></canvas></div></div>
  <div class="card"><h2>Labor</h2><div id="ecLabT"></div><div class="chartbox"><canvas id="ecLab"></canvas></div></div>
@@ -391,6 +456,22 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
     <div style="margin:6px 0">${takes}</div><div>${r.proposal||''}</div>
     <div class="muted" style="margin-top:6px">watching: ${r.watch||'–'}</div>`;
  } else document.getElementById('committee').innerHTML='<span class="muted">no committee run yet — weekdays 14:00 UTC</span>';
+
+ // Holdings & watchlist: normalized multi-line, held solid / watch dashed.
+ const tk=d.tickers||{};const tser=tk.series||{};
+ const tsyms=Object.keys(tser);
+ if(tsyms.length){
+  const palette=['#3fcf8e','#58a6ff','#8b7cf6','#e8a54b','#f0556d','#2dd4bf','#f472b6',
+   '#a3e635','#fb923c','#94a3b8','#facc15','#38bdf8','#c084fc','#4ade80','#f87171','#818cf8'];
+  const tdates=[...new Set(tsyms.flatMap(s=>tser[s].map(p=>p.t)))].sort();
+  const sets=tsyms.map((sym,i)=>{
+   const m=Object.fromEntries(tser[sym].map(p=>[p.t,p.v]));
+   const base=tser[sym][0].v;
+   return {label:sym,data:tdates.map(dt=>m[dt]!=null?+(100*m[dt]/base).toFixed(2):null),
+    borderColor:palette[i%palette.length],spanGaps:true,
+    borderDash:(tk.held||[]).includes(sym)?[]:[5,4]};});
+  line('tick',tdates.map(t=>t.slice(5)),sets);
+ }
 
  // Posture history: dissent line, dots colored by posture.
  const ch=d.committee_history||[];
@@ -548,6 +629,7 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
     data:dates.map(dt=>m[dt]??null),borderColor:x.color,spanGaps:true,yAxisID:x.ax||'y'};}));
  };
  ecChart('ecInf','ecInfT',[['cpi_yoy','#f0556d'],['core_cpi_yoy','#e8a54b'],['breakeven_10y','#58a6ff'],['fed_funds','#8b7cf6']]);
+ ecChart('ecIcx','ecIcxT',[['cpi_yoy','#f0556d'],['core_cpi_yoy','#e8a54b'],['pce_yoy','#3fcf8e'],['core_pce_yoy','#58a6ff'],['ppi_yoy','#7e8b99']]);
  ecChart('ecPol','ecPolT',[['fed_funds','#8b7cf6'],['ecb_rate','#58a6ff'],['boj_rate','#f0556d']]);
  ecChart('ecHou','ecHouT',[['mortgage_30y','#58a6ff'],['case_shiller_yoy','#3fcf8e'],['housing_starts','#7e8b99','y1']]);
  ecChart('ecLab','ecLabT',[['unemployment','#f0556d'],['claims','#58a6ff','y1']]);

@@ -441,6 +441,15 @@ class Runner:
                     id="historian",
                     replace_existing=True,
                 )
+            # Ops watchdog: hourly infra health (disk, memory, data
+            # freshness, halt state). No LLM. Alerts to the ops Telegram
+            # channel (OPS_TELEGRAM_*) or main channel; silent when healthy.
+            self._scheduler.add_job(
+                self._run_ops_watch_async,
+                CronTrigger(minute=7, timezone="UTC"),
+                id="ops_watch",
+                replace_existing=True,
+            )
             # Memory grader: nightly, grade due predictions against
             # cached prices and journal the day. Cheap; advisory infra.
             self._scheduler.add_job(
@@ -1046,6 +1055,15 @@ class Runner:
                 logger.bind(component="agent_pm").warning(f"mark failed: {res.get('reason')}")
         except Exception:
             logger.bind(component="agent_pm").exception("agent PM mark failed")
+
+    async def _run_ops_watch_async(self) -> None:
+        """Hourly infra health check — silence means healthy."""
+        try:
+            from trading.runtime.ops_watch import run_ops_watch
+
+            await asyncio.to_thread(run_ops_watch, settings.state_dir)
+        except Exception:
+            logger.bind(component="ops_watch").exception("ops watch failed")
 
     async def _run_guards_async(self) -> None:
         """Trailing-stop / ratchet pass. Exits go through the command

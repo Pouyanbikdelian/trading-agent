@@ -25,7 +25,9 @@ from trading.core.logging import logger
 
 STATE_FILENAME = "econ_watch.json"
 TIMEOUT_S = 12.0  # fail fast; these series move monthly, a retry tomorrow is fine
-_START = "2019-01-01"  # ~6y of history is plenty for the charts
+# Full regime context: dot-com, 2008, COVID, the 2021-23 inflation episode.
+# Monthly resolution keeps even 26 years to ~320 points per series.
+_START = "2000-01-01"
 _FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 # FRED/Cloudflare deprioritizes anonymous clients; identify ourselves.
 _HEADERS = {"User-Agent": "trading-agent/0.1 (econ watch; contact: podibiki@gmail.com)"}
@@ -36,6 +38,10 @@ _HEADERS = {"User-Agent": "trading-agent/0.1 (econ watch; contact: podibiki@gmai
 SERIES: dict[str, tuple[str, str, str, str]] = {
     "cpi_yoy": ("CPIAUCSL", "CPI", "yoy", "%"),
     "core_cpi_yoy": ("CPILFESL", "Core CPI", "yoy", "%"),
+    # The Fed's actual target is core PCE; PPI leads consumer prices.
+    "pce_yoy": ("PCEPI", "PCE", "yoy", "%"),
+    "core_pce_yoy": ("PCEPILFE", "Core PCE", "yoy", "%"),
+    "ppi_yoy": ("PPIACO", "PPI (all commodities)", "yoy", "%"),
     "breakeven_10y": ("T10YIE", "10y breakeven", "level", "%"),
     "mortgage_30y": ("MORTGAGE30US", "30y mortgage", "level", "%"),
     "housing_starts": ("HOUST", "Housing starts", "k", "k"),
@@ -97,7 +103,7 @@ def fetch_series(series_id: str, how: str, client: Any = None) -> list[dict[str,
     import httpx
 
     # YoY needs 12 months of runway before _START — one wider fetch beats two.
-    start = "2018-01-01" if how == "yoy" else _START
+    start = "1999-01-01" if how == "yoy" else _START
     getter = client or httpx
     last_err: Exception | None = None
     for _attempt in range(2):  # FRED is occasionally slow; one retry
@@ -111,7 +117,7 @@ def fetch_series(series_id: str, how: str, client: Any = None) -> list[dict[str,
             )
             resp.raise_for_status()
             pts = _transform(_parse_csv(resp.text), how)
-            return _monthly([p for p in pts if str(p["t"]) >= _START])[-90:]
+            return _monthly([p for p in pts if str(p["t"]) >= _START])[-320:]
         except Exception as e:
             last_err = e
     raise last_err  # type: ignore[misc]

@@ -65,19 +65,53 @@ def compute_breadth(data_dir: Path, max_names: int = 600) -> dict[str, float | N
 
 
 def compute_ratios(data_dir: Path) -> dict[str, float | None]:
-    """Risk-appetite ratios from the ETF cache, normalized to a 1y base
-    of 100 so the dashboard lines are comparable."""
+    """Risk-appetite ratios normalized to a 1y base of 100.
+
+    Reads the parquet cache first; any ETF the cache doesn't carry
+    (HYG/DBC etc. aren't in the trading universes) falls back to one
+    batched yfinance fetch — otherwise this card sits empty forever."""
     from trading.runtime.portfolio_stats import _read_close
 
-    out: dict[str, float | None] = {}
     pairs = {
         "spy_tlt": ("SPY", "TLT"),
         "qqq_spy": ("QQQ", "SPY"),
         "gld_dbc": ("GLD", "DBC"),
         "hyg_ief": ("HYG", "IEF"),
     }
+    tickers = sorted({t for pair in pairs.values() for t in pair})
+    closes: dict[str, Any] = {}
+    missing: list[str] = []
+    for t in tickers:
+        s = _read_close(data_dir, t)
+        if s is not None and len(s) >= 260:
+            closes[t] = s
+        else:
+            missing.append(t)
+    if missing:
+        try:
+            import yfinance as yf
+
+            raw = yf.download(
+                " ".join(missing),
+                period="14mo",
+                auto_adjust=True,
+                progress=False,
+                group_by="ticker",
+                threads=False,
+            )
+            for t in missing:
+                try:
+                    s = raw[t]["Close"].dropna()
+                    if len(s) >= 260:
+                        closes[t] = s
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.bind(component="market_watch").info(f"ratio ETF fallback failed: {e}")
+
+    out: dict[str, float | None] = {}
     for name, (a, b) in pairs.items():
-        sa, sb = _read_close(data_dir, a), _read_close(data_dir, b)
+        sa, sb = closes.get(a), closes.get(b)
         if sa is None or sb is None:
             out[name] = None
             continue
