@@ -47,6 +47,11 @@ SERIES: dict[str, tuple[str, str, str, str]] = {
     "fed_bs": ("WALCL", "Fed balance sheet", "tn", "$tn"),
     "retail_yoy": ("RSAFS", "Retail sales", "yoy", "%"),
     "sentiment": ("UMCSENT", "UMich sentiment", "level", "idx"),
+    # Policy rates: the Fed vs CPI gap is the classic "how restrictive"
+    # view; US/ECB/Japan divergence drives FX and carry.
+    "fed_funds": ("FEDFUNDS", "Fed funds", "level", "%"),
+    "ecb_rate": ("ECBDFR", "ECB deposit rate", "level", "%"),
+    "boj_rate": ("IRSTCI01JPM156N", "BoJ call rate", "level", "%"),
 }
 
 

@@ -267,7 +267,8 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 </div></div>
 
 <div class="tab" id="tab-economy"><div class="grid">
- <div class="card"><h2>Inflation</h2><div id="ecInfT"></div><div class="chartbox"><canvas id="ecInf"></canvas></div></div>
+ <div class="card"><h2>Inflation vs policy</h2><div id="ecInfT"></div><div class="chartbox"><canvas id="ecInf"></canvas></div></div>
+ <div class="card"><h2>Policy rates · US / ECB / Japan</h2><div id="ecPolT"></div><div class="chartbox"><canvas id="ecPol"></canvas></div></div>
  <div class="card"><h2>Housing</h2><div id="ecHouT"></div><div class="chartbox"><canvas id="ecHou"></canvas></div></div>
  <div class="card"><h2>Labor</h2><div id="ecLabT"></div><div class="chartbox"><canvas id="ecLab"></canvas></div></div>
  <div class="card"><h2>Credit & liquidity</h2><div id="ecCrT"></div><div class="chartbox"><canvas id="ecCr"></canvas></div></div>
@@ -501,7 +502,8 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    return {label:x.s.label+(x.s.unit&&x.s.unit!=='%'?' ('+x.s.unit+')':''),
     data:dates.map(dt=>m[dt]??null),borderColor:x.color,spanGaps:true,yAxisID:x.ax||'y'};}));
  };
- ecChart('ecInf','ecInfT',[['cpi_yoy','#f0556d'],['core_cpi_yoy','#e8a54b'],['breakeven_10y','#58a6ff']]);
+ ecChart('ecInf','ecInfT',[['cpi_yoy','#f0556d'],['core_cpi_yoy','#e8a54b'],['breakeven_10y','#58a6ff'],['fed_funds','#8b7cf6']]);
+ ecChart('ecPol','ecPolT',[['fed_funds','#8b7cf6'],['ecb_rate','#58a6ff'],['boj_rate','#f0556d']]);
  ecChart('ecHou','ecHouT',[['mortgage_30y','#58a6ff'],['case_shiller_yoy','#3fcf8e'],['housing_starts','#7e8b99','y1']]);
  ecChart('ecLab','ecLabT',[['unemployment','#f0556d'],['claims','#58a6ff','y1']]);
  ecChart('ecCr','ecCrT',[['hy_oas','#f0556d'],['curve_2s10s','#3fcf8e'],['fed_bs','#7e8b99','y1']]);
