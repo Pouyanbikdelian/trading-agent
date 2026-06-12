@@ -24,7 +24,7 @@ from typing import Any
 from trading.core.logging import logger
 
 STATE_FILENAME = "econ_watch.json"
-TIMEOUT_S = 30.0
+TIMEOUT_S = 12.0  # fail fast; these series move monthly, a retry tomorrow is fine
 _START = "2019-01-01"  # ~6y of history is plenty for the charts
 _FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 # FRED/Cloudflare deprioritizes anonymous clients; identify ourselves.
@@ -120,10 +120,20 @@ def fetch_series(series_id: str, how: str, client: Any = None) -> list[dict[str,
 def collect(state_dir: Path) -> dict[str, Any]:
     """One pass over all series; atomic write; per-series degradation.
     One keep-alive connection for the whole pass — 13 cold TLS handshakes
-    to a slow CDN is how the first version timed out."""
+    to a slow CDN is how the first version timed out.
+
+    Merge semantics: a series that fails THIS pass keeps its data from the
+    LAST successful pass. FRED is flaky from some hosts; stale-by-a-day
+    beats gone."""
     import httpx
 
+    # Start from the previous collection so failures never erase data.
     series: dict[str, Any] = {}
+    try:
+        prev = json.loads((Path(state_dir) / STATE_FILENAME).read_text())
+        series = {k: v for k, v in prev.get("series", {}).items() if k in SERIES}
+    except Exception:
+        pass
     with httpx.Client(follow_redirects=True, timeout=TIMEOUT_S) as client:
         for key, (sid, label, how, unit) in SERIES.items():
             try:

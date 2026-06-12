@@ -226,6 +226,9 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  .dot{display:inline-block;width:8px;height:8px;border-radius:99px;margin-right:6px}
  .ev{display:flex;justify-content:space-between;margin:4px 0;font-size:12.5px}
  .ok{color:var(--up)}.stale{color:var(--warn)}
+ .interp{margin-top:10px;font-size:12.5px;line-height:1.45;color:var(--mut);
+  border-left:3px solid var(--edge);padding:2px 0 2px 10px}
+ .interp.ok{border-color:var(--up)}.interp.warn{border-color:var(--warn)}.interp.neg{border-color:var(--dn)}
 </style></head><body>
 <h1>📈 Trading Agent <span class="muted" id="asof"></span></h1>
 <div class="tabs">
@@ -258,12 +261,12 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 </div></div>
 
 <div class="tab" id="tab-macro"><div class="grid">
- <div class="card"><h2>Yield curve · 10y − 3m</h2><div id="curveTile"></div><div class="mbox"><canvas id="curveCh"></canvas></div></div>
- <div class="card"><h2>VIX term structure</h2><div id="vixTile"></div><div class="mbox"><canvas id="vixCh"></canvas></div></div>
- <div class="card"><h2>Breadth · % above SMA</h2><div id="brTile"></div><div class="mbox"><canvas id="brCh"></canvas></div></div>
- <div class="card"><h2>Credit & risk appetite (1y base = 100)</h2><div id="ratioTile"></div><div class="mbox"><canvas id="ratioCh"></canvas></div></div>
- <div class="card"><h2>Macro dial (z-scores)</h2><div id="macro"></div></div>
- <div class="card"><h2>Vol surface (SPY options)</h2><div id="vol"></div></div>
+ <div class="card"><h2>Yield curve · 10y − 3m</h2><div id="curveTile"></div><div class="mbox"><canvas id="curveCh"></canvas></div><div class="interp" id="curveInt"></div></div>
+ <div class="card"><h2>VIX term structure</h2><div id="vixTile"></div><div class="mbox"><canvas id="vixCh"></canvas></div><div class="interp" id="vixInt"></div></div>
+ <div class="card"><h2>Breadth · % above SMA</h2><div id="brTile"></div><div class="mbox"><canvas id="brCh"></canvas></div><div class="interp" id="brInt"></div></div>
+ <div class="card"><h2>Credit & risk appetite (1y base = 100)</h2><div id="ratioTile"></div><div class="mbox"><canvas id="ratioCh"></canvas></div><div class="interp" id="ratioInt"></div></div>
+ <div class="card"><h2>Macro dial (z-scores)</h2><div id="macro"></div><div class="interp" id="macroInt"></div></div>
+ <div class="card"><h2>Vol surface (SPY options)</h2><div id="vol"></div><div class="interp" id="volInt"></div></div>
 </div></div>
 
 <div class="tab" id="tab-economy"><div class="grid">
@@ -473,6 +476,48 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
                     {data:mh.map(h=>h.qqq_spy),borderColor:'#5ab0f6',label:'QQQ/SPY'}]);
  } else {
   document.getElementById('curveTile').innerHTML='<span class="muted">collector runs daily after the close — first reading tonight</span>';
+ }
+ // Rule-based interpretations: what each panel MEANS, not just its number.
+ const interp=(id,cls,txt)=>{const e=document.getElementById(id);if(e){e.className='interp '+cls;e.textContent=txt;}};
+ if(mh.length){
+  const cur=last.curve_10y3m,vr=last.vix_ratio,vx=last.vix;
+  if(cur!=null)interp('curveInt',cur<0?'neg':cur<0.3?'warn':'ok',
+   cur<0?'INVERTED — short rates above long. Has preceded nearly every US recession by 6–18 months. Risk-off bias.'
+   :cur<0.3?'Nearly flat — late-cycle shape. The bond market is unsure; watch for inversion.'
+   :'Positively sloped — no recession signal from the bond market. Normal regime.');
+  if(vr!=null)interp('vixInt',vr>1?'neg':vx>25?'warn':'ok',
+   vr>1?'Backwardation — near-term fear exceeds 3-month. Stress regime: markets pay up for immediate protection.'
+   :vx>25?'Elevated VIX in contango — nervous but orderly. Hedges getting expensive.'
+   :'Contango with VIX under 20 — calm regime. Insurance is cheap; complacency is the only risk.');
+  const b50=last.pct_above_50,b200=last.pct_above_200;
+  if(b50!=null)interp('brInt',b50<0.4?'neg':b50>0.8?'warn':'ok',
+   b50<0.4?'Narrow market — most stocks below their 50d average. Index gains carried by few names; rallies fragile.'
+   :b50>0.8?'Very broad participation — strong but stretched; often precedes consolidation.'
+   :'Healthy participation — a majority of stocks above their averages supports the trend.');
+  const hy=last.hyg_ief;
+  if(hy!=null)interp('ratioInt',hy<97?'neg':hy<100?'warn':'ok',
+   hy<97?'Credit underperforming — junk bonds lagging safe bonds. Credit usually smells trouble before equities do.'
+   :hy<100?'Credit risk appetite softening — not stress, but leaning cautious.'
+   :'Credit risk appetite intact — junk holding up vs treasuries; no stress signal from the bond market.');
+ }
+ const mm=ctx.macro_dial||{};
+ if(mm.composite!=null){
+  const comps=['rates_shock_z','dollar_z','energy_z','btc_confirm_z']
+   .filter(k=>mm[k]!=null).map(k=>({k:k.replace('_z',''),v:+mm[k]}));
+  const worst=comps.sort((a,b)=>a.v-b.v)[0];
+  const c=+mm.composite;
+  interp('macroInt',c<=-1?'neg':c<=-0.25?'warn':'ok',
+   (c<=-1?'Strong macro headwind. ':c<=-0.25?'Mild macro headwind — neutral-to-cautious. ':'Macro broadly supportive. ')
+   +(worst&&worst.v<-1?`Loudest warning: ${worst.k} at ${worst.v.toFixed(1)}σ — a >1σ stretch from normal.`:'No component is at an extreme.'));
+ }
+ const vv=ctx.vol_surface||{};
+ if(vv.atm_iv!=null){
+  const skewHigh=(vv.put_skew||0)>0.06,ivHigh=vv.atm_iv>0.25,pcHigh=(vv.pc_oi_ratio||0)>1.3;
+  interp('volInt',ivHigh?'neg':(skewHigh||pcHigh)?'warn':'ok',
+   ivHigh?'Options pricing real fear — implied vol elevated across the board.'
+   :skewHigh?'Heavy downside skew — big players paying up for crash protection despite calm indices.'
+   :pcHigh?'Put-heavy positioning — the market is hedged; dips may find buyers (hedges get unwound).'
+   :'Orderly options market — modest skew, normal positioning. No one is bracing for impact.');
  }
  const m=ctx.macro_dial||{};
  document.getElementById('macro').innerHTML=['composite','rates_shock_z','dollar_z','energy_z','btc_confirm_z']
