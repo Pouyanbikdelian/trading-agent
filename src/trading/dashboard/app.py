@@ -69,6 +69,7 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
             "history": pm.get("history", []),
             "holdings": pm.get("holdings", {}),
             "cash": pm.get("cash"),
+            "start_equity": pm.get("start_equity"),
             "last_run": json.loads(last_path.read_text()) if last_path.exists() else {},
         }
     except Exception as e:
@@ -110,9 +111,9 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
 
     # Committee posture history — the debate's trajectory over time.
     try:
-        from trading.memory.store import MemoryStore as _MS
+        from trading.memory.store import MemoryStore
 
-        hist = _MS(state_dir / "memory").journal_tail(30, kind="committee")
+        hist = MemoryStore(state_dir / "memory").journal_tail(30, kind="committee")
         out["committee_history"] = [
             {
                 "t": e["ts"].isoformat(),
@@ -336,11 +337,12 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  const apm=d.agent_pm||{};
  if(apm.history&&apm.history.length){
   const h0=apm.history[0],hN=apm.history[apm.history.length-1];
-  const simRet=(+hN.equity/+h0.equity-1);
+  const base=+(apm.start_equity||h0.equity);
+  const simRet=(+hN.equity/base-1);
   const hold=Object.keys(apm.holdings||{}).sort().join(', ')||'all cash';
   const lr=apm.last_run||{};
   document.getElementById('pmline').innerHTML=
-   `🧪 sim started <b>${String(h0.t).slice(0,10)}</b> at <b>$${num(h0.equity)}</b> · now ${num(hN.equity)} `+
+   `🧪 sim started <b>${String(h0.t).slice(0,10)}</b> at <b>$${num(base)}</b> · now ${num(hN.equity)} `+
    `(<span class="${simRet>=0?'pos':'neg'}">${pct(simRet,2)}</span>) · holds: <b>${hold}</b> · cash ${num(apm.cash)}`+
    (lr.rationale?`<br>last rationale: ${String(lr.rationale).slice(0,220)}…`:'');
  } else document.getElementById('pmline').textContent='agent PM has no book yet — /pm run in Telegram starts one';

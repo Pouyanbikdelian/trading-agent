@@ -173,9 +173,11 @@ def _fetch_closes(symbols: list[str]) -> dict[str, float]:
 def _load_portfolio(pm_dir: Path) -> dict[str, Any]:
     path = pm_dir / "portfolio.json"
     try:
-        return json.loads(path.read_text())
+        book = json.loads(path.read_text())
+        book.setdefault("start_equity", START_EQUITY)
+        return book
     except Exception:
-        return {"cash": START_EQUITY, "holdings": {}, "history": []}
+        return {"cash": START_EQUITY, "holdings": {}, "history": [], "start_equity": START_EQUITY}
 
 
 def _save(pm_dir: Path, name: str, payload: dict[str, Any]) -> None:
@@ -223,10 +225,12 @@ def performance(state_dir: Path) -> dict[str, Any]:
         return out
     eq = [float(h["equity"]) for h in hist]
     out["equity"] = eq[-1]
-    # Base on the first recorded mark, not the constant — survives a
-    # START_EQUITY change without corrupting an existing book's stats.
-    out["start_equity"] = eq[0]
-    out["return_pct"] = (eq[-1] / eq[0] - 1.0) * 100
+    # Base on the equity the book opened with (persisted at creation):
+    # eq[0] is unreliable because same-day marks replace the inception
+    # entry, and the constant changes across config edits.
+    base = float(book.get("start_equity") or eq[0])
+    out["start_equity"] = base
+    out["return_pct"] = (eq[-1] / base - 1.0) * 100
     peak, mdd = eq[0], 0.0
     for v in eq:
         peak = max(peak, v)
@@ -327,6 +331,7 @@ def run_agent_pm(
     book = {
         "cash": round(equity - target_value - costs, 2),
         "holdings": new_holdings,
+        "start_equity": float(book.get("start_equity") or START_EQUITY),
         "history": [
             *book.get("history", []),
             {"t": datetime.now(tz=timezone.utc).isoformat(), "equity": round(equity, 2)},
