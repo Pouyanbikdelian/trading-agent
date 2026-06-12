@@ -184,6 +184,54 @@ def _save(pm_dir: Path, name: str, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def mark_to_market(state_dir: Path, *, prices: dict[str, float] | None = None) -> dict[str, Any]:
+    """Daily mark — no LLM, no trades. Appends an equity point (plus the
+    SPY close as benchmark) so the observation period has a real curve,
+    not four Monday dots. Idempotent per day."""
+    pm_dir = Path(state_dir) / "agent_pm"
+    if not (pm_dir / "portfolio.json").exists():
+        return {"ok": False, "reason": "no PM book yet"}
+    book = _load_portfolio(pm_dir)
+    symbols = sorted({*book["holdings"], "SPY"})
+    px = prices if prices is not None else _fetch_closes(symbols)
+    unpriced = [s for s in book["holdings"] if s not in px]
+    if unpriced or "SPY" not in px:
+        return {"ok": False, "reason": f"missing prices: {unpriced or ['SPY']}"}
+    equity = float(book["cash"]) + sum(q * px[s] for s, q in book["holdings"].items())
+    entry = {
+        "t": datetime.now(tz=timezone.utc).isoformat(),
+        "equity": round(equity, 2),
+        "spy": round(px["SPY"], 2),
+    }
+    today = entry["t"][:10]
+    history = [h for h in book.get("history", []) if str(h.get("t", ""))[:10] != today]
+    book["history"] = [*history, entry][-520:]
+    _save(pm_dir, "portfolio.json", book)
+    return {"ok": True, **entry}
+
+
+def performance(state_dir: Path) -> dict[str, Any]:
+    """Since-inception stats from the marked history: PM return, SPY
+    return over the same window, max drawdown. Thin history -> thin dict."""
+    book = _load_portfolio(Path(state_dir) / "agent_pm")
+    hist = book.get("history", [])
+    out: dict[str, Any] = {"points": len(hist)}
+    if not hist:
+        return out
+    eq = [float(h["equity"]) for h in hist]
+    out["equity"] = eq[-1]
+    out["return_pct"] = (eq[-1] / START_EQUITY - 1.0) * 100
+    peak, mdd = eq[0], 0.0
+    for v in eq:
+        peak = max(peak, v)
+        mdd = max(mdd, (peak - v) / peak)
+    out["max_drawdown_pct"] = mdd * 100
+    spy = [float(h["spy"]) for h in hist if h.get("spy")]
+    if len(spy) >= 2:
+        out["spy_return_pct"] = (spy[-1] / spy[0] - 1.0) * 100
+    return out
+
+
 def run_agent_pm(
     context: dict[str, Any],
     mem: MemoryStore,

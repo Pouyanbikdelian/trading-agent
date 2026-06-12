@@ -97,6 +97,23 @@ def test_digest_renders(mem: MemoryStore, tmp_path: Path) -> None:
     assert "Agent PM" in text and "SMH 25%" in text and len(text) < 1500
 
 
+def test_daily_mark_and_performance(mem: MemoryStore, tmp_path: Path) -> None:
+    from trading.agents.pm import mark_to_market, performance
+
+    run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
+    res = mark_to_market(tmp_path, prices={"SMH": 110.0, "SPY": 510.0})
+    assert res["ok"] is True
+    # idempotent per day: a re-mark replaces, not appends
+    n_before = performance(tmp_path)["points"]
+    mark_to_market(tmp_path, prices={"SMH": 111.0, "SPY": 511.0})
+    perf = performance(tmp_path)
+    assert perf["points"] == n_before
+    assert perf["return_pct"] > 0  # SMH 100 -> 111 on a 25% position
+    assert perf["max_drawdown_pct"] >= 0
+    # missing price refuses to guess
+    assert mark_to_market(tmp_path, prices={"SPY": 500.0})["ok"] is False
+
+
 def test_news_load_drops_stale(tmp_path: Path) -> None:
     from trading.runtime.news_watch import load
 

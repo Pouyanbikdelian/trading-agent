@@ -60,6 +60,21 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         out["equity_curve"] = []
         out["equity_today"] = []
 
+    # Agent PM (simulated sleeve): daily-marked equity history + book.
+    try:
+        pm_path = state_dir / "agent_pm" / "portfolio.json"
+        pm = json.loads(pm_path.read_text()) if pm_path.exists() else {}
+        last_path = state_dir / "agent_pm" / "last_run.json"
+        out["agent_pm"] = {
+            "history": pm.get("history", []),
+            "holdings": pm.get("holdings", {}),
+            "cash": pm.get("cash"),
+            "last_run": json.loads(last_path.read_text()) if last_path.exists() else {},
+        }
+    except Exception as e:
+        logger.bind(component="dashboard").warning(f"agent_pm failed: {e}")
+        out["agent_pm"] = {}
+
     # Last committee digest (already persisted for /detail).
     try:
         p = state_dir / "last_committee.json"
@@ -132,6 +147,9 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
    <button data-r="6m">6M</button><button data-r="ytd">YTD</button>
    <button data-r="1y" class="on">1Y</button><button data-r="all">All</button>
   </div><canvas id="eq" height="84"></canvas></div>
+ <div class="card big"><h2>Strategy race · normalized to 100
+  <span class="muted" style="text-transform:none;letter-spacing:0">— click legend entries to toggle series</span></h2>
+  <canvas id="race" height="84"></canvas><div id="pmline" class="muted" style="margin-top:8px"></div></div>
  <div class="card"><h2>Account</h2><div id="account"></div><h2 style="margin-top:12px">Positions</h2><div id="positions"></div></div>
  <div class="card"><h2>Committee (latest)</h2><div id="committee"></div></div>
 </div></div>
@@ -165,15 +183,37 @@ const line=(el,labels,sets)=>new Chart(document.getElementById(el),{type:'line',
   scales:{x:{ticks:{color:'#8b98a5',maxTicksLimit:7}},y:{ticks:{color:'#8b98a5'}}}}});
 fetch('api/summary').then(r=>r.json()).then(d=>{
  document.getElementById('asof').textContent=' · '+new Date(d.generated_at).toLocaleString();
- const daily=d.equity_curve||[],today=d.equity_today||[];let eqChart=null;
+ const daily=d.equity_curve||[],today=d.equity_today||[];let eqChart=null,raceChart=null;
+ const cutFor=(range)=>{
+  const now=new Date();
+  const days={'1w':7,'1m':31,'3m':92,'6m':183,'1y':365}[range];
+  if(days)return new Date(now-days*864e5);
+  if(range==='ytd')return new Date(now.getFullYear(),0,1);
+  return null;};
+ function drawRace(range){
+  const cut=range==='today'?null:cutFor(range);
+  const inWin=p=>!cut||new Date(p.t)>=cut;
+  const pmH=((d.agent_pm||{}).history||[]).map(h=>({t:String(h.t).slice(0,10),v:+h.equity,spy:h.spy?+h.spy:null}));
+  const paper=daily.filter(inWin);
+  const pm=pmH.filter(inWin);
+  const spy=pmH.filter(h=>h.spy!=null).filter(inWin);
+  const dates=[...new Set([...paper.map(p=>p.t),...pm.map(p=>p.t),...spy.map(p=>p.t)])].sort();
+  const mk=(pts,key,label,color)=>{
+   if(pts.length<2)return null;
+   const m={};pts.forEach(p=>m[p.t]=p[key]);  // last same-day point wins
+   const base=pts[0][key];
+   return {label,data:dates.map(dt=>m[dt]!=null?100*m[dt]/base:null),borderColor:color,spanGaps:true};};
+  const sets=[mk(paper,'v','momentum top-k (paper)','#4cc38a'),
+              mk(pm,'v','agent PM (sim)','#b07cf6'),
+              mk(spy,'spy','SPY','#8b98a5')].filter(Boolean);
+  if(raceChart){raceChart.destroy();raceChart=null;}
+  if(sets.length&&dates.length>1)raceChart=line('race',dates,sets);
+ }
  function drawEq(range){
-  let pts;const now=new Date();
+  let pts;
   if(range==='today'){pts=today.map(p=>({t:p.t.slice(11,16),v:p.v}));}
   else{
-   const days={'1w':7,'1m':31,'3m':92,'6m':183,'1y':365}[range];
-   let cut=null;
-   if(days)cut=new Date(now-days*864e5);
-   if(range==='ytd')cut=new Date(now.getFullYear(),0,1);
+   const cut=cutFor(range);
    pts=daily.filter(p=>!cut||new Date(p.t)>=cut).map(p=>({t:p.t,v:p.v}));
   }
   const ret=pts.length>1?(pts[pts.length-1].v/pts[0].v-1):null;
@@ -186,8 +226,16 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  document.querySelectorAll('#ranges button').forEach(b=>b.onclick=(e)=>{
   e.stopPropagation();
   document.querySelectorAll('#ranges button').forEach(x=>x.classList.remove('on'));
-  b.classList.add('on');drawEq(b.dataset.r);});
- drawEq('1y');
+  b.classList.add('on');drawEq(b.dataset.r);drawRace(b.dataset.r);});
+ drawEq('1y');drawRace('1y');
+ const apm=d.agent_pm||{};
+ if(apm.history&&apm.history.length){
+  const hold=Object.keys(apm.holdings||{}).sort().join(', ')||'all cash';
+  const lr=apm.last_run||{};
+  document.getElementById('pmline').innerHTML=
+   `🧪 agent PM holds: <b>${hold}</b> · cash ${num(apm.cash)}`+
+   (lr.rationale?`<br>last rationale: ${String(lr.rationale).slice(0,220)}…`:'');
+ } else document.getElementById('pmline').textContent='agent PM has no book yet — /pm run in Telegram starts one';
  const ctx=d.context||{};const a=ctx.account||{};
  document.getElementById('account').innerHTML=
   `<span class="tile"><b>${num(a.equity)}</b><br><span class="muted">${a.base_currency||''} equity</span></span>`+

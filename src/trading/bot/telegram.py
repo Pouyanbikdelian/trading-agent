@@ -388,18 +388,25 @@ def _cmd_pm(args: list[str]) -> str:
             return f"could not request PM run: `{e}`"
         return "🧪 Agent PM convening — rebalance lands here in ~1 minute."
 
+    from trading.agents.pm import performance
+
     pm_dir = settings.state_dir / "agent_pm"
     try:
         book = _json.loads((pm_dir / "portfolio.json").read_text())
     except Exception:
         return "_no agent-PM book yet — it trades Mondays 14:30 UTC, or `/pm run` to convene now._"
-    hist = book.get("history", [])
-    equity = float(hist[-1]["equity"]) if hist else 0.0
-    ret = equity / 100_000.0 - 1.0
+    perf = performance(settings.state_dir)
     lines = [
-        f"🧪 *Agent PM (simulated)* — equity ${equity:,.0f} ({ret:+.1%} since inception)",
-        f"cash ${float(book.get('cash', 0.0)):,.0f}",
+        f"🧪 *Agent PM (simulated)* — equity ${perf.get('equity', 0.0):,.0f} "
+        f"({perf.get('return_pct', 0.0):+.2f}% since inception)"
     ]
+    if "spy_return_pct" in perf:
+        alpha = perf["return_pct"] - perf["spy_return_pct"]
+        lines.append(
+            f"vs SPY {perf['spy_return_pct']:+.2f}% same window (alpha {alpha:+.2f}pp) "
+            f"· max DD {perf['max_drawdown_pct']:.1f}% · {perf['points']} marks"
+        )
+    lines.append(f"cash ${float(book.get('cash', 0.0)):,.0f}")
     for sym, qty in sorted(book.get("holdings", {}).items()):
         lines.append(f"  {sym}: {qty:g}")
     try:

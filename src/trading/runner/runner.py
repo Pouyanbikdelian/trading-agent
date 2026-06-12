@@ -388,6 +388,15 @@ class Runner:
                     replace_existing=True,
                     max_instances=1,
                 )
+                # Daily PM mark-to-market: weekdays 21:15 UTC, after the
+                # US close. No LLM — one price fetch so the simulated
+                # sleeve has a daily equity curve and SPY benchmark.
+                self._scheduler.add_job(
+                    self._mark_agent_pm_async,
+                    CronTrigger(day_of_week="mon-fri", hour=21, minute=15, timezone="UTC"),
+                    id="agent_pm_mark",
+                    replace_existing=True,
+                )
                 # Historian: Fridays 22:45 UTC, after the 22:30 grading
                 # pass — distills the week into <=2 candidate lessons and
                 # votes on existing ones. One LLM call/week.
@@ -982,6 +991,17 @@ class Runner:
             self.alerts.info(format_pm_digest(result))
         except Exception:
             logger.bind(component="agent_pm").exception("agent PM run failed")
+
+    async def _mark_agent_pm_async(self) -> None:
+        """Daily equity mark for the simulated PM sleeve. Silent on success."""
+        try:
+            from trading.agents.pm import mark_to_market
+
+            res = await asyncio.to_thread(mark_to_market, settings.state_dir)
+            if not res.get("ok") and res.get("reason") != "no PM book yet":
+                logger.bind(component="agent_pm").warning(f"mark failed: {res.get('reason')}")
+        except Exception:
+            logger.bind(component="agent_pm").exception("agent PM mark failed")
 
     async def _run_historian_async(self) -> None:
         """Weekly lesson distillation — see agents/historian.py."""
