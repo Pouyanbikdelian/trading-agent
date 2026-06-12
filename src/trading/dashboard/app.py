@@ -190,7 +190,14 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
  /* Macro + Economy: exactly 3 columns on wide screens so 5-6 cards tile
     without orphan gaps; charts get the extra width. */
- @media(min-width:1200px){#tab-macro .grid,#tab-economy .grid{grid-template-columns:repeat(3,1fr)}}
+ @media(min-width:1200px){#tab-macro .grid{grid-template-columns:repeat(3,1fr)}}
+ /* Economy: one full-width panel per row, fixed-height charts — scan by
+    scrolling, like a macro terminal, not a mosaic of thumbnails. */
+ #tab-economy .grid{grid-template-columns:1fr}
+ .chartbox{position:relative;height:min(46vh,480px);min-height:300px;width:100%}
+ /* Macro charts: fill half the viewport row each so the 3x2 grid uses
+    the whole window instead of leaving a dead bottom half. */
+ .mbox{position:relative;height:calc(46vh - 150px);min-height:200px;width:100%}
  .card{background:linear-gradient(180deg,#131922 0%,var(--card) 100%);border:1px solid var(--edge);
   border-radius:14px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.35)}
  .big{grid-column:1/-1}
@@ -251,20 +258,20 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 </div></div>
 
 <div class="tab" id="tab-macro"><div class="grid">
- <div class="card"><h2>Yield curve · 10y − 3m</h2><div id="curveTile"></div><canvas id="curveCh" height="110"></canvas></div>
- <div class="card"><h2>VIX term structure</h2><div id="vixTile"></div><canvas id="vixCh" height="110"></canvas></div>
- <div class="card"><h2>Breadth · % above SMA</h2><div id="brTile"></div><canvas id="brCh" height="110"></canvas></div>
- <div class="card"><h2>Credit & risk appetite (1y base = 100)</h2><div id="ratioTile"></div><canvas id="ratioCh" height="110"></canvas></div>
+ <div class="card"><h2>Yield curve · 10y − 3m</h2><div id="curveTile"></div><div class="mbox"><canvas id="curveCh"></canvas></div></div>
+ <div class="card"><h2>VIX term structure</h2><div id="vixTile"></div><div class="mbox"><canvas id="vixCh"></canvas></div></div>
+ <div class="card"><h2>Breadth · % above SMA</h2><div id="brTile"></div><div class="mbox"><canvas id="brCh"></canvas></div></div>
+ <div class="card"><h2>Credit & risk appetite (1y base = 100)</h2><div id="ratioTile"></div><div class="mbox"><canvas id="ratioCh"></canvas></div></div>
  <div class="card"><h2>Macro dial (z-scores)</h2><div id="macro"></div></div>
  <div class="card"><h2>Vol surface (SPY options)</h2><div id="vol"></div></div>
 </div></div>
 
 <div class="tab" id="tab-economy"><div class="grid">
- <div class="card"><h2>Inflation</h2><div id="ecInfT"></div><canvas id="ecInf" height="110"></canvas></div>
- <div class="card"><h2>Housing</h2><div id="ecHouT"></div><canvas id="ecHou" height="110"></canvas></div>
- <div class="card"><h2>Labor</h2><div id="ecLabT"></div><canvas id="ecLab" height="110"></canvas></div>
- <div class="card"><h2>Credit & liquidity</h2><div id="ecCrT"></div><canvas id="ecCr" height="110"></canvas></div>
- <div class="card"><h2>Consumer</h2><div id="ecCoT"></div><canvas id="ecCo" height="110"></canvas></div>
+ <div class="card"><h2>Inflation</h2><div id="ecInfT"></div><div class="chartbox"><canvas id="ecInf"></canvas></div></div>
+ <div class="card"><h2>Housing</h2><div id="ecHouT"></div><div class="chartbox"><canvas id="ecHou"></canvas></div></div>
+ <div class="card"><h2>Labor</h2><div id="ecLabT"></div><div class="chartbox"><canvas id="ecLab"></canvas></div></div>
+ <div class="card"><h2>Credit & liquidity</h2><div id="ecCrT"></div><div class="chartbox"><canvas id="ecCr"></canvas></div></div>
+ <div class="card"><h2>Consumer</h2><div id="ecCoT"></div><div class="chartbox"><canvas id="ecCo"></canvas></div></div>
 </div></div>
 
 <div class="tab" id="tab-memory"><div class="grid">
@@ -283,11 +290,13 @@ const pct=(x,d=1)=>x==null?'–':((x>=0?'+':'')+(100*x).toFixed(d)+'%');
 const fx=(x,d=1)=>x==null?'–':Number(x).toFixed(d);
 const num=(x)=>x==null?'–':Number(x).toLocaleString(undefined,{maximumFractionDigits:0});
 const line=(el,labels,sets)=>{
- const scales={x:{ticks:{color:'#8b98a5',maxTicksLimit:7}},y:{ticks:{color:'#8b98a5'}}};
+ const cv=document.getElementById(el);
+ const scales={x:{ticks:{color:'#8b98a5',maxTicksLimit:el.startsWith('ec')?12:7}},y:{ticks:{color:'#8b98a5'}}};
  if(sets.some(s=>s.yAxisID==='y1'))scales.y1={position:'right',ticks:{color:'#8b98a5'},grid:{drawOnChartArea:false}};
- return new Chart(document.getElementById(el),{type:'line',
+ return new Chart(cv,{type:'line',
   data:{labels,datasets:sets.map(s=>({...s,borderWidth:1.6,pointRadius:s.pointRadius??0,tension:.2,fill:false}))},
-  options:{plugins:{legend:{display:sets.some(s=>s.label),labels:{color:'#8b98a5',boxWidth:10}}},scales}});};
+  options:{maintainAspectRatio:!(cv.parentElement.classList.contains('chartbox')||cv.parentElement.classList.contains('mbox')),
+   plugins:{legend:{display:sets.some(s=>s.label),labels:{color:'#8b98a5',boxWidth:10}}},scales}});};
 setTimeout(()=>location.reload(),300e3); // fresh data every 5 minutes
 fetch('api/summary').then(r=>r.json()).then(d=>{
  document.getElementById('asof').textContent=' · '+new Date(d.generated_at).toLocaleString()+' · auto-refreshes';
@@ -479,14 +488,18 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  const ec=(d.econ||{}).series||{};
  const ecChart=(el,tEl,keys)=>{
   const ss=keys.map(([k,color,ax])=>({s:ec[k],color,ax})).filter(x=>x.s&&x.s.points&&x.s.points.length>1);
+  const fmtV=(v,u)=>u==='%'?(+v).toFixed(1)+'%':u==='$tn'?'$'+(+v).toFixed(1)+'tn':
+   u==='k'?Math.round(+v)+'k':(+v).toFixed(1);
   document.getElementById(tEl).innerHTML=ss.map(x=>
-   `<span class="tile"><b>${x.s.latest}${x.s.unit==='%'?'%':''}</b><br>
-    <span class="muted">${x.s.label}${x.s.unit&&x.s.unit!=='%'?' ('+x.s.unit+')':''}</span></span>`).join('')||
+   `<span class="tile"><b>${fmtV(x.s.latest,x.s.unit)}</b><br>
+    <span class="muted">${x.s.label}</span></span>`).join('')||
    '<span class="muted">collector runs weekdays 11:00 UTC — first reading soon</span>';
   if(!ss.length)return;
   const dates=[...new Set(ss.flatMap(x=>x.s.points.map(p=>p.t)))].sort();
-  line(el,dates,ss.map(x=>{const m=Object.fromEntries(x.s.points.map(p=>[p.t,p.v]));
-   return {label:x.s.label,data:dates.map(dt=>m[dt]??null),borderColor:x.color,spanGaps:true,yAxisID:x.ax||'y'};}));
+  const mon=t=>{const[y,m]=t.split('-');return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m-1]+' '+y.slice(2);};
+  line(el,dates.map(mon),ss.map(x=>{const m=Object.fromEntries(x.s.points.map(p=>[p.t,p.v]));
+   return {label:x.s.label+(x.s.unit&&x.s.unit!=='%'?' ('+x.s.unit+')':''),
+    data:dates.map(dt=>m[dt]??null),borderColor:x.color,spanGaps:true,yAxisID:x.ax||'y'};}));
  };
  ecChart('ecInf','ecInfT',[['cpi_yoy','#f0556d'],['core_cpi_yoy','#e8a54b'],['breakeven_10y','#58a6ff']]);
  ecChart('ecHou','ecHouT',[['mortgage_30y','#58a6ff'],['case_shiller_yoy','#3fcf8e'],['housing_starts','#7e8b99','y1']]);

@@ -41,7 +41,7 @@ SERIES: dict[str, tuple[str, str, str, str]] = {
     "housing_starts": ("HOUST", "Housing starts", "k", "k"),
     "case_shiller_yoy": ("CSUSHPINSA", "Case-Shiller", "yoy", "%"),
     "unemployment": ("UNRATE", "Unemployment", "level", "%"),
-    "claims": ("ICSA", "Initial claims", "k", "k"),
+    "claims": ("ICSA", "Initial claims", "div1k", "k"),
     "hy_oas": ("BAMLH0A0HYM2", "HY OAS", "level", "%"),
     "curve_2s10s": ("T10Y2Y", "2s10s curve", "level", "pp"),
     "fed_bs": ("WALCL", "Fed balance sheet", "tn", "$tn"),
@@ -73,8 +73,19 @@ def _transform(rows: list[tuple[str, float]], how: str) -> list[dict[str, float 
             if by_date.get(prior):
                 out.append({"t": t, "v": round((v / by_date[prior] - 1.0) * 100, 2)})
         return out
-    scale = {"k": 1.0, "tn": 1e-6, "level": 1.0}[how]  # HOUST/ICSA already in k; WALCL in $M
+    # HOUST is already thousands; ICSA is raw counts; WALCL is $ millions.
+    scale = {"k": 1.0, "div1k": 1e-3, "tn": 1e-6, "level": 1.0}[how]
     return [{"t": t, "v": round(v * scale, 3)} for t, v in rows]
+
+
+def _monthly(pts: list[dict[str, float | str]]) -> list[dict[str, float | str]]:
+    """Resample to month-end (last observation wins). Mixing daily, weekly
+    and monthly series on one chart axis is unreadable; a uniform monthly
+    grid is what every pro macro dashboard actually plots."""
+    by_month: dict[str, float] = {}
+    for p in pts:
+        by_month[str(p["t"])[:7]] = float(p["v"])
+    return [{"t": m, "v": v} for m, v in sorted(by_month.items())]
 
 
 def fetch_series(series_id: str, how: str, client: Any = None) -> list[dict[str, float | str]]:
@@ -95,7 +106,7 @@ def fetch_series(series_id: str, how: str, client: Any = None) -> list[dict[str,
             )
             resp.raise_for_status()
             pts = _transform(_parse_csv(resp.text), how)
-            return [p for p in pts if str(p["t"]) >= _START][-400:]
+            return _monthly([p for p in pts if str(p["t"]) >= _START])[-90:]
         except Exception as e:
             last_err = e
     raise last_err  # type: ignore[misc]
