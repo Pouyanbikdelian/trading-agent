@@ -89,4 +89,18 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     except Exception as e:
         logger.bind(component="agents").warning(f"context: memory unavailable ({e})")
 
+    # --- outside world, last: if the serialized context must be cut to fit
+    # the prompt budget, gossip is the right thing to lose first.
+    # Collected by news_watch on its own schedule; stale collections are
+    # dropped so the scout never reasons over old chatter.
+    try:
+        from trading.runtime.news_watch import load as load_news
+
+        news = load_news(state_dir)
+        if news:
+            ctx["sector_momentum_vs_spy_pct"] = news.get("sector_momentum", {})
+            ctx["headlines"] = news.get("headlines", [])[:48]
+    except Exception as e:
+        logger.bind(component="agents").warning(f"context: news unavailable ({e})")
+
     return ctx

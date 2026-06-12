@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     tiingo_api_key: str | None = Field(default=None, alias="TIINGO_API_KEY")
     polygon_api_key: str | None = Field(default=None, alias="POLYGON_API_KEY")
 
+    # ---- Agents (LLM committee) ----
+    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    agents_model: str | None = Field(default=None, alias="AGENTS_MODEL")
+
     # ---- Notifications ----
     telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str | None = Field(default=None, alias="TELEGRAM_CHAT_ID")

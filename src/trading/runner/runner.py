@@ -355,11 +355,36 @@ class Runner:
                     id="agent_committee",
                     replace_existing=True,
                 )
+                # News watch: feeds the scout. 13:40 UTC weekdays — fresh
+                # headlines + sector momentum land just before the 14:00
+                # committee. Pure RSS/yfinance; failures degrade, not break.
+                self._scheduler.add_job(
+                    self._run_news_watch_async,
+                    CronTrigger(day_of_week="mon-fri", hour=13, minute=40, timezone="UTC"),
+                    id="news_watch",
+                    replace_existing=True,
+                )
                 # On-demand convening via /committee (flag file, 30s poll).
                 self._scheduler.add_job(
                     self._check_committee_flag,
                     IntervalTrigger(seconds=30),
                     id="committee_trigger",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+                # Agent PM: the committee's trading arm — SIMULATED ONLY.
+                # Weekly, Mondays 14:30 UTC (after that morning's committee).
+                # Writes to state/agent_pm/ and Telegram; never to IBKR.
+                self._scheduler.add_job(
+                    self._run_agent_pm_async,
+                    CronTrigger(day_of_week="mon", hour=14, minute=30, timezone="UTC"),
+                    id="agent_pm",
+                    replace_existing=True,
+                )
+                self._scheduler.add_job(
+                    self._check_agent_pm_flag,
+                    IntervalTrigger(seconds=30),
+                    id="agent_pm_trigger",
                     replace_existing=True,
                     max_instances=1,
                 )
@@ -878,6 +903,15 @@ class Runner:
         except Exception:
             logger.bind(component="market_watch").exception("market watch failed")
 
+    async def _run_news_watch_async(self) -> None:
+        """Collect headlines + sector momentum for the scout. Advisory."""
+        try:
+            from trading.runtime.news_watch import collect
+
+            await asyncio.to_thread(collect, settings.state_dir)
+        except Exception:
+            logger.bind(component="news_watch").exception("news watch failed")
+
     async def _check_committee_flag(self) -> None:
         """Operator asked for a fresh debate via /committee: the bot drops
         state/committee_now.flag; we consume it and convene immediately."""
@@ -887,7 +921,19 @@ class Runner:
         with contextlib.suppress(Exception):
             flag.unlink()
         logger.bind(component="agents").info("on-demand committee triggered")
+        # On-demand runs deserve fresh gossip too — cheap, so just refresh.
+        await self._run_news_watch_async()
         await self._run_committee_async()
+
+    async def _check_agent_pm_flag(self) -> None:
+        """Operator asked the PM to rebalance now via /pm run."""
+        flag = settings.state_dir / "agent_pm_now.flag"
+        if not flag.exists():
+            return
+        with contextlib.suppress(Exception):
+            flag.unlink()
+        logger.bind(component="agent_pm").info("on-demand agent PM triggered")
+        await self._run_agent_pm_async()
 
     async def _run_committee_async(self) -> None:
         """Daily agent committee: gather context, run the debate, send
@@ -910,6 +956,23 @@ class Runner:
             self.alerts.info(format_digest_compact(digest))
         except Exception:
             logger.bind(component="agents").exception("committee run failed")
+
+    async def _run_agent_pm_async(self) -> None:
+        """Weekly agent PM — committee-driven SIMULATED sleeve. Reads a
+        week of journaled rulings + calibration, makes one LLM call, and
+        rebalances a virtual portfolio under state/agent_pm/. Never
+        touches IBKR or the order path; failures logged and swallowed."""
+        try:
+            from trading.agents.context import build_context
+            from trading.agents.pm import format_pm_digest, run_agent_pm
+            from trading.memory.store import default_store
+
+            mem = default_store()
+            ctx = await asyncio.to_thread(build_context, settings.state_dir, settings.data_dir)
+            result = await asyncio.to_thread(run_agent_pm, ctx, mem, settings.state_dir)
+            self.alerts.info(format_pm_digest(result))
+        except Exception:
+            logger.bind(component="agent_pm").exception("agent PM run failed")
 
     async def _run_memory_grader_async(self) -> None:
         """Nightly: grade due predictions using cached closes, and journal

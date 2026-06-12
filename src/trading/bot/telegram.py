@@ -84,6 +84,7 @@ HELP_TEXT = (
     "/memory — permanent-memory vitals: calibration, trust, lessons\n"
     "/detail — full transcript of the latest committee debate\n"
     "/committee — convene the agents for a fresh debate right now\n"
+    "/pm — simulated agent-PM book · /pm run — rebalance it now\n"
     "/cancel\\_order CLIENT\\_ID — cancel a pending order\n\n"
     "*Mode (rebalance posture)*\n"
     "/mode bull|neutral|defense|bear|flatten — preview\n"
@@ -350,6 +351,40 @@ def _cmd_committee() -> str:
         "\U0001f3db Committee convening — fresh debate underway.\n"
         "_Summary lands here in ~2 minutes; `/detail` for the full transcript._"
     )
+
+
+def _cmd_pm(args: list[str]) -> str:
+    """``/pm`` — simulated agent-PM book; ``/pm run`` — rebalance now."""
+    import json as _json
+
+    if args and args[0].lower() == "run":
+        flag = settings.state_dir / "agent_pm_now.flag"
+        try:
+            flag.write_text(datetime.now(tz=timezone.utc).isoformat())
+        except Exception as e:
+            return f"could not request PM run: `{e}`"
+        return "🧪 Agent PM convening — rebalance lands here in ~1 minute."
+
+    pm_dir = settings.state_dir / "agent_pm"
+    try:
+        book = _json.loads((pm_dir / "portfolio.json").read_text())
+    except Exception:
+        return "_no agent-PM book yet — it trades Mondays 14:30 UTC, or `/pm run` to convene now._"
+    hist = book.get("history", [])
+    equity = float(hist[-1]["equity"]) if hist else 0.0
+    ret = equity / 100_000.0 - 1.0
+    lines = [
+        f"🧪 *Agent PM (simulated)* — equity ${equity:,.0f} ({ret:+.1%} since inception)",
+        f"cash ${float(book.get('cash', 0.0)):,.0f}",
+    ]
+    for sym, qty in sorted(book.get("holdings", {}).items()):
+        lines.append(f"  {sym}: {qty:g}")
+    try:
+        last = _json.loads((pm_dir / "last_run.json").read_text())
+        lines.append(f"_Last rationale: {str(last.get('rationale', ''))[:300]}_")
+    except Exception:
+        pass
+    return "\n".join(lines)
 
 
 def _cmd_resume() -> str:
@@ -1516,6 +1551,8 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_detail()
     if cmd == "/committee":
         return _cmd_committee()
+    if cmd == "/pm":
+        return _cmd_pm(args)
     if cmd == "/resume":
         return _cmd_resume()
     # --- cycle approval (only meaningful when REQUIRE_CYCLE_APPROVAL=true) ---

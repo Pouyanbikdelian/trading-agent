@@ -29,8 +29,10 @@ from trading.memory.store import MemoryStore
 LlmFn = Callable[[str, str], dict[str, Any]]  # (system, prompt) -> parsed JSON
 
 _TAKE_SCHEMA = (
+    "Argue your case concretely: name specific tickers, levels, dates and "
+    "numbers from the context — no hedged generalities. "
     'Respond ONLY with JSON: {"stance": "bullish|neutral|bearish", '
-    '"take": "<2-3 sentences>", '
+    '"take": "<4-6 sentences of specific, concrete reasoning>", '
     '"prediction": {"subject": "<ticker or SPY>", "direction": "up|down|flat", '
     '"horizon_days": <int 1-30>, "confidence": <0.5-0.95>}, '
     '"sources": ["<source keys you relied on>"], "cited_lessons": ["<lesson ids>"]}'
@@ -67,6 +69,17 @@ CHARTERS: dict[str, str] = {
         "You are the Trader: tactical, this-week horizon. Liquidity, timing, "
         "what the tape is telling you. You dislike stale opinions. " + _TAKE_SCHEMA
     ),
+    "scout": (
+        "You are the Scout — equity research for the NEXT big theme, weeks "
+        "to a few months out. Read the headlines block (gossip-grade: weigh "
+        "buzz but label it) against sector_momentum_vs_spy_pct (the tape). "
+        "The edge cases you hunt: buzz building BEFORE relative momentum "
+        "confirms (early), and buzz peaking AFTER a big run (late, fade it). "
+        "Name the ONE sector or theme with the best setup, say which "
+        "headlines and which momentum numbers support it, and make your "
+        "prediction on that sector's ETF ticker (e.g. SMH, URA, ITA, XLE) "
+        "rather than SPY. If nothing is compelling, say so with a flat call. " + _TAKE_SCHEMA
+    ),
 }
 
 CHALLENGER_CHARTER = (
@@ -97,6 +110,16 @@ MANAGER_CHARTER = (
 _STANCE_SCORE = {"bearish": -1.0, "neutral": 0.0, "bullish": 1.0}
 
 
+def _clip(text: str, limit: int) -> str:
+    """Truncate at a word boundary with an ellipsis — mid-word cuts made
+    the Telegram digest read like a dropped call."""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return (cut or text[:limit]) + "…"
+
+
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:
     from trading.agents.llm import complete_json
 
@@ -117,7 +140,7 @@ def run_committee(
     does no I/O beyond the LLM and memory writes, so it stays testable.
     """
     llm = llm or _default_llm
-    ctx_block = json.dumps(context, default=str, indent=1)[:8000]
+    ctx_block = json.dumps(context, default=str, indent=1)[:18000]
     takes: dict[str, dict[str, Any]] = {}
 
     for name, charter in CHARTERS.items():
@@ -217,18 +240,16 @@ def format_digest_compact(digest: dict[str, Any]) -> str:
     ]
     voiced.sort(key=lambda kv: float(kv[1]["prediction"]["confidence"]), reverse=True)
     for name, t in voiced[:5]:
-        lines.append(
-            f"  {icons[t['stance']]} *{name}*: {str(t.get('take', '')).split('.')[0][:110]}"
-        )
+        lines.append(f"  {icons[t['stance']]} *{name}*: {_clip(t.get('take', ''), 160)}")
     if digest.get("objections"):
         o = digest["objections"][0]
-        lines.append(f"  ⚔️ *challenger*: {str(o.get('objection', '')).split('.')[0][:110]}")
+        lines.append(f"  ⚔️ *challenger*: {_clip(o.get('objection', ''), 160)}")
     if digest.get("market_caveat"):
-        lines.append(f"  ⚠️ {digest['market_caveat'][:120]}")
+        lines.append(f"  ⚠️ {_clip(digest['market_caveat'], 160)}")
     lines += [
         "",
-        f"*Conclusion:* {str(r.get('proposal', ''))[:240]}",
-        f"_Watching: {str(r.get('watch', ''))[:100]} · `/detail` for the full debate_",
+        f"*Conclusion:* {_clip(r.get('proposal', ''), 400)}",
+        f"_Watching: {_clip(r.get('watch', ''), 160)} · `/detail` for the full debate_",
     ]
     return "\n".join(lines)
 
@@ -244,14 +265,14 @@ def format_digest(digest: dict[str, Any]) -> str:
         lines.append(
             f"{icons.get(t.get('stance', 'neutral'), '⚪')} *{name}* "
             f"({p['subject']} {p['direction']} {p['horizon_days']}d, "
-            f"{float(p['confidence']):.0%}): {str(t.get('take', ''))[:160]}"
+            f"{float(p['confidence']):.0%}): {_clip(t.get('take', ''), 320)}"
         )
     if digest["objections"]:
         lines.append("")
         lines.append("⚔️ *Challenger:*")
         for o in digest["objections"]:
             lines.append(
-                f"  vs *{o.get('target_agent', '?')}*: {str(o.get('objection', ''))[:180]}"
+                f"  vs *{o.get('target_agent', '?')}*: {_clip(o.get('objection', ''), 320)}"
             )
     if digest.get("market_caveat"):
         lines.append("")
@@ -263,9 +284,9 @@ def format_digest(digest: dict[str, Any]) -> str:
     lines += [
         "",
         f"{posture_icon} *Manager — {r.get('posture', 'neutral').replace('_', ' ').upper()}*",
-        str(r.get("proposal", ""))[:400],
-        f"_Watching:_ {str(r.get('watch', ''))[:160]}",
+        _clip(r.get("proposal", ""), 600),
+        f"_Watching:_ {_clip(r.get('watch', ''), 200)}",
         f"_Disagreement index: {digest['disagreement_index']:.2f} — "
-        f"{str(r.get('dissent_summary', ''))[:160]}_",
+        f"{_clip(r.get('dissent_summary', ''), 200)}_",
     ]
     return "\n".join(lines)

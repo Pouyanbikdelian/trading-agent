@@ -31,6 +31,14 @@ class AgentsDisabledError(RuntimeError):
     """No API key configured — the committee cannot run."""
 
 
+def _raise_with_body(resp: Any) -> None:
+    """4xx/5xx with the provider's actual error message, not just the
+    status line — '400 Bad Request' alone hides 'credit balance too low'
+    vs 'model not found', which need opposite fixes."""
+    if resp.status_code >= 400:
+        raise RuntimeError(f"LLM API {resp.status_code}: {resp.text[:300]}")
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     start = text.find("{")
     if start == -1:
@@ -46,13 +54,31 @@ def _extract_json(text: str) -> dict[str, Any]:
     raise ValueError("unbalanced JSON in response")
 
 
+def _anthropic_key() -> str | None:
+    from trading.core.config import settings
+
+    return settings.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY")
+
+
+def _openai_key() -> str | None:
+    from trading.core.config import settings
+
+    return settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+
+
+def _agents_model() -> str:
+    from trading.core.config import settings
+
+    return settings.agents_model or os.getenv("AGENTS_MODEL", "")
+
+
 def _call_anthropic(system: str, prompt: str, *, model: str, max_tokens: int) -> str:
     import httpx
 
     resp = httpx.post(
         "https://api.anthropic.com/v1/messages",
         headers={
-            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+            "x-api-key": _anthropic_key() or "",
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
@@ -64,7 +90,7 @@ def _call_anthropic(system: str, prompt: str, *, model: str, max_tokens: int) ->
         },
         timeout=TIMEOUT_S,
     )
-    resp.raise_for_status()
+    _raise_with_body(resp)
     return "".join(b.get("text", "") for b in resp.json().get("content", []))
 
 
@@ -73,7 +99,7 @@ def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int) -> st
 
     resp = httpx.post(
         "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
+        headers={"Authorization": f"Bearer {_openai_key() or ''}"},
         json={
             "model": model,
             "max_tokens": max_tokens,
@@ -84,17 +110,17 @@ def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int) -> st
         },
         timeout=TIMEOUT_S,
     )
-    resp.raise_for_status()
+    _raise_with_body(resp)
     return resp.json()["choices"][0]["message"]["content"]
 
 
 def complete_text(system: str, prompt: str, *, max_tokens: int = 1200) -> str:
-    model = os.getenv("AGENTS_MODEL", "")
-    if os.getenv("ANTHROPIC_API_KEY"):
+    model = _agents_model()
+    if _anthropic_key():
         return _call_anthropic(
             system, prompt, model=model or DEFAULT_ANTHROPIC_MODEL, max_tokens=max_tokens
         )
-    if os.getenv("OPENAI_API_KEY"):
+    if _openai_key():
         return _call_openai(
             system, prompt, model=model or DEFAULT_OPENAI_MODEL, max_tokens=max_tokens
         )
