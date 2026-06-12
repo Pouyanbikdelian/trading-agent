@@ -105,6 +105,29 @@ HELP_TEXT = (
 # ---------------------------------------------------------------------------
 
 
+def _split_for_telegram(text: str, limit: int = 3800, max_chunks: int = 4) -> list[str]:
+    """Split a long reply into <=limit chunks on line boundaries.
+
+    Telegram hard-caps messages at 4096 chars; long committee transcripts
+    were being cut mid-sentence. Multiple messages beat truncation."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        if len(current) + len(line) + 1 > limit and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        chunks.append(current)
+    if len(chunks) > max_chunks:
+        chunks = chunks[:max_chunks]
+        chunks[-1] += "\n…(truncated)"
+    return chunks
+
+
 async def _send(client: httpx.AsyncClient, token: str, chat_id: str, text: str) -> None:
     """POST sendMessage. Never raises — bot loop must keep running.
 
@@ -336,8 +359,8 @@ def _cmd_detail() -> str:
         digest = _json.loads(path.read_text())
     except Exception as e:
         return f"could not read last committee run: `{e}`"
-    text = format_digest(digest)
-    return text[:3900] + ("\n…(truncated)" if len(text) > 3900 else "")
+    # Long transcripts are split into multiple messages by the send loop.
+    return format_digest(digest)
 
 
 def _cmd_committee() -> str:
@@ -1644,4 +1667,5 @@ async def run_bot() -> None:
                 text = msg.get("text", "")
                 reply = await _dispatch(text)
                 if reply is not None:
-                    await _send(client, token, chat_id, reply)
+                    for chunk in _split_for_telegram(reply):
+                        await _send(client, token, chat_id, chunk)

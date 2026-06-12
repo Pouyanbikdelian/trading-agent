@@ -126,6 +126,45 @@ def test_compact_digest_is_short_and_pointed(mem: MemoryStore) -> None:
     assert len(text) < len(format_digest(digest))
 
 
+def test_specialists_get_sliced_context_challenger_gets_all(mem: MemoryStore) -> None:
+    """Anti-echo-chamber: the scout must not see the macro dial, the
+    position coach must not see headlines; the challenger sees both."""
+    prompts: dict[str, str] = {}
+    base_llm, _ = make_fake_llm()
+
+    def spy_llm(system: str, prompt: str):
+        for name in CHARTERS:
+            if f"the {name.replace('_', ' ').title()}" in system:
+                prompts[name] = prompt
+        if "professionally disagreeable" in system:
+            prompts["challenger"] = prompt
+        return base_llm(system, prompt)
+
+    ctx = {"macro_dial": {"btc_confirm_z": -1.5}, "headlines": [{"title": "chips rip"}]}
+    run_committee(ctx, mem, llm=spy_llm)
+    assert "btc_confirm_z" not in prompts["scout"]
+    assert "chips rip" in prompts["scout"]
+    assert "chips rip" not in prompts["position_coach"]
+    assert "btc_confirm_z" in prompts["quant"]
+    assert "btc_confirm_z" in prompts["challenger"]
+
+
+def test_display_names_escape_markdown(mem: MemoryStore) -> None:
+    llm, _ = make_fake_llm()
+    text = format_digest(run_committee({}, mem, llm=llm))
+    assert "risk officer" in text and "risk_officer" not in text
+
+
+def test_telegram_splitter_respects_limit_and_lines() -> None:
+    from trading.bot.telegram import _split_for_telegram
+
+    text = "\n".join(f"line {i} " + "x" * 80 for i in range(300))
+    chunks = _split_for_telegram(text)
+    assert all(len(c) <= 3800 + 20 for c in chunks)
+    assert len(chunks) <= 4 and chunks[-1].endswith("…(truncated)")
+    assert _split_for_telegram("short") == ["short"]
+
+
 def test_challenger_sees_all_takes_and_market_context(mem: MemoryStore) -> None:
     seen: dict[str, str] = {}
 

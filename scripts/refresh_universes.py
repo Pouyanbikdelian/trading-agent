@@ -48,6 +48,7 @@ import yaml
 
 _SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 _NDX_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
+_R1000_URL = "https://en.wikipedia.org/wiki/Russell_1000_Index"
 
 # Wikipedia blocks requests without a UA. They ask scripts to identify
 # themselves with a project name and a way to contact you if it misbehaves.
@@ -100,6 +101,23 @@ def fetch_nasdaq100() -> list[str]:
     raise RuntimeError("could not find NASDAQ-100 constituent table on the page")
 
 
+def fetch_russell1000() -> list[str]:
+    """Wikipedia's Russell 1000 page lists current components with tickers.
+    The components table is the (only) one with a ticker/symbol column."""
+    html = _fetch_html(_R1000_URL)
+    tables = pd.read_html(io.StringIO(html))
+    best: list[str] = []
+    for df in tables:
+        for c in df.columns:
+            if str(c).lower().startswith(("sym", "tick")):
+                syms = _normalize(df[c].astype(str).tolist())
+                if len(syms) > len(best):
+                    best = syms
+    if not best:
+        raise RuntimeError("could not find Russell 1000 component table on the page")
+    return best
+
+
 def main() -> int:
     try:
         sp500 = fetch_sp500()
@@ -107,6 +125,17 @@ def main() -> int:
     except Exception as e:
         print(f"refresh failed: {e!r}", file=sys.stderr)
         return 1
+    # Russell 1000 is best-effort: the Wikipedia page is less rigorously
+    # maintained than the S&P/NDX ones, so its absence must not block the
+    # primary refresh.
+    try:
+        r1000 = fetch_russell1000()
+        if len(r1000) < 700:
+            print(f"russell1000 only {len(r1000)} symbols; skipping it", file=sys.stderr)
+            r1000 = []
+    except Exception as e:
+        print(f"russell1000 fetch failed (non-fatal): {e!r}", file=sys.stderr)
+        r1000 = []
 
     # Sanity checks before writing — better to refuse than to ship a 5-symbol
     # "S&P 500" because Wikipedia changed a table id.
@@ -133,6 +162,12 @@ def main() -> int:
             },
         },
     }
+    if r1000:
+        payload["universes"]["russell1000"] = {
+            "asset_class": "equity",
+            "description": f"Russell 1000 from Wikipedia ({len(r1000)} names).",
+            "symbols": r1000,
+        }
 
     _OUT.parent.mkdir(parents=True, exist_ok=True)
     _OUT.write_text(

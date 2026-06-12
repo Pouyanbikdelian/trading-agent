@@ -109,6 +109,52 @@ MANAGER_CHARTER = (
 
 _STANCE_SCORE = {"bearish": -1.0, "neutral": 0.0, "bullish": 1.0}
 
+# Specialist context slices. Identical context for everyone produced an
+# echo chamber — six takes anchored on the same loudest number. Each
+# specialist now sees only what its charter is FOR; the challenger and
+# manager still see everything. Unknown agents fall back to the full view.
+_VIEW_KEYS: dict[str, tuple[str, ...]] = {
+    "quant": (
+        "account",
+        "positions",
+        "macro_dial",
+        "vol_surface",
+        "style_leader",
+        "sector_momentum_vs_spy_pct",
+    ),
+    "narrator": ("macro_dial", "dossiers", "source_trust", "established_lessons", "headlines"),
+    "street": ("positions", "style_leader", "sector_momentum_vs_spy_pct", "headlines"),
+    "position_coach": ("account", "positions", "holds", "k_override", "established_lessons"),
+    "risk_officer": (
+        "account",
+        "positions",
+        "vol_surface",
+        "macro_dial",
+        "spy_vix_triggers",
+        "holds",
+    ),
+    "trader": (
+        "positions",
+        "vol_surface",
+        "spy_vix_triggers",
+        "sector_momentum_vs_spy_pct",
+        "headlines",
+    ),
+    "scout": ("sector_momentum_vs_spy_pct", "headlines", "source_trust", "established_lessons"),
+}
+
+
+def _agent_view(name: str, context: dict[str, Any]) -> dict[str, Any]:
+    keys = _VIEW_KEYS.get(name)
+    if not keys:
+        return context
+    return {k: context[k] for k in keys if k in context}
+
+
+def _display(name: str) -> str:
+    """Agent name safe for Telegram Markdown (underscores read as italics)."""
+    return name.replace("_", " ")
+
 
 def _clip(text: str, limit: int) -> str:
     """Truncate at a word boundary with an ellipsis — mid-word cuts made
@@ -145,7 +191,8 @@ def run_committee(
 
     for name, charter in CHARTERS.items():
         try:
-            out = llm(charter, f"Today's context:\n{ctx_block}")
+            view = json.dumps(_agent_view(name, context), default=str, indent=1)[:18000]
+            out = llm(charter, f"Today's context (your specialist slice):\n{view}")
             pred = out.get("prediction") or {}
             if not {"subject", "direction", "horizon_days", "confidence"} <= set(pred):
                 raise ValueError("take missing falsifiable prediction")
@@ -240,7 +287,7 @@ def format_digest_compact(digest: dict[str, Any]) -> str:
     ]
     voiced.sort(key=lambda kv: float(kv[1]["prediction"]["confidence"]), reverse=True)
     for name, t in voiced[:5]:
-        lines.append(f"  {icons[t['stance']]} *{name}*: {_clip(t.get('take', ''), 160)}")
+        lines.append(f"  {icons[t['stance']]} *{_display(name)}*: {_clip(t.get('take', ''), 160)}")
     if digest.get("objections"):
         o = digest["objections"][0]
         lines.append(f"  ⚔️ *challenger*: {_clip(o.get('objection', ''), 160)}")
@@ -263,7 +310,7 @@ def format_digest(digest: dict[str, Any]) -> str:
     for name, t in digest["takes"].items():
         p = t["prediction"]
         lines.append(
-            f"{icons.get(t.get('stance', 'neutral'), '⚪')} *{name}* "
+            f"{icons.get(t.get('stance', 'neutral'), '⚪')} *{_display(name)}* "
             f"({p['subject']} {p['direction']} {p['horizon_days']}d, "
             f"{float(p['confidence']):.0%}): {_clip(t.get('take', ''), 320)}"
         )
@@ -272,7 +319,8 @@ def format_digest(digest: dict[str, Any]) -> str:
         lines.append("⚔️ *Challenger:*")
         for o in digest["objections"]:
             lines.append(
-                f"  vs *{o.get('target_agent', '?')}*: {_clip(o.get('objection', ''), 320)}"
+                f"  vs *{_display(str(o.get('target_agent', '?')))}*: "
+                f"{_clip(o.get('objection', ''), 320)}"
             )
     if digest.get("market_caveat"):
         lines.append("")

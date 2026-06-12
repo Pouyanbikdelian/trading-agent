@@ -38,10 +38,11 @@ LlmFn = Callable[[str, str], dict[str, Any]]
 
 START_EQUITY = 100_000.0
 COST_BPS = 10.0  # commission + slippage on turnover, charitable but not free
-MAX_WEIGHT_PER_NAME = 0.25
+MAX_WEIGHT_PER_NAME = 0.25  # ETFs are diversified; a quarter is the ceiling
+MAX_WEIGHT_PER_STOCK = 0.10  # single names carry idiosyncratic risk — tighter
 MAX_GROSS = 1.0  # long-only, no leverage
 
-# Fixed, liquid whitelist: broad + sectors + themes + defense assets.
+# Fixed, liquid ETF whitelist: broad + sectors + themes + defense assets.
 UNIVERSE: tuple[str, ...] = (
     "SPY",
     "QQQ",
@@ -71,9 +72,12 @@ PM_CHARTER = (
     "just read a week of committee debates, each agent's graded track "
     "record, and today's market context. Decide the sleeve's allocation "
     "for the coming week. Rules: long-only; weights sum to at most 1.0 "
-    "(the remainder is cash); only tickers from the allowed universe; "
-    "max 0.25 in any one name. Trust calibration over confidence — an "
-    "agent who has been wrong all month is a fade. Be decisive: persistent "
+    "(the remainder is cash); only tickers from the allowed universes — "
+    "max 0.25 per ETF, max 0.10 per single stock. Prefer single stocks "
+    "when the committee's thesis is name-specific (e.g. the book's own "
+    "holdings, a scout theme with a clear leader); use ETFs for broad or "
+    "sector-level views. Trust calibration over confidence — an agent who "
+    "has been wrong all month is a fade. Be decisive: persistent "
     "committee drift, scout themes confirmed by relative momentum, and "
     "risk-officer warnings are all actionable. Respond ONLY with JSON: "
     '{"target_weights": {"<TICKER>": <0.0-0.25>, ...}, '
@@ -82,14 +86,40 @@ PM_CHARTER = (
 )
 
 
+def _stock_universe() -> tuple[str, ...]:
+    """Single stocks the PM may hold — the union of '+'-joined universe
+    names from AGENT_PM_STOCK_UNIVERSE (set empty to disable: ETF-only).
+
+    Default covers S&P 500 + NASDAQ-100 + Russell 1000 via the generated
+    constituents file (scripts/refresh_universes.py), with the hand-
+    curated us_large_cap as a floor so the PM still has stocks when the
+    generated file hasn't been refreshed yet. Missing universes degrade
+    with a warning, never break the run. The whitelist remains the
+    anti-hallucination guard: an off-list ticker is dropped to cash,
+    never bought."""
+    spec = os.getenv("AGENT_PM_STOCK_UNIVERSE", "sp500+nasdaq100+russell1000+us_large_cap")
+    if not spec:
+        return ()
+    from trading.core.universes import load_universe
+
+    syms: set[str] = set()
+    for name in spec.split("+"):
+        try:
+            syms |= {i.symbol.upper() for i in load_universe(name.strip())}
+        except Exception as e:
+            logger.bind(component="agent_pm").warning(f"stock universe '{name}': {e}")
+    return tuple(sorted(syms))
+
+
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:
     from trading.agents.llm import complete_json
 
     return complete_json(system, prompt)
 
 
-def _clamp_weights(raw: Any) -> dict[str, float]:
-    """Hard caps: whitelist, long-only, per-name max, gross max."""
+def _clamp_weights(raw: Any, stocks: tuple[str, ...] = ()) -> dict[str, float]:
+    """Hard caps: whitelist, long-only, per-name max (tighter for single
+    stocks than for ETFs), gross max."""
     weights: dict[str, float] = {}
     if not isinstance(raw, dict):
         return weights
@@ -99,9 +129,12 @@ def _clamp_weights(raw: Any) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
         sym = str(sym).upper().strip()
-        if sym not in UNIVERSE or w <= 0:
+        if w <= 0:
             continue
-        weights[sym] = min(w, MAX_WEIGHT_PER_NAME)
+        if sym in UNIVERSE:
+            weights[sym] = min(w, MAX_WEIGHT_PER_NAME)
+        elif sym in stocks:
+            weights[sym] = min(w, MAX_WEIGHT_PER_STOCK)
     gross = sum(weights.values())
     if gross > MAX_GROSS:
         weights = {s: w * MAX_GROSS / gross for s, w in weights.items()}
@@ -164,9 +197,13 @@ def run_agent_pm(
     pm_dir = Path(state_dir) / "agent_pm"
     book = _load_portfolio(pm_dir)
 
-    # --- mark current book to market
+    # --- mark current book to market. Price only what we hold (plus the
+    # ETF shelf) — with a 1000-name stock whitelist, pricing everything
+    # up front would be a pointless bulk download; targets the PM
+    # actually picks are priced after the call.
+    stocks = _stock_universe()
     symbols = sorted(set(book["holdings"]) | set(UNIVERSE))
-    px = prices if prices is not None else _fetch_closes(symbols)
+    px = dict(prices) if prices is not None else _fetch_closes(symbols)
     equity = float(book["cash"]) + sum(
         qty * px[s] for s, qty in book["holdings"].items() if s in px
     )
@@ -184,7 +221,16 @@ def run_agent_pm(
                 "cash": round(float(book["cash"]), 2),
                 "holdings": book["holdings"],
             },
-            "allowed_universe": list(UNIVERSE),
+            "allowed_universe_etfs_max_25pct": list(UNIVERSE),
+            "allowed_universe_stocks_max_10pct": (
+                list(stocks)
+                if len(stocks) <= 80
+                else (
+                    f"{len(stocks)} names: any current S&P 500, NASDAQ-100 or "
+                    "Russell 1000 constituent (membership validated after you "
+                    "answer; off-index tickers are dropped)"
+                )
+            ),
             "week_of_committee_rulings": week,
             "agent_calibration": mem.calibration(),
             "today_context": context,
@@ -198,7 +244,14 @@ def run_agent_pm(
         logger.bind(component="agent_pm").warning(f"PM call failed: {e}")
         return {"ok": False, "reason": f"PM call failed: {e}"}
 
-    weights = _clamp_weights(out.get("target_weights"))
+    weights = _clamp_weights(out.get("target_weights"), stocks)
+    # Late pricing for newly targeted names not already marked.
+    need_px = [s for s in weights if s not in px]
+    if need_px and prices is None:
+        px.update(_fetch_closes(need_px))
+    unpriced_targets = [s for s in weights if s not in px]
+    for s in unpriced_targets:
+        weights.pop(s)  # no mark, no trade — that weight stays in cash
     dropped = sorted(set(map(str, (out.get("target_weights") or {}))) - set(weights))
 
     # --- rebalance at last close, costs on turnover

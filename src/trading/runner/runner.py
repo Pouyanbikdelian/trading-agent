@@ -388,6 +388,15 @@ class Runner:
                     replace_existing=True,
                     max_instances=1,
                 )
+                # Historian: Fridays 22:45 UTC, after the 22:30 grading
+                # pass — distills the week into <=2 candidate lessons and
+                # votes on existing ones. One LLM call/week.
+                self._scheduler.add_job(
+                    self._run_historian_async,
+                    CronTrigger(day_of_week="fri", hour=22, minute=45, timezone="UTC"),
+                    id="historian",
+                    replace_existing=True,
+                )
             # Memory grader: nightly, grade due predictions against
             # cached prices and journal the day. Cheap; advisory infra.
             self._scheduler.add_job(
@@ -973,6 +982,17 @@ class Runner:
             self.alerts.info(format_pm_digest(result))
         except Exception:
             logger.bind(component="agent_pm").exception("agent PM run failed")
+
+    async def _run_historian_async(self) -> None:
+        """Weekly lesson distillation — see agents/historian.py."""
+        try:
+            from trading.agents.historian import format_historian_digest, run_historian
+            from trading.memory.store import default_store
+
+            digest = await asyncio.to_thread(run_historian, default_store())
+            self.alerts.info(format_historian_digest(digest))
+        except Exception:
+            logger.bind(component="historian").exception("historian run failed")
 
     async def _run_memory_grader_async(self) -> None:
         """Nightly: grade due predictions using cached closes, and journal
