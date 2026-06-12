@@ -29,8 +29,8 @@ from typing import Any
 from trading.core.logging import logger
 
 STATE_FILENAME = "news.json"
-MAX_PER_QUERY = 8
-MAX_HEADLINES = 60
+MAX_PER_QUERY = 7
+MAX_HEADLINES = 70
 TIMEOUT_S = 15.0
 
 # Broad + thematic queries. Tuned for "what is the crowd excited about",
@@ -43,6 +43,11 @@ _QUERIES: dict[str, str] = {
     "defense": "defense aerospace stocks",
     "crypto": "bitcoin crypto market",
     "consumer": "consumer retail stocks earnings",
+    # Capital flows: announced money is a different signal class than
+    # opinion — a $10bn committed fund is skin in the game, an analyst
+    # note is words. The scout's charter weights these accordingly.
+    "capital_flows": "billion investment fund launch acquisition stake",
+    "ai_capex": "AI infrastructure data center investment billion",
 }
 
 # Relative-momentum universe: 11 SPDRs + liquid theme ETFs.

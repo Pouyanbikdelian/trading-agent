@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from trading.agents.pm import (
-    MAX_WEIGHT_PER_NAME,
     START_EQUITY,
     UNIVERSE,
     _clamp_weights,
@@ -44,7 +43,10 @@ def test_clamp_enforces_whitelist_cap_and_gross() -> None:
         {"SMH": 0.9, "FAKE": 0.5, "TLT": -0.2, "XLE": 0.25, "SPY": "0.25", "QQQ": 0.25}
     )
     assert "FAKE" not in w and "TLT" not in w  # off-universe / short dropped
-    assert w["SMH"] == MAX_WEIGHT_PER_NAME  # per-name cap
+    # SMH (0.9 -> per-name 0.25) + QQQ (0.25) are both tech_complex: the
+    # 0.40 cluster cap scales them to 0.20 each. XLE/SPY are unaffected.
+    assert w["SMH"] == w["QQQ"] == 0.2
+    assert w["XLE"] == 0.25 and w["SPY"] == 0.25
     assert sum(w.values()) <= 1.0 + 1e-9  # gross cap
     assert all(s in UNIVERSE for s in w)
 

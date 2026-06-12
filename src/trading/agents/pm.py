@@ -44,6 +44,69 @@ COST_BPS = 10.0  # commission + slippage on turnover, charitable but not free
 MAX_WEIGHT_PER_NAME = 0.25  # ETFs are diversified; a quarter is the ceiling
 MAX_WEIGHT_PER_STOCK = 0.10  # single names carry idiosyncratic risk — tighter
 MAX_GROSS = 1.0  # long-only, no leverage
+MAX_CLUSTER = 0.40  # max combined weight in one correlated cluster
+
+# Correlated clusters for the concentration cap. Deliberately coarse and
+# beta-based, not GICS-pure: AMZN/TSLA trade with tech beta, so for RISK
+# purposes they live in the tech complex. Unknown symbols are uncapped at
+# cluster level (still capped per-name) — the map covers the system's
+# revealed bias (semis/mega-tech) plus the liquid ETF shelf.
+CLUSTERS: dict[str, frozenset[str]] = {
+    "tech_complex": frozenset(
+        {
+            "XLK",
+            "SMH",
+            "QQQ",
+            "XLC",
+            "NVDA",
+            "AMD",
+            "AVGO",
+            "MU",
+            "INTC",
+            "WDC",
+            "STX",
+            "SNDK",
+            "LITE",
+            "CIEN",
+            "GLW",
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "META",
+            "AMZN",
+            "TSLA",
+            "QCOM",
+            "AMAT",
+            "LRCX",
+            "KLAC",
+            "MRVL",
+            "TXN",
+            "ADI",
+            "ASML",
+            "SMCI",
+            "DELL",
+            "ANET",
+            "CRM",
+            "ORCL",
+            "NOW",
+            "TSM",
+            "ARM",
+            "PLTR",
+        }
+    ),
+    "energy": frozenset({"XLE", "XOM", "CVX", "URA", "COP", "SLB", "OXY"}),
+    "health": frozenset({"XLV", "IBB", "UNH", "LLY", "JNJ", "PFE", "MRK", "ABBV"}),
+    "financials": frozenset({"XLF", "JPM", "V", "MA", "BAC", "GS", "MS", "WFC"}),
+    "defense": frozenset({"ITA", "LMT", "RTX", "NOC", "GD", "BA"}),
+}
+
+
+def _cluster_of(sym: str) -> str | None:
+    for name, members in CLUSTERS.items():
+        if sym in members:
+            return name
+    return None
+
 
 # Fixed, liquid ETF whitelist: broad + sectors + themes + defense assets.
 UNIVERSE: tuple[str, ...] = (
@@ -76,7 +139,10 @@ PM_CHARTER = (
     "record, and today's market context. Decide the sleeve's allocation "
     "for the coming week. Rules: long-only; weights sum to at most 1.0 "
     "(the remainder is cash); only tickers from the allowed universes — "
-    "max 0.25 per ETF, max 0.10 per single stock. Prefer single stocks "
+    "max 0.25 per ETF, max 0.10 per single stock, and max 0.40 combined "
+    "in any one correlated cluster (semis + mega-cap tech count as ONE "
+    "cluster — six correlated names is one bet wearing six hats; excess "
+    "is cut to cash, not redistributed). Prefer single stocks "
     "when the committee's thesis is name-specific (e.g. the book's own "
     "holdings, a scout theme with a clear leader); use ETFs for broad or "
     "sector-level views. Trust calibration over confidence — an agent who "
@@ -138,6 +204,21 @@ def _clamp_weights(raw: Any, stocks: tuple[str, ...] = ()) -> dict[str, float]:
             weights[sym] = min(w, MAX_WEIGHT_PER_NAME)
         elif sym in stocks:
             weights[sym] = min(w, MAX_WEIGHT_PER_STOCK)
+    # Sector/cluster concentration cap: six 0.9-correlated names at 8-10%
+    # each is one big bet wearing six hats. Scale offending clusters down
+    # proportionally; freed weight stays in cash (never redistributed —
+    # the PM wanted concentration, it doesn't get diversification for free).
+    by_cluster: dict[str, float] = {}
+    for s, w in weights.items():
+        c = _cluster_of(s)
+        if c:
+            by_cluster[c] = by_cluster.get(c, 0.0) + w
+    for c, total in by_cluster.items():
+        if total > MAX_CLUSTER:
+            f = MAX_CLUSTER / total
+            for s in list(weights):
+                if _cluster_of(s) == c:
+                    weights[s] = round(weights[s] * f, 4)
     gross = sum(weights.values())
     if gross > MAX_GROSS:
         weights = {s: w * MAX_GROSS / gross for s, w in weights.items()}
@@ -278,6 +359,9 @@ def run_agent_pm(
                 "equity": round(equity, 2),
                 "cash": round(float(book["cash"]), 2),
                 "holdings": book["holdings"],
+                # Its own track record — a PM that can't see its P&L vs
+                # benchmark can't learn from it.
+                "performance": performance(state_dir),
             },
             "allowed_universe_etfs_max_25pct": list(UNIVERSE),
             "allowed_universe_stocks_max_10pct": (

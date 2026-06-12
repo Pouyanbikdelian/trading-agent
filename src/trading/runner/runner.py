@@ -405,6 +405,33 @@ class Runner:
                     id="agent_pm_mark",
                     replace_existing=True,
                 )
+                # Sentinel: intraday tripwires every 15 min during US RTH.
+                # 13:30-20:00 UTC covers 9:30-16:00 ET in summer (shifts an
+                # hour in winter — acceptable for a tripwire). Mechanical
+                # checks are free; the LLM runs only when a wire trips.
+                self._scheduler.add_job(
+                    self._run_sentinel_async,
+                    CronTrigger(day_of_week="mon-fri", hour="13-20", minute="*/15", timezone="UTC"),
+                    id="sentinel",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+            # Position guards: ATR trailing stops + profit ratchet. Same
+            # RTH cadence as the sentinel, offset 5 min. Master-switched
+            # by GUARDS_ENABLED; exits flow through the command pipeline
+            # (halt-aware, audited) — never a new order path.
+            from trading.runtime.guards import enabled as _guards_enabled
+
+            if _guards_enabled():
+                self._scheduler.add_job(
+                    self._run_guards_async,
+                    CronTrigger(
+                        day_of_week="mon-fri", hour="13-20", minute="5-59/15", timezone="UTC"
+                    ),
+                    id="guards",
+                    replace_existing=True,
+                    max_instances=1,
+                )
                 # Historian: Fridays 22:45 UTC, after the 22:30 grading
                 # pass — distills the week into <=2 candidate lessons and
                 # votes on existing ones. One LLM call/week.
@@ -1019,6 +1046,65 @@ class Runner:
                 logger.bind(component="agent_pm").warning(f"mark failed: {res.get('reason')}")
         except Exception:
             logger.bind(component="agent_pm").exception("agent PM mark failed")
+
+    async def _run_guards_async(self) -> None:
+        """Trailing-stop / ratchet pass. Exits go through the command
+        pipeline exactly like an operator /close — halt + risk respected."""
+        try:
+            from trading.runner.holds import load_holds
+            from trading.runner.state import RunnerStore
+            from trading.runtime import commands as cmds
+            from trading.runtime.guards import check_guards, last_prices
+
+            def _pass() -> dict:
+                snap = RunnerStore(settings.state_dir / "runner.db").latest_snapshot()
+                if not snap or not snap.positions:
+                    return {"exits": [], "alerts": []}
+                positions = [
+                    {
+                        "symbol": p.instrument.symbol,
+                        "qty": float(p.quantity),
+                        "avg_price": float(p.avg_price),
+                    }
+                    for p in snap.positions.values()
+                ]
+                px = last_prices([p["symbol"] for p in positions])
+                return check_guards(
+                    settings.state_dir,
+                    settings.data_dir,
+                    positions=positions,
+                    prices=px,
+                    equity=float(snap.equity),
+                    holds=set(load_holds(settings.state_dir)),
+                )
+
+            result = await asyncio.to_thread(_pass)
+            for exit_req in result["exits"]:
+                cmd = cmds.Command.new(
+                    cmds.CommandType.CLOSE,
+                    args={"symbol": exit_req["symbol"]},
+                    requested_by=f"guard:{exit_req['reason']}",
+                )
+                cmds.submit(cmd, settings.state_dir)
+            for msg in result["alerts"]:
+                self.alerts.info(msg)
+        except Exception:
+            logger.bind(component="guards").exception("guards run failed")
+
+    async def _run_sentinel_async(self) -> None:
+        """Intraday risk watch — free unless a tripwire fires. Advisory:
+        alerts + optional committee convening, never the order path."""
+        try:
+            from trading.runtime.sentinel import format_sentinel_alert, run_sentinel
+
+            result = await asyncio.to_thread(run_sentinel, settings.state_dir)
+            if result.get("quiet"):
+                return
+            self.alerts.info(format_sentinel_alert(result))
+            if result.get("convene_committee"):
+                await self._run_committee_async()
+        except Exception:
+            logger.bind(component="sentinel").exception("sentinel run failed")
 
     async def _run_historian_async(self) -> None:
         """Weekly lesson distillation — see agents/historian.py."""

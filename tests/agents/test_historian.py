@@ -85,3 +85,20 @@ def test_stock_universe_clamp() -> None:
     assert w["NVDA"] == 0.10  # single-stock cap
     assert w["SMH"] == 0.25  # ETF cap
     assert "FAKE" not in w
+    # NVDA + SMH are both tech_complex: 0.35 combined > 0.40? No — under
+    # the cluster cap, so untouched.
+    assert abs(sum(w.values()) - 0.35) < 1e-9
+
+
+def test_sector_cluster_cap() -> None:
+    from trading.agents.pm import MAX_CLUSTER, _clamp_weights
+
+    # Six correlated tech names summing to 0.71 must be scaled to 0.40;
+    # the uncorrelated names are untouched; freed weight goes to cash.
+    raw = {"SMH": 0.25, "XLK": 0.2, "MU": 0.1, "NVDA": 0.08, "INTC": 0.08, "GLD": 0.1}
+    w = _clamp_weights(raw, stocks=("MU", "NVDA", "INTC"))
+    tech = w["SMH"] + w["XLK"] + w["MU"] + w["NVDA"] + w["INTC"]
+    assert abs(tech - MAX_CLUSTER) < 0.01
+    assert w["GLD"] == 0.1  # not in the offending cluster
+    # proportional scaling preserves the PM's relative preferences
+    assert w["SMH"] > w["MU"] > 0
