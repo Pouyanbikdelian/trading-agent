@@ -188,6 +188,9 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  h1 .muted{font-size:12px;font-weight:400}
  h2{font-size:11px;color:var(--mut);margin:0 0 10px;text-transform:uppercase;letter-spacing:.09em;font-weight:600}
  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+ /* Macro + Economy: exactly 3 columns on wide screens so 5-6 cards tile
+    without orphan gaps; charts get the extra width. */
+ @media(min-width:1200px){#tab-macro .grid,#tab-economy .grid{grid-template-columns:repeat(3,1fr)}}
  .card{background:linear-gradient(180deg,#131922 0%,var(--card) 100%);border:1px solid var(--edge);
   border-radius:14px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.35)}
  .big{grid-column:1/-1}
@@ -235,6 +238,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
   </div><canvas id="eq" height="84"></canvas></div>
  <div class="card big"><h2>Strategy race · normalized to 100
   <span class="muted" style="text-transform:none;letter-spacing:0">— click legend entries to toggle series</span></h2>
+  <div id="raceEmpty" class="muted" style="display:none;padding:18px 0"></div>
   <canvas id="race" height="84"></canvas><div id="pmline" class="muted" style="margin-top:8px"></div></div>
  <div class="card"><h2>Account</h2><div id="account"></div><h2 style="margin-top:12px">Positions</h2><div id="positions"></div></div>
  <div class="card"><h2>Committee (latest)</h2><div id="committee"></div>
@@ -276,6 +280,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
  b.classList.add('on');document.getElementById('tab-'+b.dataset.t).classList.add('on');});
 const pct=(x,d=1)=>x==null?'–':((x>=0?'+':'')+(100*x).toFixed(d)+'%');
+const fx=(x,d=1)=>x==null?'–':Number(x).toFixed(d);
 const num=(x)=>x==null?'–':Number(x).toLocaleString(undefined,{maximumFractionDigits:0});
 const line=(el,labels,sets)=>{
  const scales={x:{ticks:{color:'#8b98a5',maxTicksLimit:7}},y:{ticks:{color:'#8b98a5'}}};
@@ -283,8 +288,9 @@ const line=(el,labels,sets)=>{
  return new Chart(document.getElementById(el),{type:'line',
   data:{labels,datasets:sets.map(s=>({...s,borderWidth:1.6,pointRadius:s.pointRadius??0,tension:.2,fill:false}))},
   options:{plugins:{legend:{display:sets.some(s=>s.label),labels:{color:'#8b98a5',boxWidth:10}}},scales}});};
+setTimeout(()=>location.reload(),300e3); // fresh data every 5 minutes
 fetch('api/summary').then(r=>r.json()).then(d=>{
- document.getElementById('asof').textContent=' · '+new Date(d.generated_at).toLocaleString();
+ document.getElementById('asof').textContent=' · '+new Date(d.generated_at).toLocaleString()+' · auto-refreshes';
  const daily=d.equity_curve||[],today=d.equity_today||[];let eqChart=null,raceChart=null;
  const cutFor=(range)=>{
   const now=new Date();
@@ -313,7 +319,14 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
               mk(pm,'v','agent PM (sim)','#b07cf6'),
               mk(spy,'spy','SPY','#8b98a5')].filter(Boolean);
   if(raceChart){raceChart.destroy();raceChart=null;}
-  if(sets.length&&dates.length>1)raceChart=line('race',dates,sets);
+  const ok=sets.length&&dates.length>1;
+  document.getElementById('race').style.display=ok?'':'none';
+  const em=document.getElementById('raceEmpty');
+  em.style.display=ok?'none':'';
+  em.textContent=pmH.length?
+   'sim started today — the race plots from its second daily mark (21:15 UTC tomorrow); both curves rebase to 100 at sim inception':
+   'no sim book yet — /pm run in Telegram starts one';
+  if(ok)raceChart=line('race',dates,sets);
  }
  function drawEq(range){
   let pts;
@@ -430,12 +443,12 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   const cur=last.curve_10y3m;
   document.getElementById('curveTile').innerHTML=
    `<span class="tile"><b class="${cur<0?'neg':cur<0.3?'warn':'pos'}">${cur==null?'–':cur.toFixed(2)+'pp'}</b><br>
-    <span class="muted">${cur<0?'INVERTED':'spread'} · 10y ${last.y_10y??'–'} / 3m ${last.y_3m??'–'}</span></span>`;
+    <span class="muted">${cur<0?'INVERTED':'spread'} · 10y ${fx(last.y_10y,2)} / 3m ${fx(last.y_3m,2)}</span></span>`;
   line('curveCh',L,[{data:mh.map(h=>h.curve_10y3m),borderColor:'#5ab0f6',label:'10y−3m'}]);
   const vr=last.vix_ratio;
   document.getElementById('vixTile').innerHTML=
-   `<span class="tile"><b>${last.vix??'–'}</b><br><span class="muted">VIX</span></span>
-    <span class="tile"><b class="${vr>1?'neg':'pos'}">${vr??'–'}</b><br><span class="muted">VIX/VIX3M ${vr>1?'⚠ backwardation':''}</span></span>`;
+   `<span class="tile"><b>${fx(last.vix,1)}</b><br><span class="muted">VIX</span></span>
+    <span class="tile"><b class="${vr>1?'neg':'pos'}">${fx(vr,2)}</b><br><span class="muted">VIX/VIX3M ${vr>1?'⚠ backwardation':''}</span></span>`;
   line('vixCh',L,[{data:mh.map(h=>h.vix),borderColor:'#e5a54b',label:'VIX'},
                   {data:mh.map(h=>h.vix3m),borderColor:'#8b98a5',label:'VIX3M'}]);
   document.getElementById('brTile').innerHTML=

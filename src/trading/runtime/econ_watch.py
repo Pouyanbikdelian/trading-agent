@@ -24,8 +24,11 @@ from typing import Any
 from trading.core.logging import logger
 
 STATE_FILENAME = "econ_watch.json"
-TIMEOUT_S = 20.0
+TIMEOUT_S = 30.0
 _START = "2019-01-01"  # ~6y of history is plenty for the charts
+_FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+# FRED/Cloudflare deprioritizes anonymous clients; identify ourselves.
+_HEADERS = {"User-Agent": "trading-agent/0.1 (econ watch; contact: podibiki@gmail.com)"}
 
 # key -> (FRED series id, label, transform, unit)
 # transform: "level" as-is | "yoy" percent change vs 12 months prior
@@ -74,41 +77,50 @@ def _transform(rows: list[tuple[str, float]], how: str) -> list[dict[str, float 
     return [{"t": t, "v": round(v * scale, 3)} for t, v in rows]
 
 
-def fetch_series(series_id: str, how: str) -> list[dict[str, float | str]]:
+def fetch_series(series_id: str, how: str, client: Any = None) -> list[dict[str, float | str]]:
     import httpx
 
-    resp = httpx.get(
-        "https://fred.stlouisfed.org/graph/fredgraph.csv",
-        params={"id": series_id, "cosd": _START},
-        timeout=TIMEOUT_S,
-        follow_redirects=True,
-    )
-    resp.raise_for_status()
-    # YoY needs 12 months of runway before _START; refetch wider when needed.
-    rows = _parse_csv(resp.text)
-    if how == "yoy":
-        resp = httpx.get(
-            "https://fred.stlouisfed.org/graph/fredgraph.csv",
-            params={"id": series_id, "cosd": "2018-01-01"},
-            timeout=TIMEOUT_S,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-        rows = _parse_csv(resp.text)
-    pts = _transform(rows, how)
-    return [p for p in pts if str(p["t"]) >= _START][-400:]
+    # YoY needs 12 months of runway before _START — one wider fetch beats two.
+    start = "2018-01-01" if how == "yoy" else _START
+    getter = client or httpx
+    last_err: Exception | None = None
+    for _attempt in range(2):  # FRED is occasionally slow; one retry
+        try:
+            resp = getter.get(
+                _FRED_URL,
+                params={"id": series_id, "cosd": start},
+                headers=_HEADERS,
+                timeout=TIMEOUT_S,
+                follow_redirects=True,
+            )
+            resp.raise_for_status()
+            pts = _transform(_parse_csv(resp.text), how)
+            return [p for p in pts if str(p["t"]) >= _START][-400:]
+        except Exception as e:
+            last_err = e
+    raise last_err  # type: ignore[misc]
 
 
 def collect(state_dir: Path) -> dict[str, Any]:
-    """One pass over all series; atomic write; per-series degradation."""
+    """One pass over all series; atomic write; per-series degradation.
+    One keep-alive connection for the whole pass — 13 cold TLS handshakes
+    to a slow CDN is how the first version timed out."""
+    import httpx
+
     series: dict[str, Any] = {}
-    for key, (sid, label, how, unit) in SERIES.items():
-        try:
-            pts = fetch_series(sid, how)
-            if pts:
-                series[key] = {"label": label, "unit": unit, "latest": pts[-1]["v"], "points": pts}
-        except Exception as e:
-            logger.bind(component="econ_watch").info(f"{key} ({sid}) failed: {e}")
+    with httpx.Client(follow_redirects=True, timeout=TIMEOUT_S) as client:
+        for key, (sid, label, how, unit) in SERIES.items():
+            try:
+                pts = fetch_series(sid, how, client=client)
+                if pts:
+                    series[key] = {
+                        "label": label,
+                        "unit": unit,
+                        "latest": pts[-1]["v"],
+                        "points": pts,
+                    }
+            except Exception as e:
+                logger.bind(component="econ_watch").info(f"{key} ({sid}) failed: {e}")
     reading = {"t": datetime.now(tz=timezone.utc).isoformat(), "series": series}
     path = Path(state_dir) / STATE_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
