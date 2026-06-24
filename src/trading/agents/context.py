@@ -78,7 +78,11 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     try:
         mem = MemoryStore(state_dir / "memory")
         ctx["established_lessons"] = [
-            {"id": r["id"], "statement": r["statement"]}
+            {
+                "id": r["id"],
+                "lesson": r["statement"],   # full elaborated text: title + 4-sentence body
+                "support_vs_contradict": f"{r['support']}/{r['contradict']}",
+            }
             for r in mem.lessons(status="established")[:6]
         ]
         ctx["dossiers"] = mem.dossiers()

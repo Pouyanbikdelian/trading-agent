@@ -41,16 +41,28 @@ HISTORIAN_CHARTER = (
     "week of journal entries (graded predictions with outcomes, committee "
     "rulings, portfolio changes) and the current lesson book. Your job is "
     "distillation, not narration. Propose at most TWO new lessons, and "
-    "only if the week genuinely taught something durable: a falsifiable "
+    "ONLY if the week genuinely taught something durable: a falsifiable "
     "regularity that would have been useful BEFORE this week and will be "
-    "useful in future weeks ('X tends to precede Y', 'in regime A, B "
-    "resolves as C'). Event recaps, single-instance coincidences, and "
-    "vague wisdom ('stay disciplined') are forbidden. Most weeks teach "
-    "nothing new — an empty list is a respectable answer. Separately, "
-    "vote on EXISTING lessons: did this week's evidence support or "
-    "contradict them? Only vote where the week actually bears on the "
-    "lesson. Respond ONLY with JSON: "
-    '{"new_lessons": [{"statement": "<one falsifiable sentence>", '
+    "useful in future weeks. Event recaps, single-instance coincidences, "
+    "and vague wisdom ('stay disciplined') are forbidden. Most weeks teach "
+    "nothing new — an empty list is a respectable answer.\n\n"
+    "Each lesson you propose must be genuinely actionable and understandable "
+    "to any reader without extra context. Structure every new lesson as:\n"
+    "  title: 5-8 words naming the pattern (e.g. 'Semis lead tech on "
+    "momentum breakouts')\n"
+    "  body: EXACTLY four sentences covering:\n"
+    "    1. What pattern or regularity was observed (the empirical finding).\n"
+    "    2. Under what market conditions or triggers it applies "
+    "(regime, vol environment, catalyst type).\n"
+    "    3. The mechanical reason it works — what drives it structurally "
+    "or behaviorally.\n"
+    "    4. The concrete action it implies for the desk "
+    "(when to act, what size, what to watch for as confirmation).\n\n"
+    "Separately, vote on EXISTING lessons: did this week's evidence support "
+    "or contradict them? Only vote where the week actually bears on the "
+    "lesson. Respond ONLY with JSON:\n"
+    '{"new_lessons": [{"title": "<5-8 word label>", '
+    '"body": "<4-sentence elaboration>", '
     '"tags": "<comma,separated>", "evidence": "<what this week showed>"}], '
     '"votes": [{"lesson_id": "<id>", "supports": true|false, '
     '"why": "<1 sentence>"}], '
@@ -96,14 +108,29 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
 
     known = {r["id"] for r in lesson_book}
     created: list[str] = []
+    lesson_bodies: dict[str, str] = {}
     for lesson in list(out.get("new_lessons", []))[:MAX_NEW_LESSONS]:
-        stmt = str(lesson.get("statement", "")).strip()
+        title = str(lesson.get("title", "")).strip()
+        body = str(lesson.get("body", "")).strip()
+        # Legacy fallback: LLM may still emit "statement" during migration.
+        fallback = str(lesson.get("statement", "")).strip()
+        if title and body:
+            stmt = f"{title}\n\n{body}"
+        elif title:
+            stmt = title
+        elif body:
+            stmt = body
+        else:
+            stmt = fallback
         if len(stmt) < 20:  # garbage guard
             continue
         lid = mem.add_lesson(
             stmt, origin_episodes=[week_tag], tags=str(lesson.get("tags", ""))[:120]
         )
-        created.append(f"{lid}: {stmt}")
+        label = title or stmt[:80]
+        created.append(f"{lid}: {label}")
+        if body:
+            lesson_bodies[lid] = body
 
     voted = 0
     for vote in list(out.get("votes", []))[:10]:
@@ -124,6 +151,7 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
         "ok": True,
         "ts": datetime.now(tz=timezone.utc).isoformat(),
         "created": created,
+        "lesson_bodies": lesson_bodies,
         "voted": voted,
         "retired": retired,
     }
@@ -138,7 +166,15 @@ def format_historian_digest(digest: dict[str, Any]) -> str:
     lines[0] += f", {digest['retired']} retired)" if digest.get("retired") else ")"
     if digest["created"]:
         lines.append("*New candidate lessons:*")
-        lines.extend(f"  • {c[:250]}" for c in digest["created"])
+        for c in digest["created"]:
+            # c is "{id}: {title}" — show the label, not the full body
+            label = c[:160]
+            lines.append(f"  • {label}")
+            # If there's a stored body, show the first sentence as a teaser.
+            body_hint = digest.get("lesson_bodies", {}).get(c.split(":")[0].strip(), "")
+            if body_hint:
+                first_sentence = body_hint.split(".")[0].strip()
+                lines.append(f"    _{first_sentence}._")
     else:
         lines.append("_no new lessons this week — the bar is high by design_")
     return "\n".join(lines)
