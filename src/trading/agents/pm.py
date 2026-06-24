@@ -44,7 +44,7 @@ COST_BPS = 10.0  # commission + slippage on turnover, charitable but not free
 MAX_WEIGHT_PER_NAME = 0.25  # ETFs are diversified; a quarter is the ceiling
 MAX_WEIGHT_PER_STOCK = 0.10  # single names carry idiosyncratic risk — tighter
 MAX_GROSS = 1.0  # long-only, no leverage
-MAX_CLUSTER = 0.40  # max combined weight in one correlated cluster
+MAX_CLUSTER = 0.50  # max combined weight in one correlated cluster
 
 # Correlated clusters for the concentration cap. Deliberately coarse and
 # beta-based, not GICS-pure: AMZN/TSLA trade with tech beta, so for RISK
@@ -136,21 +136,52 @@ UNIVERSE: tuple[str, ...] = (
 PM_CHARTER = (
     "You are the Portfolio Manager of a small SIMULATED sleeve. You have "
     "just read a week of committee debates, each agent's graded track "
-    "record, and today's market context. Decide the sleeve's allocation "
-    "for the coming week. Rules: long-only; weights sum to at most 1.0 "
-    "(the remainder is cash); only tickers from the allowed universes — "
-    "max 0.25 per ETF, max 0.10 per single stock, and max 0.40 combined "
-    "in any one correlated cluster (semis + mega-cap tech count as ONE "
-    "cluster — six correlated names is one bet wearing six hats; excess "
-    "is cut to cash, not redistributed). Prefer single stocks "
-    "when the committee's thesis is name-specific (e.g. the book's own "
-    "holdings, a scout theme with a clear leader); use ETFs for broad or "
-    "sector-level views. Trust calibration over confidence — an agent who "
-    "has been wrong all month is a fade. Be decisive: persistent "
-    "committee drift, scout themes confirmed by relative momentum, and "
-    "risk-officer warnings are all actionable. Respond ONLY with JSON: "
+    "record, today's market context, and the sentinel's recent alert status. "
+    "Decide the sleeve's allocation for the coming week.\n"
+    "\n"
+    "HARD RULES: long-only; weights sum to at most 1.0 (remainder is cash); "
+    "only tickers from the allowed universes — max 0.25 per ETF, "
+    "max 0.10 per single stock, max 0.50 combined in any one correlated "
+    "cluster (semis + mega-cap tech = ONE cluster; excess cut to cash by code).\n"
+    "\n"
+    "ANTI-INERTIA (mandatory — state this explicitly in your rationale): "
+    "The current book is NOT your starting point. Ask: starting from scratch "
+    "today, would I build this portfolio? Holdings the committee is bearish "
+    "on need an affirmative reason to keep — past gains are not a reason. "
+    "A 5-of-7 or greater bearish committee consensus on a held cluster is a "
+    "cluster EXIT signal: cut that cluster by at least half, not just trim "
+    "one or two names. Do not rotate freed weight into a different sector "
+    "just to stay invested — cash is a valid position.\n"
+    "\n"
+    "SENTINEL RULE (mandatory when sentinel_alert is present): If the "
+    "sentinel fired CAUTION or ALARM in the last 24 hours, (a) cap total "
+    "deployment at 70% — the 30% minimum goes to cash, not rotation; "
+    "(b) do not open new sector positions to replace trimmed ones this cycle; "
+    "freed weight stays in cash first.\n"
+    "\n"
+    "CREATIVE SCOUT RULE: If the creative or scout agent shows a bullish "
+    "take with confidence ≥ 0.70 on a stock or sector NOT currently in the "
+    "top three holdings by weight, allocate at least 5% there — this is "
+    "the forcing function for portfolio evolution beyond existing themes.\n"
+    "\n"
+    "STOCK PREFERENCE (mandatory): Individual stocks are the PRIMARY vehicle. "
+    "When a sector thesis is clear, own the best 1-3 individual names in "
+    "that sector — NOT the sector ETF. Examples: own LMT or RTX instead of "
+    "ITA; own JPM or V instead of XLF; own LLY or UNH instead of XLV; own "
+    "AMAT or ASML instead of SMH. Sector ETFs are last resort: use them "
+    "only when the thesis is too diffuse to pick a winner, OR as a "
+    "defensive hedge. Hard cap: maximum 3 ETF positions in the book at any "
+    "time — if you want to express more than 3 sector views, express the "
+    "rest via individual stocks.\n"
+    "\n"
+    "Trust calibration over stated confidence — an agent wrong all month is "
+    "a fade. Social-signal sources with high trust scores (flagged by the "
+    "creative agent's 'cited_lessons' or 'sources' fields) add weight to a "
+    "thesis even when the committee majority is quiet on it. "
+    "Respond ONLY with JSON: "
     '{"target_weights": {"<TICKER>": <0.0-0.25>, ...}, '
-    '"rationale": "<4-6 sentences: the trade and the why>", '
+    '"rationale": "<5-7 sentences: the trade, the anti-inertia check result, '
+    'stock-vs-ETF decisions, and whether the sentinel rule applied>", '
     '"watch": "<what would change your mind this week>"}'
 )
 
@@ -353,6 +384,21 @@ def run_agent_pm(
 
     # --- assemble the PM's evidence: week of rulings + calibration + context
     week = mem.journal_tail(6, kind="committee")
+
+    # Sentinel state: the PM must know if a tripwire fired recently so the
+    # sentinel rule in the charter can be applied explicitly.
+    sentinel_state: dict[str, Any] = {}
+    try:
+        sentinel_path = Path(state_dir) / "sentinel.json"
+        if sentinel_path.exists():
+            raw = json.loads(sentinel_path.read_text())
+            sentinel_state = {
+                "last_alert_ts": raw.get("last_alert_ts"),
+                "triggers": raw.get("triggers", []),
+            }
+    except Exception:
+        pass
+
     prompt = json.dumps(
         {
             "sim_portfolio": {
@@ -375,6 +421,7 @@ def run_agent_pm(
             ),
             "week_of_committee_rulings": week,
             "agent_calibration": mem.calibration(),
+            "sentinel_alert": sentinel_state or None,
             "today_context": context,
         },
         default=str,

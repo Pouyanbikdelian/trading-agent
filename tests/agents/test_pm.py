@@ -44,8 +44,8 @@ def test_clamp_enforces_whitelist_cap_and_gross() -> None:
     )
     assert "FAKE" not in w and "TLT" not in w  # off-universe / short dropped
     # SMH (0.9 -> per-name 0.25) + QQQ (0.25) are both tech_complex: the
-    # 0.40 cluster cap scales them to 0.20 each. XLE/SPY are unaffected.
-    assert w["SMH"] == w["QQQ"] == 0.2
+    # 0.50 cluster cap; combined = 0.50 exactly so no scaling needed.
+    assert w["SMH"] == 0.25 and w["QQQ"] == 0.25
     assert w["XLE"] == 0.25 and w["SPY"] == 0.25
     assert sum(w.values()) <= 1.0 + 1e-9  # gross cap
     assert all(s in UNIVERSE for s in w)

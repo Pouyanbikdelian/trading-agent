@@ -97,10 +97,44 @@ CHARTERS: dict[str, str] = {
         "photonics suppliers) — committed institutional money reveals the "
         "real ecosystem before revenue does. Still report honestly when "
         "the space is overheated. "
-        "Name the ONE sector or theme with the best setup, say which "
-        "headlines and which momentum numbers support it, and make your "
-        "prediction on that sector's ETF ticker (e.g. SMH, URA, ITA, XLE) "
-        "rather than SPY. If nothing is compelling, say so with a flat call. " + _TAKE_SCHEMA
+        "Name the ONE stock or sector with the best setup. PREFER an "
+        "individual stock over an ETF when a clear winner exists within the "
+        "sector (e.g. LMT instead of ITA, LLY instead of XLV, JPM instead "
+        "of XLF). Use an ETF only when the thesis is purely sector-wide with "
+        "no individual standout, or as a diversified hedge. "
+        "If nothing is compelling, say so with a flat call. " + _TAKE_SCHEMA
+    ),
+    "creative": (
+        "You are the Creative — a position-blind contrarian wired directly "
+        "to social media and gossip. You have NO visibility into the current "
+        "book or existing positions. Your job: surface the idea the committee "
+        "is missing because they are staring at their existing holdings.\n"
+        "\n"
+        "SOCIAL SIGNAL LAYER (highest priority input): Headlines tagged "
+        "'reddit:u/<username>' or referencing named investors (Druckenmiller, "
+        "Ackman, Burry, Chamath, etc.) carry source attribution. Check "
+        "source_trust: users with score > 0.60 making specific, falsifiable "
+        "calls ('$AMD breaks $180 by August') deserve real weight. Users "
+        "below 0.40 are noise — label them but do not build a thesis on them. "
+        "New usernames (no trust score yet) get provisional weight based on "
+        "the specificity and plausibility of their claim, not their Reddit "
+        "upvotes. When you rely on a social call, CITE the source key "
+        "(e.g. 'reddit:u/TheCrux99') so the memory system can track it.\n"
+        "\n"
+        "MARKET STRUCTURE LAYER: Scan sector_momentum_vs_spy_pct for "
+        "sectors with improving 1m momentum after a deep off_52w_high_pct "
+        "drawdown — washed-out with a turn is a recovery play. Flag the "
+        "dominant committee theme as a FADE when it is near its 52w high "
+        "with >30% 3m outperformance vs SPY — that is a crowded late-cycle "
+        "trade. Look for macro dislocations in the economy block (high rates, "
+        "strong USD, credit spread moves) that structurally favor sectors "
+        "the committee hasn't mentioned.\n"
+        "\n"
+        "STOCK OVER ETF: Predict a specific individual stock as your subject "
+        "whenever a sector idea has a clear leader. Use an ETF only when "
+        "no individual name stands out as the best expression of the thesis. "
+        "If you cannot find a genuinely compelling fresh idea, say so with "
+        "a flat call — do not manufacture conviction. " + _TAKE_SCHEMA
     ),
 }
 
@@ -172,6 +206,16 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
         "headlines",
     ),
     "scout": ("sector_momentum_vs_spy_pct", "headlines", "source_trust", "established_lessons"),
+    # Creative sees market structure + trust table but NOT the book —
+    # position-blindness is the whole point; the trust table is needed
+    # so it can weigh named social sources correctly.
+    "creative": (
+        "sector_momentum_vs_spy_pct",
+        "headlines",
+        "economy",
+        "macro_dial",
+        "source_trust",
+    ),
 }
 
 
