@@ -315,6 +315,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
   <div id="raceEmpty" class="muted" style="display:none;padding:18px 0"></div>
   <canvas id="race" height="84"></canvas><div id="pmline" class="muted" style="margin-top:8px"></div></div>
  <div class="card"><h2>Account</h2><div id="account"></div><h2 style="margin-top:12px">Positions</h2><div id="positions"></div></div>
+ <div class="card"><h2>Agent PM · holdings</h2><div id="pmholds"></div></div>
  <div class="card"><h2>Committee (latest)</h2><div id="committee"></div>
   <h2 style="margin-top:14px">Posture history <span class="muted" style="text-transform:none;letter-spacing:0">— dot color = posture, height = dissent</span></h2>
   <canvas id="postCh" height="56"></canvas></div>
@@ -448,6 +449,37 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    <td>${p.now_pctile_52w!=null?Math.round(p.now_pctile_52w*100)+'%':'–'}</td></tr>`).join('');
  document.getElementById('positions').innerHTML=rows?
   `<table><tr><th>sym</th><th>uP&L</th><th>entry@52w</th><th>now@52w</th></tr>${rows}</table>`:'<span class="muted">flat</span>';
+
+ // Agent PM holdings card — target weights from last PM run.
+ (()=>{
+  const lr=(d.agent_pm||{}).last_run||{};
+  const wts=lr.weights||{};
+  const keys=Object.keys(wts).sort((a,b)=>wts[b]-wts[a]);
+  const el=document.getElementById('pmholds');
+  if(!keys.length){
+   el.innerHTML='<span class="muted">no PM run yet — trigger /pm run in Telegram or run <code>trading agents pm run</code></span>';
+   return;
+  }
+  const invested=keys.reduce((s,k)=>s+wts[k],0);
+  const cash=Math.max(0,1-invested);
+  const allRows=[...keys.map(k=>[k,wts[k]]),[['cash',cash]]].flat();
+  // Build bar rows
+  const barRows=keys.map(k=>{
+   const w=wts[k],pct=(100*w).toFixed(1);
+   return `<div class="srow"><span class="nm" style="width:72px;font-weight:600;color:var(--ink)">${k}</span>
+    <div class="track" style="flex:1"><i style="left:0;width:${(100*w).toFixed(1)}%;background:var(--acc)"></i></div>
+    <span class="val" style="width:46px">${pct}%</span></div>`;}).join('');
+  const cashPct=(100*cash).toFixed(1);
+  const eq=(d.agent_pm||{}).last_run&&lr.equity?`$${num(lr.equity)}`:'';
+  const ts=lr.ts?String(lr.ts).slice(0,10):'';
+  el.innerHTML=barRows+
+   `<div class="srow" style="margin-top:4px"><span class="nm" style="width:72px;color:var(--mut)">cash</span>
+    <div class="track" style="flex:1"><i style="left:0;width:${cashPct}%;background:var(--mut)"></i></div>
+    <span class="val" style="width:46px;color:var(--mut)">${cashPct}%</span></div>`+
+   (ts?`<div class="muted" style="font-size:11px;margin-top:8px">last run ${ts}${eq?' · equity '+eq:''}</div>`:'')+
+   (lr.watch?`<div class="muted" style="font-size:11.5px;margin-top:6px;line-height:1.4">👁 ${String(lr.watch).slice(0,200)}</div>`:'');
+ })();
+
  const co=d.committee||{};
  if(co.ok){const r=co.ruling||{};
   const takes=Object.entries(co.takes||{}).map(([n,t])=>`<span class="pill">${{'bullish':'🟢','neutral':'⚪','bearish':'🔴'}[t.stance]||'⚪'} ${n}</span>`).join('');
