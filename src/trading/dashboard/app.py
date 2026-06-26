@@ -313,7 +313,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  <div class="card big"><h2>Strategy race · normalized to 100
   <span class="muted" style="text-transform:none;letter-spacing:0">— click legend entries to toggle series</span></h2>
   <div id="raceEmpty" class="muted" style="display:none;padding:18px 0"></div>
-  <canvas id="race" height="84"></canvas><div id="pmline" class="muted" style="margin-top:8px"></div></div>
+  <canvas id="race" height="84"></canvas></div>
  <div class="card"><h2>Account</h2><div id="account"></div><h2 style="margin-top:12px">Positions</h2><div id="positions"></div></div>
  <div class="card"><h2>Agent PM · holdings</h2><div id="pmholds"></div></div>
  <div class="card"><h2>Committee (latest)</h2><div id="committee"></div>
@@ -427,17 +427,6 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   b.classList.add('on');drawEq(b.dataset.r);drawRace(b.dataset.r);});
  drawEq('1y');drawRace('1y');
  const apm=d.agent_pm||{};
- if(apm.history&&apm.history.length){
-  const h0=apm.history[0],hN=apm.history[apm.history.length-1];
-  const base=+(apm.start_equity||h0.equity);
-  const simRet=(+hN.equity/base-1);
-  const hold=Object.keys(apm.holdings||{}).sort().join(', ')||'all cash';
-  const lr=apm.last_run||{};
-  document.getElementById('pmline').innerHTML=
-   `🧪 sim started <b>${String(h0.t).slice(0,10)}</b> at <b>$${num(base)}</b> · now ${num(hN.equity)} `+
-   `(<span class="${simRet>=0?'pos':'neg'}">${pct(simRet,2)}</span>) · holds: <b>${hold}</b> · cash ${num(apm.cash)}`+
-   (lr.rationale?`<br>last rationale: ${String(lr.rationale).slice(0,220)}…`:'');
- } else document.getElementById('pmline').textContent='agent PM has no book yet — /pm run in Telegram starts one';
  const ctx=d.context||{};const a=ctx.account||{};
  document.getElementById('account').innerHTML=
   `<span class="tile"><b>${num(a.equity)}</b><br><span class="muted">${a.base_currency||''} equity</span></span>`+
@@ -450,34 +439,52 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  document.getElementById('positions').innerHTML=rows?
   `<table><tr><th>sym</th><th>uP&L</th><th>entry@52w</th><th>now@52w</th></tr>${rows}</table>`:'<span class="muted">flat</span>';
 
- // Agent PM holdings card — target weights from last PM run.
+ // Agent PM holdings card.
  (()=>{
-  const lr=(d.agent_pm||{}).last_run||{};
-  const wts=lr.weights||{};
-  const keys=Object.keys(wts).sort((a,b)=>wts[b]-wts[a]);
   const el=document.getElementById('pmholds');
+  const lr=apm.last_run||{};
+  const wts=lr.weights||{};
+  const hist=apm.history||[];
+  const keys=Object.keys(wts).sort((a,b)=>wts[b]-wts[a]);
   if(!keys.length){
-   el.innerHTML='<span class="muted">no PM run yet — trigger /pm run in Telegram or run <code>trading agents pm run</code></span>';
+   el.innerHTML='<span class="muted" style="font-size:13px">No PM run yet.<br>Trigger one via Telegram <b>/pm run</b> or<br><code>trading agents pm run</code></span>';
    return;
   }
+  // Equity summary row
+  let summaryHtml='';
+  if(hist.length){
+   const h0=hist[0],hN=hist[hist.length-1];
+   const base=+(apm.start_equity||h0.equity);
+   const ret=+hN.equity/base-1;
+   const retCls=ret>=0?'pos':'neg';
+   summaryHtml=`<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--edge)">
+    <div><span style="font-size:20px;font-weight:700;font-variant-numeric:tabular-nums">$${num(+hN.equity)}</span>
+     <span class="muted" style="font-size:12px;margin-left:6px">equity</span></div>
+    <div class="${retCls}" style="font-size:16px;font-weight:600">${pct(ret,2)}</div>
+   </div>`;
+  }
+  // Weight bars
   const invested=keys.reduce((s,k)=>s+wts[k],0);
-  const cash=Math.max(0,1-invested);
-  const allRows=[...keys.map(k=>[k,wts[k]]),[['cash',cash]]].flat();
-  // Build bar rows
+  const cashW=Math.max(0,1-invested);
   const barRows=keys.map(k=>{
-   const w=wts[k],pct=(100*w).toFixed(1);
-   return `<div class="srow"><span class="nm" style="width:72px;font-weight:600;color:var(--ink)">${k}</span>
-    <div class="track" style="flex:1"><i style="left:0;width:${(100*w).toFixed(1)}%;background:var(--acc)"></i></div>
-    <span class="val" style="width:46px">${pct}%</span></div>`;}).join('');
-  const cashPct=(100*cash).toFixed(1);
-  const eq=(d.agent_pm||{}).last_run&&lr.equity?`$${num(lr.equity)}`:'';
-  const ts=lr.ts?String(lr.ts).slice(0,10):'';
-  el.innerHTML=barRows+
-   `<div class="srow" style="margin-top:4px"><span class="nm" style="width:72px;color:var(--mut)">cash</span>
-    <div class="track" style="flex:1"><i style="left:0;width:${cashPct}%;background:var(--mut)"></i></div>
-    <span class="val" style="width:46px;color:var(--mut)">${cashPct}%</span></div>`+
-   (ts?`<div class="muted" style="font-size:11px;margin-top:8px">last run ${ts}${eq?' · equity '+eq:''}</div>`:'')+
-   (lr.watch?`<div class="muted" style="font-size:11.5px;margin-top:6px;line-height:1.4">👁 ${String(lr.watch).slice(0,200)}</div>`:'');
+   const w=wts[k];
+   return `<div class="srow" style="margin:5px 0">
+    <span style="width:60px;font-weight:600;color:var(--ink);font-size:13px">${k}</span>
+    <div class="track" style="flex:1;height:8px">
+     <i style="left:0;width:${(100*w).toFixed(1)}%;background:var(--acc);border-radius:4px"></i>
+    </div>
+    <span style="width:42px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums">${(100*w).toFixed(1)}%</span>
+   </div>`;}).join('');
+  const cashRow=`<div class="srow" style="margin:5px 0;opacity:.6">
+   <span style="width:60px;font-size:13px;color:var(--mut)">cash</span>
+   <div class="track" style="flex:1;height:8px">
+    <i style="left:0;width:${(100*cashW).toFixed(1)}%;background:var(--mut);border-radius:4px"></i>
+   </div>
+   <span style="width:42px;text-align:right;font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums">${(100*cashW).toFixed(1)}%</span>
+  </div>`;
+  const ts=lr.ts?`<div class="muted" style="font-size:11px;margin-top:10px">last updated ${String(lr.ts).slice(0,10)}</div>`:'';
+  const watch=lr.watch?`<div style="margin-top:10px;padding:8px 10px;background:rgba(255,255,255,.03);border-radius:8px;border:1px solid var(--edge);font-size:12px;line-height:1.5;color:var(--mut)">👁 <b style="color:var(--ink)">watching:</b> ${String(lr.watch).slice(0,240)}</div>`:'';
+  el.innerHTML=summaryHtml+barRows+cashRow+ts+watch;
  })();
 
  const co=d.committee||{};
