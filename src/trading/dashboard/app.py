@@ -447,44 +447,27 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   const hist=apm.history||[];
   const keys=Object.keys(wts).sort((a,b)=>wts[b]-wts[a]);
   if(!keys.length){
-   el.innerHTML='<span class="muted" style="font-size:13px">No PM run yet.<br>Trigger one via Telegram <b>/pm run</b> or<br><code>trading agents pm run</code></span>';
+   el.innerHTML='<span class="muted">no PM run yet — trigger /pm run in Telegram</span>';
    return;
   }
-  // Equity summary row
-  let summaryHtml='';
+  // Equity + return tiles (same style as Account card)
+  let tilesHtml='';
   if(hist.length){
    const h0=hist[0],hN=hist[hist.length-1];
    const base=+(apm.start_equity||h0.equity);
    const ret=+hN.equity/base-1;
-   const retCls=ret>=0?'pos':'neg';
-   summaryHtml=`<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--edge)">
-    <div><span style="font-size:20px;font-weight:700;font-variant-numeric:tabular-nums">$${num(+hN.equity)}</span>
-     <span class="muted" style="font-size:12px;margin-left:6px">equity</span></div>
-    <div class="${retCls}" style="font-size:16px;font-weight:600">${pct(ret,2)}</div>
-   </div>`;
+   tilesHtml=`<span class="tile"><b>${num(+hN.equity)}</b><br><span class="muted">sim equity</span></span>`+
+    `<span class="tile"><b class="${ret>=0?'pos':'neg'}">${pct(ret,2)}</b><br><span class="muted">since inception</span></span>`+
+    `<span class="tile"><b>${num(+(apm.cash||0))}</b><br><span class="muted">cash</span></span>`;
   }
-  // Weight bars
+  // Holdings table
   const invested=keys.reduce((s,k)=>s+wts[k],0);
   const cashW=Math.max(0,1-invested);
-  const barRows=keys.map(k=>{
-   const w=wts[k];
-   return `<div class="srow" style="margin:5px 0">
-    <span style="width:60px;font-weight:600;color:var(--ink);font-size:13px">${k}</span>
-    <div class="track" style="flex:1;height:8px">
-     <i style="left:0;width:${(100*w).toFixed(1)}%;background:var(--acc);border-radius:4px"></i>
-    </div>
-    <span style="width:42px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums">${(100*w).toFixed(1)}%</span>
-   </div>`;}).join('');
-  const cashRow=`<div class="srow" style="margin:5px 0;opacity:.6">
-   <span style="width:60px;font-size:13px;color:var(--mut)">cash</span>
-   <div class="track" style="flex:1;height:8px">
-    <i style="left:0;width:${(100*cashW).toFixed(1)}%;background:var(--mut);border-radius:4px"></i>
-   </div>
-   <span style="width:42px;text-align:right;font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums">${(100*cashW).toFixed(1)}%</span>
-  </div>`;
-  const ts=lr.ts?`<div class="muted" style="font-size:11px;margin-top:10px">last updated ${String(lr.ts).slice(0,10)}</div>`:'';
-  const watch=lr.watch?`<div style="margin-top:10px;padding:8px 10px;background:rgba(255,255,255,.03);border-radius:8px;border:1px solid var(--edge);font-size:12px;line-height:1.5;color:var(--mut)">👁 <b style="color:var(--ink)">watching:</b> ${String(lr.watch).slice(0,240)}</div>`:'';
-  el.innerHTML=summaryHtml+barRows+cashRow+ts+watch;
+  const trows=keys.map(k=>`<tr><td>${k}</td><td class="pos">${(100*wts[k]).toFixed(1)}%</td></tr>`).join('');
+  const cashRow=`<tr><td class="muted">cash</td><td class="muted">${(100*cashW).toFixed(1)}%</td></tr>`;
+  const table=`<table style="margin-top:12px"><tr><th>sym</th><th>alloc</th></tr>${trows}${cashRow}</table>`;
+  const watch=lr.watch?`<div class="muted" style="font-size:12px;margin-top:10px;line-height:1.5;border-top:1px solid var(--edge);padding-top:8px">👁 ${String(lr.watch).slice(0,240)}</div>`:'';
+  el.innerHTML=tilesHtml+table+watch;
  })();
 
  const co=d.committee||{};
