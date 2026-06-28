@@ -327,6 +327,10 @@ class Cycle:
         signal = self._weights_to_signal(weights, instruments, ts_start, cfg=cfg)
         last_prices = self._last_prices(prices, instruments)
         instruments_by_key = {ins.key: ins for ins in instruments if ins.key in last_prices}
+        # Sector tags for the risk manager's sector cap. cfg.sector_map wins;
+        # otherwise derive key -> sector from the fundamentals cache so the cap
+        # actually binds instead of silently no-op'ing on an empty map.
+        sector_map = self._resolve_sector_map(instruments_by_key, cfg)
 
         # 8. Risk manager: signal -> orders.
         logger.bind(component="cycle").info(
@@ -337,7 +341,7 @@ class Cycle:
             account=account,
             last_prices=last_prices,
             instruments=instruments_by_key,
-            sector_map=cfg.sector_map or None,
+            sector_map=sector_map,
             **({"order_id_factory": self._order_id_factory} if self._order_id_factory else {}),
         )
 
@@ -448,7 +452,7 @@ class Cycle:
                     account=account,
                     last_prices=last_prices,
                     instruments=instruments_by_key,
-                    sector_map=cfg.sector_map or None,
+                    sector_map=sector_map,
                     **(
                         {"order_id_factory": self._order_id_factory}
                         if self._order_id_factory
@@ -738,6 +742,31 @@ class Cycle:
         "Real Estate": "XLRE",
         "Communication Services": "XLC",
     }
+
+    def _resolve_sector_map(
+        self, instruments_by_key: dict[str, Instrument], cfg: RunnerConfig
+    ) -> dict[str, str] | None:
+        """Sector tags for the risk manager's sector cap (``max_sector_exposure``).
+
+        Precedence: an explicit ``cfg.sector_map`` always wins. Otherwise derive
+        ``instrument.key -> sector`` from the fundamentals cache, so the cap binds
+        automatically wherever fundamentals exist instead of no-op'ing on the
+        empty default. Returns ``None`` when neither source yields tags — the cap
+        then stays disabled, exactly as before.
+        """
+        if cfg.sector_map:
+            return dict(cfg.sector_map)
+        if not cfg.fundamentals_path:
+            return None
+        from trading.data.fundamentals_source import read_fundamentals_cache
+
+        funds = read_fundamentals_cache(Path(cfg.fundamentals_path))
+        out: dict[str, str] = {}
+        for key, ins in instruments_by_key.items():
+            f = funds.get(ins.symbol)
+            if f is not None and f.sector:
+                out[key] = str(f.sector)
+        return out or None
 
     def _load_sector_prices(self, freq: Frequency) -> pd.DataFrame:
         """Read sector-ETF closes from the cache and re-key by sector name

@@ -23,6 +23,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
+from trading.agents.guards import run_guards
 from trading.core.logging import logger
 from trading.memory.store import MemoryStore
 
@@ -156,7 +157,10 @@ CHALLENGER_CHARTER = (
 MANAGER_CHARTER = (
     "You are the Fund Manager — neutral arbiter. You will be shown all takes, "
     "the Challenger's objections, and each agent's historical calibration. "
-    "Weigh agents by track record, not eloquence. Respond ONLY with JSON: "
+    "Weigh agents by track record, not eloquence. Any guard_flags shown are "
+    "deterministic mechanical checks (e.g. a name flagged at its 52-week high, "
+    "book concentration) — treat them as verified facts, not opinions, and let "
+    "them temper conviction. Respond ONLY with JSON: "
     '{"posture": "risk_on|neutral|risk_off", '
     '"proposal": "<3-5 sentences: what you would do and why>", '
     '"watch": "<the one thing that would change your mind>", '
@@ -242,9 +246,19 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:
+    """Specialist (mid-tier) completion — the cheap, high-volume takes."""
     from trading.agents.llm import complete_json
 
     return complete_json(system, prompt)
+
+
+def _frontier_llm(system: str, prompt: str) -> dict[str, Any]:
+    """Decision-node completion — challenger + manager run on the frontier model
+    (``tier='frontier'``). Their job is judgement and adversarial reasoning,
+    where the stronger model earns its cost; ~2 calls per cycle."""
+    from trading.agents.llm import complete_json
+
+    return complete_json(system, prompt, tier="frontier")
 
 
 def run_committee(
@@ -260,14 +274,18 @@ def run_committee(
     dossiers, trust table, lessons). Built by the runner — this function
     does no I/O beyond the LLM and memory writes, so it stays testable.
     """
-    llm = llm or _default_llm
+    # Per-role model routing: specialists on the mid-tier model (high volume,
+    # low stakes); the two decision nodes (challenger + manager) on the frontier
+    # model. An injected ``llm`` (tests) overrides both and keeps runs hermetic.
+    specialist_llm = llm or _default_llm
+    decision_llm = llm or _frontier_llm
     ctx_block = json.dumps(context, default=str, indent=1)[:18000]
     takes: dict[str, dict[str, Any]] = {}
 
     for name, charter in CHARTERS.items():
         try:
             view = json.dumps(_agent_view(name, context), default=str, indent=1)[:18000]
-            out = llm(charter, f"Today's context (your specialist slice):\n{view}")
+            out = specialist_llm(charter, f"Today's context (your specialist slice):\n{view}")
             pred = out.get("prediction") or {}
             if not {"subject", "direction", "horizon_days", "confidence"} <= set(pred):
                 raise ValueError("take missing falsifiable prediction")
@@ -288,12 +306,16 @@ def run_committee(
     if not takes:
         return {"ok": False, "reason": "no agent produced a valid take"}
 
+    # Deterministic guards: mechanical checks the personas miss. Advisory
+    # context for the manager + the digest; never an order gate.
+    guard_flags = run_guards(takes, context)
+
     # --- Challenger round: sees ALL takes + market context
     objections: list[dict[str, Any]] = []
     market_caveat = ""
     try:
         target_block = json.dumps(takes, default=str)[:6000]
-        ch = llm(
+        ch = decision_llm(
             CHALLENGER_CHARTER,
             f"Market context:\n{ctx_block[:3000]}\n\nCommittee takes:\n{target_block}",
         )
@@ -318,10 +340,11 @@ def run_committee(
                 "objections": objections,
                 "calibration": calibration or [],
                 "disagreement_index": disagreement,
+                "guard_flags": guard_flags,
             },
             default=str,
         )[:9000]
-        ruling = llm(MANAGER_CHARTER, manager_prompt)
+        ruling = decision_llm(MANAGER_CHARTER, manager_prompt)
     except Exception as e:
         logger.bind(component="agents", agent="manager").warning(f"ruling failed: {e}")
         ruling = {
@@ -339,6 +362,7 @@ def run_committee(
         "ruling": ruling,
         "market_caveat": market_caveat,
         "disagreement_index": disagreement,
+        "guard_flags": guard_flags,
     }
     mem.journal("committee", {"ruling": ruling, "disagreement": disagreement}, actor="manager")
     return digest
@@ -400,6 +424,11 @@ def format_digest(digest: dict[str, Any]) -> str:
     if digest.get("market_caveat"):
         lines.append("")
         lines.append(f"⚠️ *Market phase:* {digest['market_caveat']}")
+    if digest.get("guard_flags"):
+        lines.append("")
+        lines.append("🛡 *Guards (mechanical):*")
+        for g in digest["guard_flags"][:6]:
+            lines.append(f"  • {_clip(g, 200)}")
     r = digest["ruling"]
     posture_icon = {"risk_on": "🟢", "neutral": "⚪", "risk_off": "🔴"}.get(
         r.get("posture", "neutral"), "⚪"

@@ -24,6 +24,10 @@ from trading.core.logging import logger
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+# Frontier tier for the committee's decision nodes (challenger, manager).
+# Overridable via the AGENTS_MODEL_FRONTIER env var without a code change.
+FRONTIER_ANTHROPIC_MODEL = "claude-opus-4-8"
+FRONTIER_OPENAI_MODEL = "gpt-4o"
 TIMEOUT_S = 60.0
 
 
@@ -114,22 +118,47 @@ def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int) -> st
     return resp.json()["choices"][0]["message"]["content"]
 
 
-def complete_text(system: str, prompt: str, *, max_tokens: int = 1200) -> str:
-    model = _agents_model()
+def _frontier_model_override() -> str | None:
+    """Operator-set frontier model from settings or env, if any."""
+    from trading.core.config import settings
+
+    return getattr(settings, "agents_model_frontier", None) or os.getenv("AGENTS_MODEL_FRONTIER")
+
+
+def _resolve_anthropic_model(tier: str | None) -> str:
+    if tier == "frontier":
+        return _frontier_model_override() or FRONTIER_ANTHROPIC_MODEL
+    return _agents_model() or DEFAULT_ANTHROPIC_MODEL
+
+
+def _resolve_openai_model(tier: str | None) -> str:
+    if tier == "frontier":
+        return FRONTIER_OPENAI_MODEL
+    return _agents_model() or DEFAULT_OPENAI_MODEL
+
+
+def complete_text(
+    system: str, prompt: str, *, max_tokens: int = 1200, tier: str | None = None
+) -> str:
+    """One text completion. ``tier='frontier'`` routes the decision nodes
+    (challenger, manager) to the stronger model; the default (None) keeps the
+    mid-tier committee model. Provider is chosen by which API key is present."""
     if _anthropic_key():
         return _call_anthropic(
-            system, prompt, model=model or DEFAULT_ANTHROPIC_MODEL, max_tokens=max_tokens
+            system, prompt, model=_resolve_anthropic_model(tier), max_tokens=max_tokens
         )
     if _openai_key():
         return _call_openai(
-            system, prompt, model=model or DEFAULT_OPENAI_MODEL, max_tokens=max_tokens
+            system, prompt, model=_resolve_openai_model(tier), max_tokens=max_tokens
         )
     raise AgentsDisabledError("set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable agents")
 
 
-def complete_json(system: str, prompt: str, *, max_tokens: int = 1200) -> dict[str, Any]:
+def complete_json(
+    system: str, prompt: str, *, max_tokens: int = 1200, tier: str | None = None
+) -> dict[str, Any]:
     """One completion, parsed as JSON; one retry on parse failure."""
-    text = complete_text(system, prompt, max_tokens=max_tokens)
+    text = complete_text(system, prompt, max_tokens=max_tokens, tier=tier)
     try:
         return _extract_json(text)
     except Exception:
@@ -138,5 +167,6 @@ def complete_json(system: str, prompt: str, *, max_tokens: int = 1200) -> dict[s
             system,
             prompt + "\n\nRespond with ONLY a valid JSON object. No prose.",
             max_tokens=max_tokens,
+            tier=tier,
         )
         return _extract_json(text)

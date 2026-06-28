@@ -23,6 +23,52 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _load_fundamentals(data_dir: Path) -> dict[str, Any]:
+    """{symbol: Fundamentals} from the cache, or {} on any miss/error. Gives
+    each position a sector tag so the committee (quant's correlation rule) and
+    the deterministic guards can see when the book is concentrated. Never
+    raises — sectors are a nice-to-have, never a reason to drop the context."""
+    try:
+        from trading.data.fundamentals_source import read_fundamentals_cache
+
+        path = data_dir / "fundamentals.parquet"
+        return read_fundamentals_cache(path) if path.exists() else {}
+    except Exception:
+        return {}
+
+
+def _book_concentration(
+    closes: dict[str, Any], *, window: int = 90, min_names: int = 3
+) -> dict[str, Any] | None:
+    """One interpretable concentration number for the held book: the 'effective
+    number of bets' (ENB) from the correlation eigenvalues, plus average pairwise
+    correlation. ENB ≈ N when names are independent and ≈ 1 when they all move
+    together — so 6 holdings that act like 1.5 bets is the correlation a sector
+    tag can't see (cross-sector co-movement). Reuses the closes build_context
+    already read — no extra I/O. Returns None when there isn't enough clean,
+    overlapping history; a missing number beats a noisy one."""
+    if len(closes) < min_names:
+        return None
+    try:
+        import numpy as np
+        import pandas as pd
+
+        recent = pd.DataFrame(closes).sort_index().pct_change().iloc[-window:]
+        recent = recent.dropna(axis=1, how="any")  # keep names with full recent history
+        if recent.shape[1] < min_names or recent.shape[0] < 20:
+            return None
+        corr = recent.corr().to_numpy()
+        n = corr.shape[0]
+        eig = np.linalg.eigvalsh(corr)
+        eig = eig[eig > 1e-9]
+        enb = float(eig.sum() ** 2 / np.square(eig).sum()) if eig.size else float(n)
+        off = corr[~np.eye(n, dtype=bool)]
+        avg_corr = float(off.mean()) if off.size else 0.0
+        return {"n": n, "effective_bets": round(enb, 1), "avg_corr": round(avg_corr, 2)}
+    except Exception:
+        return None
+
+
 def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     from trading.memory.store import MemoryStore
     from trading.runner.holds import load_holds, load_k_override
@@ -36,6 +82,8 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         snap = RunnerStore(state_dir / "runner.db").latest_snapshot()
         positions = []
         if snap:
+            funds = _load_fundamentals(data_dir)
+            close_series: dict[str, Any] = {}
             for pos in snap.positions.values():
                 sym = pos.instrument.symbol
                 row: dict[str, Any] = {
@@ -45,6 +93,7 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
                 }
                 s = _read_close(data_dir, sym)
                 if s is not None and len(s) > 60:
+                    close_series[sym] = s
                     last = float(s.iloc[-1])
                     yr = s.iloc[-252:]
                     lo, hi = float(yr.min()), float(yr.max())
@@ -53,12 +102,18 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
                     if hi > lo:
                         row["entry_pctile_52w"] = round((float(pos.avg_price) - lo) / (hi - lo), 2)
                         row["now_pctile_52w"] = round((last - lo) / (hi - lo), 2)
+                f = funds.get(sym)
+                if f is not None and getattr(f, "sector", None):
+                    row["sector"] = str(f.sector)
                 positions.append(row)
             ctx["account"] = {
                 "equity": snap.equity,
                 "cash": snap.cash,
                 "base_currency": snap.base_currency,
             }
+            bc = _book_concentration(close_series)
+            if bc:
+                ctx["book_concentration"] = bc
         ctx["positions"] = positions
     except Exception as e:
         logger.bind(component="agents").warning(f"context: book unavailable ({e})")
@@ -80,7 +135,7 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         ctx["established_lessons"] = [
             {
                 "id": r["id"],
-                "lesson": r["statement"],   # full elaborated text: title + 4-sentence body
+                "lesson": r["statement"],  # full elaborated text: title + 4-sentence body
                 "support_vs_contradict": f"{r['support']}/{r['contradict']}",
             }
             for r in mem.lessons(status="established")[:6]

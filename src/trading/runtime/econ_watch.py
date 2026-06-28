@@ -41,7 +41,12 @@ SERIES: dict[str, tuple[str, str, str, str]] = {
     # The Fed's actual target is core PCE; PPI leads consumer prices.
     "pce_yoy": ("PCEPI", "PCE", "yoy", "%"),
     "core_pce_yoy": ("PCEPILFE", "Core PCE", "yoy", "%"),
-    "ppi_yoy": ("PPIACO", "PPI (all commodities)", "yoy", "%"),
+    "ppi_yoy": ("PPIFIS", "PPI (final demand)", "yoy", "%"),
+    # All-commodities PPI: energy/commodity-heavy and far more volatile than
+    # final demand — kept as a separate LEADING read under an honest name so
+    # an agent never quotes it as "headline PPI" (it ran ~2x final demand in
+    # the 2026 energy shock, which is what produced the bogus stagflation read).
+    "ppi_commodities_yoy": ("PPIACO", "PPI (all commodities)", "yoy", "%"),
     "breakeven_10y": ("T10YIE", "10y breakeven", "level", "%"),
     "mortgage_30y": ("MORTGAGE30US", "30y mortgage", "level", "%"),
     "housing_starts": ("HOUST", "Housing starts", "k", "k"),

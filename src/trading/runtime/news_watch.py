@@ -101,13 +101,13 @@ SECTOR_ETFS: dict[str, str] = {
 # some subs — when present it is tagged as "reddit:u/<name>" so the
 # source-trust ledger can accumulate accuracy scores per user over time.
 _REDDIT_SUBS: tuple[str, ...] = (
-    "wallstreetbets",    # high-vol retail; useful as contrarian sentiment gauge
-    "investing",         # longer-horizon fundamental analysis
-    "stocks",            # broad retail sentiment
+    "wallstreetbets",  # high-vol retail; useful as contrarian sentiment gauge
+    "investing",  # longer-horizon fundamental analysis
+    "stocks",  # broad retail sentiment
     "securityanalysis",  # institutional-style deep dives
-    "options",           # derivatives positioning and flow ideas
+    "options",  # derivatives positioning and flow ideas
 )
-_REDDIT_MAX_PER_SUB = 5   # posts per subreddit per collection pass
+_REDDIT_MAX_PER_SUB = 5  # posts per subreddit per collection pass
 
 
 def fetch_reddit_signals() -> list[dict[str, str]]:
@@ -129,16 +129,14 @@ def fetch_reddit_signals() -> list[dict[str, str]]:
             resp = httpx.get(
                 f"https://www.reddit.com/r/{sub}/top.rss",
                 params={"t": "day"},
-                headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; trading-research/1.0)"
-                },
+                headers={"User-Agent": "Mozilla/5.0 (compatible; trading-research/1.0)"},
                 timeout=TIMEOUT_S,
                 follow_redirects=True,
             )
             resp.raise_for_status()
             root = ET.fromstring(resp.content)
             count = 0
-            for entry in root.findall("atom:entry", ns)[:_REDDIT_MAX_PER_SUB * 2]:
+            for entry in root.findall("atom:entry", ns)[: _REDDIT_MAX_PER_SUB * 2]:
                 title_el = entry.find("atom:title", ns)
                 author_el = entry.find("atom:author/atom:name", ns)
                 title = (title_el.text or "").strip() if title_el is not None else ""

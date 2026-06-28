@@ -212,9 +212,12 @@ def _stock_universe() -> tuple[str, ...]:
 
 
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:
+    """The PM turns the committee's debate into actual sim-book allocations —
+    a decision node, so it runs on the frontier model (``tier='frontier'``).
+    An injected llm (tests) overrides this and keeps runs hermetic."""
     from trading.agents.llm import complete_json
 
-    return complete_json(system, prompt)
+    return complete_json(system, prompt, tier="frontier")
 
 
 def _clamp_weights(raw: Any, stocks: tuple[str, ...] = ()) -> dict[str, float]:
