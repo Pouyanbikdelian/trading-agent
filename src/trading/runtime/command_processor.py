@@ -45,9 +45,31 @@ _ORDER_SUBMITTING_COMMANDS = {
     CommandType.FX_CONVERT,
 }
 
+# Order-submitting commands expire. A /flatten typed while the runner was
+# down must NOT fire when the runner comes back hours or days later — the
+# operator's intent was "flatten NOW", not "flatten whenever you wake up".
+# (Stale May commands were found sitting in state/commands/pending/ in a
+# July audit; without this gate a restart would have executed them.)
+# Non-order commands (cancel, refresh, reconnect) don't expire — they're
+# recovery actions, same exemption as the halt gate.
+COMMAND_MAX_AGE_SECONDS = 15 * 60
+
 
 def _short_id(uuid_str: str) -> str:
     return uuid_str[:8]
+
+
+def _age_seconds(cmd: Command) -> float | None:
+    """Age of the command, or None if requested_at is missing/unparseable."""
+    try:
+        ts = datetime.fromisoformat(cmd.requested_at)
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        # Naive timestamps shouldn't happen (submit() writes aware UTC),
+        # but if one appears, assume UTC rather than guessing local time.
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(tz=timezone.utc) - ts).total_seconds()
 
 
 def process_pending(
@@ -96,6 +118,24 @@ def _execute_one(
         mark_executed(cmd, state_dir, status="error", result=msg)
         alerts.error(f"❌ command `{_short_id(cmd.id)}` rejected: {msg}")
         return
+
+    # TTL gate: order-submitting commands must be fresh. Fail closed — a
+    # missing/unparseable timestamp on an order command is refused too,
+    # because we cannot prove it isn't stale.
+    if cmd.type in _ORDER_SUBMITTING_COMMANDS:
+        age = _age_seconds(cmd)
+        if age is None or age > COMMAND_MAX_AGE_SECONDS:
+            shown = "unknown age" if age is None else f"{age / 60:.0f} min old"
+            msg = (
+                f"expired — requested {shown}, limit is "
+                f"{COMMAND_MAX_AGE_SECONDS // 60} min. Re-issue if still wanted."
+            )
+            logger.bind(component="command_processor").warning(
+                f"TTL gate blocked {cmd.type.value} command {cmd.id} ({shown})"
+            )
+            mark_executed(cmd, state_dir, status="error", result=msg)
+            alerts.error(f"⌛ `{_short_id(cmd.id)}` {cmd.type.value} {msg}")
+            return
 
     # Halt gate: refuse to submit orders while the risk manager is halted.
     # Operator must /resume before manual trading resumes.

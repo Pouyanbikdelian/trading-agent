@@ -211,3 +211,80 @@ def test_halt_gate_picks_up_resume_from_disk_between_calls(state_dir, risk_manag
     assert broker.submitted[0].instrument.symbol == "AAPL"
     # And the in-memory state should now reflect the on-disk reality.
     assert not risk_manager.is_halted()
+
+
+# ---------------------------------------------------------------------------
+# TTL gate — order-submitting commands expire.
+# A /flatten typed while the runner was down must not fire when the runner
+# comes back hours later. Stale May-2026 commands found in a July audit
+# motivated this gate.
+# ---------------------------------------------------------------------------
+
+
+def _aged(cmd_type: CommandType, *, minutes_old: float, args: dict | None = None):
+    """Build a command whose requested_at is `minutes_old` minutes in the past."""
+    import dataclasses
+    from datetime import datetime, timedelta, timezone
+
+    cmd = Command.new(cmd_type, args=args)
+    old_ts = (datetime.now(tz=timezone.utc) - timedelta(minutes=minutes_old)).isoformat()
+    return dataclasses.replace(cmd, requested_at=old_ts)
+
+
+def test_ttl_gate_blocks_stale_order_commands(state_dir, risk_manager) -> None:
+    broker = _FakeBroker()
+    alerts = _RecordingAlerts()
+
+    submit(_aged(CommandType.FLATTEN, minutes_old=60), state_dir)
+    submit(
+        _aged(
+            CommandType.FX_CONVERT,
+            minutes_old=3 * 24 * 60,  # days-stale, like the May commands
+            args={"from_ccy": "CHF", "to_ccy": "USD", "amount": 5000},
+        ),
+        state_dir,
+    )
+
+    n = process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+    assert n == 2
+    assert broker.submitted == []
+    errors = [m for level, m in alerts.messages if level == "error"]
+    assert len(errors) == 2
+    assert all("expired" in m for m in errors)
+
+
+def test_ttl_gate_allows_fresh_order_commands(state_dir, risk_manager) -> None:
+    broker = _FakeBroker()
+    alerts = _RecordingAlerts()
+    submit(Command.new(CommandType.BUY, args={"symbol": "AAPL", "qty": 10}), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+    assert len(broker.submitted) == 1
+
+
+def test_ttl_gate_fails_closed_on_missing_timestamp(state_dir, risk_manager) -> None:
+    """An order command whose requested_at is unparseable cannot be proven
+    fresh, so it must be refused."""
+    import dataclasses
+
+    broker = _FakeBroker()
+    alerts = _RecordingAlerts()
+    cmd = dataclasses.replace(
+        Command.new(CommandType.BUY, args={"symbol": "AAPL", "qty": 10}),
+        requested_at="",
+    )
+    submit(cmd, state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+    assert broker.submitted == []
+    errors = [m for level, m in alerts.messages if level == "error"]
+    assert len(errors) == 1 and "expired" in errors[0]
+
+
+def test_ttl_gate_exempts_non_order_commands(state_dir, risk_manager) -> None:
+    """Recovery actions (refresh, reconnect) never expire — same exemption
+    as the halt gate."""
+    broker = _FakeBroker()
+    alerts = _RecordingAlerts()
+    submit(_aged(CommandType.REFRESH_DATA, minutes_old=10_000), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+    ttl_errors = [m for level, m in alerts.messages if level == "error" and "expired" in m]
+    assert ttl_errors == []
