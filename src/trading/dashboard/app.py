@@ -309,6 +309,15 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
   padding:5px 14px;border-radius:99px;font-size:12px;cursor:pointer;transition:all .15s}
  .playbtn:hover{background:rgba(63,207,142,.22)}
  #rrgScrub{flex:1;accent-color:var(--up);height:4px}
+ #rrgRange{display:inline-flex;background:var(--bg);border:1px solid var(--edge);border-radius:99px;padding:2px}
+ #rrgRange button{background:transparent;border:none;color:var(--mut);padding:3px 10px;border-radius:99px;font-size:11.5px;cursor:pointer}
+ #rrgRange button.on{background:var(--up);color:#08110c;font-weight:600}
+ .radrow .rd{display:block;color:var(--mut);font-size:11.5px;margin-top:3px;line-height:1.45}
+ .qboard{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+ .qcell{border:1px solid var(--edge);border-radius:9px;padding:8px 10px;font-size:12px}
+ .qcell h3{margin:0 0 5px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+ .qcell .qs{display:flex;justify-content:space-between;margin:2px 0}
+ .qcell .qs .dq{color:var(--mut);font-size:10.5px}
  .tip{position:absolute;pointer-events:none;display:none;background:#0d1219f2;border:1px solid var(--edge);
   border-radius:9px;padding:8px 11px;font-size:12px;line-height:1.5;z-index:5;box-shadow:0 6px 18px rgba(0,0,0,.5)}
  .tmap{position:relative;height:min(46vh,420px);min-height:300px;border-radius:12px;overflow:hidden}
@@ -368,7 +377,11 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
   <span class="muted" style="text-transform:none;letter-spacing:0">— x: relative strength · y: momentum of that strength · sectors orbit clockwise</span></h2>
   <div class="rrgbar">
    <button id="rrgPlay" class="playbtn">▶ play</button>
-   <input id="rrgScrub" type="range" min="0" max="12" value="12">
+   <span id="rrgRange">
+    <button data-d="63">3M</button><button data-d="126">6M</button>
+    <button data-d="252">1Y</button><button data-d="0" class="on">All</button>
+   </span>
+   <input id="rrgScrub" type="range" min="0" max="12" value="12" step="1">
    <span id="rrgDate" class="muted" style="font-variant-numeric:tabular-nums"></span>
   </div>
   <div class="rrgbox"><canvas id="rrg"></canvas><div id="rrgTip" class="tip"></div></div></div>
@@ -617,11 +630,19 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   if(!secs.length){
    cv.parentElement.innerHTML='<div class="muted" style="padding:24px">no rotation data yet — needs ~15 months of sector-ETF closes (yfinance fetch on next summary build)</div>';
   } else {
-   // Shared weekly timeline: union of all trail dates.
-   const weeks=[...new Set(secs.flatMap(s=>s.trail.map(p=>p.t)))].sort();
-   const scrub=document.getElementById('rrgScrub');scrub.max=weeks.length-1;scrub.value=weeks.length-1;
-   // Per-sector point at-or-before each week index, so gaps never break trails.
-   const at=(s,k)=>{let best=null;for(const p of s.trail){if(p.t<=weeks[k])best=p;else break;}return best;};
+   // Shared daily timeline: union of all trail dates, carry-forward gaps.
+   const days=[...new Set(secs.flatMap(s=>s.trail.map(p=>p.t)))].sort();
+   const dix=Object.fromEntries(days.map((t,i)=>[t,i]));
+   secs.forEach(s=>{s.arr=new Array(days.length).fill(null);
+    s.trail.forEach(p=>{s.arr[dix[p.t]]=p;});
+    let lastp=null;for(let i=0;i<days.length;i++){if(s.arr[i])lastp=s.arr[i];else s.arr[i]=lastp;}});
+   const scrub=document.getElementById('rrgScrub');scrub.max=days.length-1;scrub.value=days.length-1;
+   let k=days.length-1;      // playhead, fractional during animation
+   let startIdx=0;           // playback window start (range chips)
+   // Fractional lookup with linear interpolation → butter-smooth playback.
+   const at=(s,kf)=>{const i=Math.floor(kf),f=kf-i;const a=s.arr[i];
+    if(!a)return null;const b=s.arr[Math.min(i+1,days.length-1)];
+    if(!b||f<=0)return a;return {x:a.x+(b.x-a.x)*f,y:a.y+(b.y-a.y)*f};};
    // Symmetric scale around (100,100) so the quadrant cross sits centered.
    let mx=2.5,my=2.5;
    secs.forEach(s=>s.trail.forEach(p=>{mx=Math.max(mx,Math.abs(p.x-100)*1.18);my=Math.max(my,Math.abs(p.y-100)*1.18);}));
@@ -654,14 +675,13 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
      ctx2.moveTo(0,H/2+dy);ctx2.lineTo(W,H/2+dy);ctx2.moveTo(0,H/2-dy);ctx2.lineTo(W,H/2-dy);ctx2.stroke();}
     for(const s of secs){
      const head=at(s,k);if(!head)continue;
-     const past=s.trail.filter(p=>p.t<=weeks[k]).slice(-8);
+     // ~2 months of daily comet trail behind the playhead.
+     const end=Math.floor(k);
+     const past=s.arr.slice(Math.max(startIdx,end-42),end+1).filter(Boolean);
      const col=QCOL[head.x>=100?(head.y>=100?'leading':'weakening'):(head.y>=100?'improving':'lagging')];
-     // Trail: comet style — segments brighten toward the head.
      for(let i=1;i<past.length;i++){
-      ctx2.globalAlpha=.12+.5*i/past.length;ctx2.strokeStyle=col;ctx2.lineWidth=1.6;
-      ctx2.beginPath();ctx2.moveTo(X(past[i-1].x),Y(past[i-1].y));ctx2.lineTo(X(past[i].x),Y(past[i].y));ctx2.stroke();
-      ctx2.globalAlpha=.10+.4*i/past.length;ctx2.fillStyle=col;
-      ctx2.beginPath();ctx2.arc(X(past[i-1].x),Y(past[i-1].y),1.8,0,7);ctx2.fill();}
+      ctx2.globalAlpha=.08+.45*i/past.length;ctx2.strokeStyle=col;ctx2.lineWidth=1.5;
+      ctx2.beginPath();ctx2.moveTo(X(past[i-1].x),Y(past[i-1].y));ctx2.lineTo(X(past[i].x),Y(past[i].y));ctx2.stroke();}
      ctx2.globalAlpha=1;
      const hx=X(head.x),hy=Y(head.y);
      ctx2.shadowColor=col;ctx2.shadowBlur=12;ctx2.fillStyle=col;
@@ -669,16 +689,34 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
      ctx2.fillStyle='#dce3ea';ctx2.font='600 11px ui-sans-serif,system-ui';ctx2.textAlign='left';
      ctx2.fillText(s.sym,hx+8,hy+4);
      heads.push({x:hx,y:hy,s,head});}
-    document.getElementById('rrgDate').textContent=weeks[k];
+    document.getElementById('rrgDate').textContent=days[Math.round(k)];
    }
-   // Controls: scrub freely; play sweeps the quarter and parks at "now".
-   let playing=null;const btn=document.getElementById('rrgPlay');
-   scrub.oninput=()=>draw(+scrub.value);
+   // Playback: requestAnimationFrame + fractional playhead = smooth motion.
+   // Pause is everywhere: the button, clicking the chart, or touching the scrubber.
+   const btn=document.getElementById('rrgPlay');
+   let playing=false,raf=0,lastTs=0;
+   const SPEED=18; // sessions per second of animation
+   function stop(label){playing=false;lastTs=0;if(raf)cancelAnimationFrame(raf);btn.textContent=label||'▶ play';}
+   function tick(ts){
+    if(!playing)return;
+    if(lastTs)k=Math.min(k+(ts-lastTs)/1000*SPEED,days.length-1);
+    lastTs=ts;scrub.value=Math.round(k);draw(k);
+    if(k>=days.length-1){stop('▶ replay');return;}
+    raf=requestAnimationFrame(tick);}
    btn.onclick=()=>{
-    if(playing){clearInterval(playing);playing=null;btn.textContent='▶ play';return;}
-    let k=0;btn.textContent='⏸ pause';
-    playing=setInterval(()=>{scrub.value=k;draw(k);
-     if(++k>=weeks.length){clearInterval(playing);playing=null;btn.textContent='▶ replay';}},550);};
+    if(playing){stop();return;}
+    if(k>=days.length-1.5)k=startIdx; // at the end: replay from window start
+    playing=true;btn.textContent='⏸ pause';raf=requestAnimationFrame(tick);};
+   cv.parentElement.addEventListener('click',()=>{if(playing)stop();});
+   scrub.oninput=()=>{if(playing)stop();k=+scrub.value;draw(k);};
+   // Range chips bound the playback window and the scrubber.
+   document.querySelectorAll('#rrgRange button').forEach(b=>b.onclick=(e)=>{
+    e.stopPropagation();
+    document.querySelectorAll('#rrgRange button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    const n=+b.dataset.d;
+    startIdx=n?Math.max(0,days.length-1-n):0;
+    scrub.min=startIdx;stop();k=days.length-1;scrub.value=k;draw(k);});
    cv.parentElement.addEventListener('mousemove',e=>{
     const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
     const tip=document.getElementById('rrgTip');
@@ -695,7 +733,7 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    // Tab starts hidden (zero-size canvas): size and draw on first reveal.
    document.querySelector('.tabs button[data-t=rotation]').addEventListener('click',()=>{
     setTimeout(()=>{if(fit()){draw(+scrub.value);tmapDraw();}},0);});
-   draw(weeks.length-1);
+   draw(days.length-1);
   }
   // Money map: squarified treemap. Size = 90d traded dollars (where the
   // money actually is), color = 1M return vs SPY (where it's going).
@@ -744,13 +782,26 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
      <span style="min-width:168px">${v.label}</span>
      <span class="muted">${(v.favors||[]).map(f=>f.replace(/_/g,' ')).join(' · ')}</span></div>`).join('');
   } else document.getElementById('regNow').innerHTML='<span class="muted">needs econ_watch history — collector runs weekdays 11:00 UTC</span>';
-  // Radar.
+  // Radar: signals with full context + a live quadrant board.
   const al=rot.alerts||[];
-  document.getElementById('radar').innerHTML=al.length?al.map(a=>
-   `<div class="radrow">${a.msg}</div>`).join(''):
+  const sigs=al.length?al.map(a=>
+   `<div class="radrow">${a.msg}${a.t?` <span class="muted" style="font-size:11px">· ${a.t}</span>`:''}
+    ${a.detail?`<span class="rd">${a.detail}</span>`:''}</div>`).join(''):
    '<div class="muted">no quadrant crossings in the last 3 weeks — rotation is stable</div>';
+  const QMETA=[['leading','LEADING','#3fcf8e','outperforming and accelerating — trend intact'],
+   ['weakening','WEAKENING','#e8a54b','still ahead of SPY but losing steam — tighten stops'],
+   ['improving','IMPROVING','#58a6ff','underperformer gaining momentum — watch list'],
+   ['lagging','LAGGING','#f0556d','weak and getting weaker — avoid / short candidates']];
+  const board=`<div class="qboard">`+QMETA.map(([q,label,col,note])=>{
+   const rows=secs.filter(s=>s.quadrant===q)
+    .sort((a,b)=>(b.rel_1m??-99)-(a.rel_1m??-99))
+    .map(s=>`<div class="qs"><span>${s.sym} <span class="dq">${s.days_in_quadrant??'–'}d</span></span>
+     <span class="${(s.rel_1m||0)>=0?'pos':'neg'}">${s.rel_1m>=0?'+':''}${s.rel_1m??'–'}%</span></div>`).join('')
+    ||'<div class="muted" style="font-size:11px">none</div>';
+   return `<div class="qcell" style="border-left:3px solid ${col}"><h3 style="color:${col}" title="${note}">${label}</h3>${rows}</div>`;}).join('')+`</div>`;
+  document.getElementById('radar').innerHTML=sigs+board;
   document.getElementById('radarInt').textContent=
-   'Crossings are the earliest mechanical tell: Improving→Leading = money confirming a new leader; Leading→Weakening = money starting to leave. The scout reads the news for the same shift — agreement between the two is the signal.';
+   'How to read it: sectors orbit clockwise — Improving (momentum turns up) → Leading (outperformance confirmed) → Weakening (momentum fades) → Lagging. Crossings above are the earliest mechanical tells; the board shows where every sector sits now, how long it has been there ("34d" = sessions in quadrant), and its 1M return vs SPY. The scout reads news for the same shift — price and news agreeing is the real signal.';
  })();
 
  // ---- MACRO TAB

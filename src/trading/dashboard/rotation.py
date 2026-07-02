@@ -34,12 +34,23 @@ import pandas as pd
 from trading.core.logging import logger
 from trading.runtime.news_watch import SECTOR_ETFS
 
-# RRG parameters, in weeks. 12w mean ≈ one quarter of relative strength;
-# 4w momentum ≈ one month of change in that trend — the classic pairing.
-_RS_WINDOW = 12
-_MOM_WINDOW = 4
-_TRAIL_POINTS = 13  # one quarter of weekly trail on screen
+# RRG parameters, in trading sessions. 63d mean ≈ one quarter of relative
+# strength; 21d momentum ≈ one month of change in that trend — the classic
+# pairing, computed daily so the animation moves in session-sized steps.
+_RS_WINDOW = 63
+_MOM_WINDOW = 21
+_TRAIL_DAYS = 504  # ~2 years of daily trail for the scrubber
+_CROSS_LOOKBACK = 15  # sessions (~3 weeks) for quadrant-crossing alerts
 _CACHE_TTL_S = 2 * 3600.0
+
+# One-line reading per destination quadrant, so a radar alert explains
+# itself instead of assuming the reader knows RRG folklore.
+_CROSS_READ: dict[str, str] = {
+    "leading": "money confirming a new leader — the classic continuation entry",
+    "improving": "first accumulation sign — early; needs RS to cross 100 to confirm",
+    "weakening": "momentum rolling over while still ahead of SPY — distribution often starts here",
+    "lagging": "strength and momentum both below water — money has left",
+}
 
 # Investment-clock playbook: which sectors classically lead each regime.
 # Deliberately static and labeled as folklore on the page — the honest
@@ -82,6 +93,16 @@ def _quadrant(x: float, y: float) -> str:
     return "lagging"
 
 
+def _streak(seq: list[str]) -> int:
+    """Length of the trailing run of identical values."""
+    n = 0
+    for v in reversed(seq):
+        if n and v != seq[-1]:
+            break
+        n += 1
+    return n
+
+
 def compute_rotation(
     closes: pd.DataFrame,
     dollar_vol: dict[str, float] | None = None,
@@ -89,60 +110,70 @@ def compute_rotation(
     """RRG trails + relative momentum from a daily close matrix.
 
     ``closes``: columns are ETF symbols and must include ``SPY``; index
-    is a DatetimeIndex. Needs roughly 15 months of history for the 12w
-    mean to have room; degrades to fewer trail points otherwise.
+    is a DatetimeIndex. Everything runs on daily sessions so the trail
+    scrubs smoothly; needs ~4 months minimum, serves up to ~2 years.
     """
     if "SPY" not in closes.columns or len(closes) < 60:
         return {}
-    weekly = closes.sort_index().resample("W-FRI").last().dropna(how="all")
-    spy = weekly["SPY"]
+    daily = closes.sort_index()
+    spy = daily["SPY"]
 
     sectors: list[dict[str, Any]] = []
     alerts: list[dict[str, str]] = []
     for sym, name in SECTOR_ETFS.items():
-        if sym not in weekly.columns:
+        if sym not in daily.columns:
             continue
-        px = weekly[sym].dropna()
-        rs = (px / spy).dropna()
+        rs = (daily[sym] / spy).dropna()
         if len(rs) < _RS_WINDOW + _MOM_WINDOW + 2:
             continue
         ratio = 100.0 * rs / rs.rolling(_RS_WINDOW).mean()
         mom = 100.0 * ratio / ratio.shift(_MOM_WINDOW)
-        frame = pd.DataFrame({"x": ratio, "y": mom}).dropna().iloc[-_TRAIL_POINTS:]
+        frame = pd.DataFrame({"x": ratio, "y": mom}).dropna().iloc[-_TRAIL_DAYS:]
         if frame.empty:
             continue
         pts: list[tuple[str, float, float]] = [
-            (str(ts)[:10], round(float(r.x), 3), round(float(r.y), 3)) for ts, r in frame.iterrows()
+            (str(ts)[:10], round(float(r.x), 2), round(float(r.y), 2)) for ts, r in frame.iterrows()
         ]
         trail = [{"t": t, "x": x, "y": y} for t, x, y in pts]
-        daily = closes[sym].dropna()
-        rel = (daily / closes["SPY"]).dropna()
+        rel = rs
 
         def _rel_ret(s: pd.Series, days: int) -> float | None:
             if len(s) <= days:
                 return None
             return round(100.0 * (float(s.iloc[-1] / s.iloc[-days]) - 1.0), 2)
 
-        quad_now = _quadrant(pts[-1][1], pts[-1][2])
-        quad_then = _quadrant(pts[0][1], pts[0][2]) if len(pts) > 3 else quad_now
-        # Crossing detection over the last ~3 weeks: the earliest useful
+        rel_1m, rel_3m = _rel_ret(rel, 21), _rel_ret(rel, 63)
+        quads = [_quadrant(x, y) for _, x, y in pts]
+        quad_now = quads[-1]
+        days_in = _streak(quads)
+        # Crossing detection over ~3 weeks of sessions: the earliest useful
         # tell is Improving→Leading (money confirming a new leader) and
         # Leading→Weakening (money starting to leave).
-        if len(pts) >= 4:
-            q3 = _quadrant(pts[-4][1], pts[-4][2])
-            if q3 != quad_now:
+        if len(quads) > _CROSS_LOOKBACK:
+            q_then = quads[-_CROSS_LOOKBACK - 1]
+            if q_then != quad_now:
                 icon = {
                     "leading": "🚀",
                     "improving": "🌱",
                     "weakening": "⚠️",
                     "lagging": "🔻",
                 }[quad_now]
+                prev_run = _streak(quads[: len(quads) - days_in])
+                ctx = (
+                    f" · 1M vs SPY {rel_1m:+.1f}%, 3M {rel_3m:+.1f}%"
+                    if rel_1m is not None and rel_3m is not None
+                    else ""
+                )
                 alerts.append(
                     {
                         "sym": sym,
                         "name": name,
                         "kind": quad_now,
-                        "msg": f"{icon} {name.replace('_', ' ')} ({sym}) crossed {q3} → {quad_now}",
+                        "t": pts[-days_in][0] if days_in <= len(pts) else pts[-1][0],
+                        "msg": f"{icon} {name.replace('_', ' ')} ({sym}) crossed {q_then} → {quad_now}",
+                        "detail": f"RS {pts[-1][1]:.1f} · momentum {pts[-1][2]:.1f} · "
+                        f"{days_in} sessions in {quad_now} after {prev_run} in {q_then}{ctx} "
+                        f"— {_CROSS_READ[quad_now]}",
                     }
                 )
         sectors.append(
@@ -151,19 +182,19 @@ def compute_rotation(
                 "name": name,
                 "trail": trail,
                 "quadrant": quad_now,
-                "quadrant_start": quad_then,
-                "rel_1m": _rel_ret(rel, 21),
-                "rel_3m": _rel_ret(rel, 63),
+                "days_in_quadrant": days_in,
+                "rel_1m": rel_1m,
+                "rel_3m": rel_3m,
                 "dollar_vol": (dollar_vol or {}).get(sym),
             }
         )
 
-    # Fastest improver: steepest 4-week climb in RS-momentum among
+    # Fastest improver: steepest ~1-month climb in RS-momentum among
     # not-yet-leading sectors — the "early sign" the radar exists for.
     climbers = [
-        (s, s["trail"][-1]["y"] - s["trail"][-4]["y"])
+        (s, s["trail"][-1]["y"] - s["trail"][-_MOM_WINDOW]["y"])
         for s in sectors
-        if len(s["trail"]) >= 4 and s["quadrant"] in ("improving", "lagging")
+        if len(s["trail"]) > _MOM_WINDOW and s["quadrant"] in ("improving", "lagging")
     ]
     if climbers:
         best, slope = max(climbers, key=lambda t: t[1])
@@ -174,7 +205,9 @@ def compute_rotation(
                     "name": str(best["name"]),
                     "kind": "climber",
                     "msg": f"📈 fastest improver: {str(best['name']).replace('_', ' ')} "
-                    f"({best['sym']}), RS-momentum +{slope:.1f} over 4w",
+                    f"({best['sym']}), RS-momentum +{slope:.1f} over the last month",
+                    "detail": "Steepest momentum climb among sectors not yet leading — the next "
+                    "Improving→Leading candidate. Confirmation = RS crossing 100 on volume.",
                 }
             )
     return {"sectors": sectors, "alerts": alerts}
@@ -244,7 +277,7 @@ def _load_history(data_dir: Path) -> tuple[pd.DataFrame, dict[str, float]]:
     for sym in want:
         s = _read_close(data_dir, sym)
         if s is not None and len(s) > 260:
-            closes[sym] = s.iloc[-320:]
+            closes[sym] = s.iloc[-800:]
         else:
             missing.append(sym)
     if missing:
@@ -252,7 +285,7 @@ def _load_history(data_dir: Path) -> tuple[pd.DataFrame, dict[str, float]]:
 
         raw = yf.download(
             " ".join(missing),
-            period="15mo",
+            period="3y",
             auto_adjust=True,
             progress=False,
             group_by="ticker",

@@ -11,9 +11,6 @@ from trading.dashboard.rotation import classify_regimes, compute_rotation
 def _synthetic_closes() -> pd.DataFrame:
     """~15 months of daily closes: SPY flat-ish, XLE outperforming
     (should land Leading), XLK underperforming (should land Lagging)."""
-    # Friday-to-Friday so the last weekly bin is complete — a partial
-    # final week understates the newest momentum point (fine live, but
-    # it would make this test flaky at the quadrant boundary).
     idx = pd.bdate_range("2025-04-04", "2026-06-26")
     rng = np.random.default_rng(7)
     spy = 100 * np.cumprod(1 + rng.normal(0.0002, 0.002, len(idx)))
@@ -33,9 +30,10 @@ def test_compute_rotation_quadrants() -> None:
     assert by["XLK"]["quadrant"] == "lagging"
     assert by["XLK"]["rel_3m"] < 0 < by["XLE"]["rel_3m"]
     assert by["XLE"]["dollar_vol"] == 5e8
-    # trails are bounded and chronological
+    assert by["XLE"]["days_in_quadrant"] >= 1
+    # trails are daily, bounded, and chronological
     ts = [p["t"] for p in by["XLE"]["trail"]]
-    assert len(ts) <= 13 and ts == sorted(ts)
+    assert len(ts) <= 504 and ts == sorted(ts)
 
 
 def test_compute_rotation_degrades() -> None:
