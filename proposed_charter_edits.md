@@ -1,4 +1,4 @@
-# Proposed charter + context edits — for review (NOT applied)
+# Charter + context edits — APPLIED 2026-07-02 (A + B; C was already live in context.py)
 
 These three changes address the same root cause the committee output exposed:
 a **"near-highs + low-IV = safe"** prior, plus **correlation-blindness**, living in
