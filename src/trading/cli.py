@@ -334,6 +334,22 @@ def _backtest_run(
         "--periods-per-year",
         help="Used to annualize Sharpe/CAGR. 252 daily equities, 365 crypto.",
     ),
+    guards: bool = typer.Option(
+        False,
+        "--guards",
+        help="Also replay the live trailing-stop layer (ATR trail + weekly "
+        "re-entry cycle) and print system-level metrics next to the raw signal.",
+    ),
+    guard_atr_mult: float = typer.Option(3.0, "--guard-atr-mult"),
+    guard_trail_min: float = typer.Option(8.0, "--guard-trail-min"),
+    guard_trail_max: float = typer.Option(20.0, "--guard-trail-max"),
+    guard_tp_pct: float | None = typer.Option(None, "--guard-tp-pct"),
+    guard_ratchet_floor: float | None = typer.Option(
+        None, "--guard-ratchet-floor", help="Per-position ratchet floor, e.g. 0.4."
+    ),
+    guard_ratchet_tighten: float | None = typer.Option(
+        None, "--guard-ratchet-tighten", help="Per-position ratchet slope, e.g. 1.2."
+    ),
 ) -> None:
     """Backtest a single strategy over a universe.
 
@@ -383,6 +399,34 @@ def _backtest_run(
     t.add_row("bars", f"{len(prices):d}")
     t.add_row("symbols", f"{prices.shape[1]:d}")
     console.print(t)
+
+    if guards:
+        from trading.backtest.guards_overlay import run_with_guards
+        from trading.backtest.metrics import cagr as _cagr
+        from trading.backtest.metrics import max_drawdown as _mdd
+        from trading.backtest.metrics import sharpe as _sharpe
+
+        g = run_with_guards(
+            prices,
+            weights,
+            costs=costs,
+            atr_mult=guard_atr_mult,
+            trail_min_pct=guard_trail_min,
+            trail_max_pct=guard_trail_max,
+            tp_pct=guard_tp_pct,
+            ratchet_floor=guard_ratchet_floor,
+            ratchet_tighten=guard_ratchet_tighten,
+        )
+        tg = Table(title="With live guard layer (trailing stop + weekly re-entry cycle)")
+        tg.add_column("metric", style="cyan")
+        tg.add_column("value", justify="right")
+        tg.add_row("cagr", f"{_cagr(g.equity, periods_per_year):.2%}")
+        tg.add_row("sharpe", f"{_sharpe(g.returns, periods_per_year):.3f}")
+        tg.add_row("max_drawdown", f"{_mdd(g.equity):.2%}")
+        tg.add_row("stop_exits", f"{g.stop_exits:d}")
+        tg.add_row("tp_exits", f"{g.tp_exits:d}")
+        tg.add_row("entries", f"{g.reentries:d}")
+        console.print(tg)
 
 
 # ---------------------------------------------------------------------------

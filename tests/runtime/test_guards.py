@@ -129,3 +129,78 @@ def test_portfolio_ratchet_alerts_on_giveback(tmp_path: Path, monkeypatch) -> No
     # does not repeat-spam while still down
     r = check_guards(tmp_path, tmp_path, positions=[], prices={}, equity=114_000.0, now=NOW)
     assert r["alerts"] == []
+
+
+def test_ratchet_off_by_default_keeps_classic_trail(tmp_path: Path, monkeypatch) -> None:
+    """No ratchet env -> a +50% winner still gets the full 8% leash."""
+    for var in ("GUARD_TRAIL_FLOOR", "GUARD_TRAIL_TIGHTEN", "GUARD_TP_PCT"):
+        monkeypatch.delenv(var, raising=False)
+    check_guards(
+        tmp_path, tmp_path, positions=[_pos("XYZ")], prices={"XYZ": 150.0}, equity=None, now=NOW
+    )
+    # 144 > 150*0.92=138: inside the classic trail, must NOT exit.
+    r = check_guards(
+        tmp_path, tmp_path, positions=[_pos("XYZ")], prices={"XYZ": 144.0}, equity=None, now=NOW
+    )
+    assert r["exits"] == []
+
+
+def test_ratchet_tightens_the_leash_on_winners(tmp_path: Path, monkeypatch) -> None:
+    """floor=0.4, tighten=1.2, +50% gain -> distance 8% * 0.4 = 3.2%:
+    a dip to 144 (< 150*0.968=145.2) now exits where classic held."""
+    monkeypatch.setenv("GUARD_TRAIL_FLOOR", "0.4")
+    monkeypatch.setenv("GUARD_TRAIL_TIGHTEN", "1.2")
+    monkeypatch.delenv("GUARD_TP_PCT", raising=False)
+    check_guards(
+        tmp_path, tmp_path, positions=[_pos("XYZ")], prices={"XYZ": 150.0}, equity=None, now=NOW
+    )
+    r = check_guards(
+        tmp_path, tmp_path, positions=[_pos("XYZ")], prices={"XYZ": 144.0}, equity=None, now=NOW
+    )
+    assert [e["symbol"] for e in r["exits"]] == ["XYZ"]
+    assert r["exits"][0]["reason"] == "trailing_stop"
+
+
+def test_ratchet_floor_bounds_the_tightening(tmp_path: Path, monkeypatch) -> None:
+    """A +400% moonshot: distance clamps at floor (8*0.4=3.2%), never 0 —
+    normal daily noise below that must not exit."""
+    monkeypatch.setenv("GUARD_TRAIL_FLOOR", "0.4")
+    monkeypatch.setenv("GUARD_TRAIL_TIGHTEN", "1.2")
+    check_guards(
+        tmp_path, tmp_path, positions=[_pos("XYZ")], prices={"XYZ": 500.0}, equity=None, now=NOW
+    )
+    # 490 > 500*0.968=484: inside the floored trail, held.
+    r = check_guards(
+        tmp_path, tmp_path, positions=[_pos("XYZ")], prices={"XYZ": 490.0}, equity=None, now=NOW
+    )
+    assert r["exits"] == []
+
+
+def test_ratchet_stop_level_never_falls(tmp_path: Path, monkeypatch) -> None:
+    """The published stop level is monotone: a pullback that survives the
+    trail must not loosen it (state file is the contract /guards shows)."""
+    import json as _json
+
+    monkeypatch.setenv("GUARD_TRAIL_FLOOR", "0.4")
+    monkeypatch.setenv("GUARD_TRAIL_TIGHTEN", "1.2")
+    check_guards(
+        tmp_path, tmp_path, positions=[_pos("XYZ")], prices={"XYZ": 150.0}, equity=None, now=NOW
+    )
+    lvl1 = _json.loads((tmp_path / "guards.json").read_text())["positions"]["XYZ"]["stop_level"]
+    check_guards(
+        tmp_path, tmp_path, positions=[_pos("XYZ")], prices={"XYZ": 146.0}, equity=None, now=NOW
+    )
+    lvl2 = _json.loads((tmp_path / "guards.json").read_text())["positions"]["XYZ"]["stop_level"]
+    assert lvl2 >= lvl1
+
+
+def test_ratchet_ignores_nonsense_knobs(tmp_path: Path, monkeypatch) -> None:
+    """floor >= 1 or tighten <= 0 (or unparseable) -> classic behavior."""
+    for floor, tighten in (("1.5", "1.2"), ("0.4", "0"), ("abc", "1.2")):
+        monkeypatch.setenv("GUARD_TRAIL_FLOOR", floor)
+        monkeypatch.setenv("GUARD_TRAIL_TIGHTEN", tighten)
+        d = tmp_path / f"case_{floor}_{tighten}"
+        d.mkdir()
+        check_guards(d, d, positions=[_pos("XYZ")], prices={"XYZ": 150.0}, equity=None, now=NOW)
+        r = check_guards(d, d, positions=[_pos("XYZ")], prices={"XYZ": 144.0}, equity=None, now=NOW)
+        assert r["exits"] == [], (floor, tighten)

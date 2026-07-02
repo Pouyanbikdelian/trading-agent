@@ -24,6 +24,13 @@ Env knobs (all optional):
   GUARD_TRAIL_MIN_PCT=8          anti-squeeze floor
   GUARD_TRAIL_MAX_PCT=20         disaster cap
   GUARD_TP_PCT=                  optional static take-profit (e.g. 35)
+  GUARD_TRAIL_FLOOR=             per-position ratchet: distance never shrinks
+                                 below FLOOR × the entry distance (e.g. 0.4)
+  GUARD_TRAIL_TIGHTEN=           per-position ratchet: distance multiplier is
+                                 max(FLOOR, 1 − TIGHTEN × gain). Both must be
+                                 set (< 1 and > 0) or the trail stays classic.
+                                 Backtested 2026-07-02 (scripts/guard_sweep.py):
+                                 0.4 / 1.2 — breathe early, lock in late.
   GUARD_LOCK_ARM_PCT=            ratchet arms at +X% equity (e.g. 20)
   GUARD_LOCK_GIVEBACK_PCT=       alert after losing Y% of peak gain (e.g. 40)
 """
@@ -110,7 +117,8 @@ def last_prices(symbols: list[str]) -> dict[str, float]:
 
 def _load(state_dir: Path) -> dict[str, Any]:
     try:
-        return json.loads((Path(state_dir) / STATE_FILENAME).read_text())
+        loaded: dict[str, Any] = json.loads((Path(state_dir) / STATE_FILENAME).read_text())
+        return loaded
     except Exception:
         return {"positions": {}, "equity_baseline": None, "equity_hwm": None, "exits": {}}
 
@@ -146,6 +154,13 @@ def check_guards(
     alerts: list[str] = []
 
     tp_pct = _env_f("GUARD_TP_PCT", None)
+    # Per-position profit ratchet: both knobs must be set sensibly, else the
+    # trail is the classic fixed-distance one (bit-identical to before).
+    r_floor = _env_f("GUARD_TRAIL_FLOOR", None)
+    r_tighten = _env_f("GUARD_TRAIL_TIGHTEN", None)
+    ratchet_on = (
+        r_floor is not None and r_tighten is not None and 0.0 < r_floor < 1.0 and r_tighten > 0.0
+    )
     live_syms = set()
     for p in positions:
         sym = str(p["symbol"])
@@ -158,7 +173,17 @@ def check_guards(
             "stop_pct": _stop_distance_pct(data_dir, sym),
         }
         st["hwm"] = max(float(st["hwm"]), px)
-        stop_level = float(st["hwm"]) * (1.0 - float(st["stop_pct"]) / 100.0)
+        eff_pct = float(st["stop_pct"])
+        if ratchet_on:
+            # Distance shrinks as the position's gain grows — a winner earns
+            # a tighter leash. gain is measured off avg entry, from the HWM
+            # so a pullback can't loosen an already-tightened trail.
+            basis = float(p.get("avg_price", px)) or px
+            gain = max(0.0, float(st["hwm"]) / basis - 1.0)
+            eff_pct *= max(float(r_floor or 0.0), 1.0 - float(r_tighten or 0.0) * gain)
+        stop_level = float(st["hwm"]) * (1.0 - eff_pct / 100.0)
+        # A trail only ever rises: never publish a level below the last one.
+        stop_level = max(stop_level, float(st.get("stop_level") or 0.0))
         st["stop_level"] = round(stop_level, 2)
         pos_state[sym] = st
 
@@ -178,7 +203,8 @@ def check_guards(
             exit_orders.append({"symbol": sym, "reason": "trailing_stop"})
             alerts.append(
                 f"🛑 *Trailing stop* {sym}: {px:.2f} ≤ stop {stop_level:.2f} "
-                f"(HWM {float(st['hwm']):.2f} − {float(st['stop_pct']):.1f}%) — closing"
+                f"(HWM {float(st['hwm']):.2f} − {eff_pct:.1f}%"
+                f"{' ratcheted' if ratchet_on and eff_pct < float(st['stop_pct']) else ''}) — closing"
             )
             exits_done[sym] = now.isoformat()
         elif tp_pct and px >= avg * (1.0 + tp_pct / 100.0):

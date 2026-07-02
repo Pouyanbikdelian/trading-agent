@@ -633,6 +633,10 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    // Shared daily timeline: union of all trail dates, carry-forward gaps.
    const days=[...new Set(secs.flatMap(s=>s.trail.map(p=>p.t)))].sort();
    const dix=Object.fromEntries(days.map((t,i)=>[t,i]));
+   // Readable dot labels: short sector name + ticker, e.g. "semis (SMH)".
+   const SHORT={healthcare:'health',cons_discretionary:'discret',cons_staples:'staples',
+    real_estate:'REIT',communications:'comms',semiconductors:'semis',defense_aero:'defense'};
+   secs.forEach(s=>{s.lbl=`${(SHORT[s.name]||s.name).replace(/_/g,' ')} (${s.sym})`;});
    secs.forEach(s=>{s.arr=new Array(days.length).fill(null);
     s.trail.forEach(p=>{s.arr[dix[p.t]]=p;});
     let lastp=null;for(let i=0;i<days.length;i++){if(s.arr[i])lastp=s.arr[i];else s.arr[i]=lastp;}});
@@ -686,8 +690,11 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
      const hx=X(head.x),hy=Y(head.y);
      ctx2.shadowColor=col;ctx2.shadowBlur=12;ctx2.fillStyle=col;
      ctx2.beginPath();ctx2.arc(hx,hy,5.2,0,7);ctx2.fill();ctx2.shadowBlur=0;
-     ctx2.fillStyle='#dce3ea';ctx2.font='600 11px ui-sans-serif,system-ui';ctx2.textAlign='left';
-     ctx2.fillText(s.sym,hx+8,hy+4);
+     ctx2.fillStyle='#dce3ea';ctx2.font='600 10.5px ui-sans-serif,system-ui';ctx2.textAlign='left';
+     // Keep labels inside the frame: flip to the left of the dot near the right edge.
+     const tw=ctx2.measureText(s.lbl).width;
+     if(hx+8+tw>W-4){ctx2.textAlign='right';ctx2.fillText(s.lbl,hx-8,hy+4);}
+     else ctx2.fillText(s.lbl,hx+8,hy+4);
      heads.push({x:hx,y:hy,s,head});}
     document.getElementById('rrgDate').textContent=days[Math.round(k)];
    }
@@ -695,7 +702,7 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    // Pause is everywhere: the button, clicking the chart, or touching the scrubber.
    const btn=document.getElementById('rrgPlay');
    let playing=false,raf=0,lastTs=0;
-   const SPEED=9; // sessions per second of animation (~1 month ≈ 2.3s)
+   const SPEED=4.5; // sessions per second of animation (~1 month ≈ 4.7s)
    function stop(label){playing=false;lastTs=0;if(raf)cancelAnimationFrame(raf);btn.textContent=label||'▶ play';}
    function tick(ts){
     if(!playing)return;
