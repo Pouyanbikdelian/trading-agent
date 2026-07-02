@@ -695,7 +695,7 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    // Pause is everywhere: the button, clicking the chart, or touching the scrubber.
    const btn=document.getElementById('rrgPlay');
    let playing=false,raf=0,lastTs=0;
-   const SPEED=18; // sessions per second of animation
+   const SPEED=9; // sessions per second of animation (~1 month ≈ 2.3s)
    function stop(label){playing=false;lastTs=0;if(raf)cancelAnimationFrame(raf);btn.textContent=label||'▶ play';}
    function tick(ts){
     if(!playing)return;
