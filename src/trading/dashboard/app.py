@@ -158,6 +158,15 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     except Exception:
         out["econ"] = {}
 
+    # Rotation tab: RRG trails, regime ribbon, radar alerts.
+    try:
+        from trading.dashboard.rotation import build_rotation
+
+        out["rotation"] = build_rotation(state_dir, data_dir)
+    except Exception as e:
+        logger.bind(component="dashboard").warning(f"rotation failed: {e}")
+        out["rotation"] = {}
+
     # News + sector momentum (the scout's inputs — worth eyeballing raw).
     try:
         nw = state_dir / "news.json"
@@ -290,10 +299,39 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  .interp{margin-top:10px;font-size:12.5px;line-height:1.45;color:var(--mut);
   border-left:3px solid var(--edge);padding:2px 0 2px 10px}
  .interp.ok{border-color:var(--up)}.interp.warn{border-color:var(--warn)}.interp.neg{border-color:var(--dn)}
+ /* Rotation tab. The RRG is the hero: give it real height and a faint
+    vignette so the quadrant tints read as a field, not a spreadsheet. */
+ .rrgbox{position:relative;height:min(62vh,560px);min-height:380px;width:100%;
+  border-radius:12px;overflow:hidden;background:radial-gradient(120% 120% at 50% 45%,#0e141c 0%,#0a0e13 100%)}
+ .rrgbox canvas{position:absolute;inset:0;width:100%;height:100%}
+ .rrgbar{display:flex;align-items:center;gap:12px;margin:2px 0 10px}
+ .playbtn{background:rgba(63,207,142,.1);border:1px solid var(--up);color:var(--up);
+  padding:5px 14px;border-radius:99px;font-size:12px;cursor:pointer;transition:all .15s}
+ .playbtn:hover{background:rgba(63,207,142,.22)}
+ #rrgScrub{flex:1;accent-color:var(--up);height:4px}
+ .tip{position:absolute;pointer-events:none;display:none;background:#0d1219f2;border:1px solid var(--edge);
+  border-radius:9px;padding:8px 11px;font-size:12px;line-height:1.5;z-index:5;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+ .tmap{position:relative;height:min(46vh,420px);min-height:300px;border-radius:12px;overflow:hidden}
+ .tmap .tile2{position:absolute;overflow:hidden;border:1px solid rgba(11,15,20,.85);border-radius:5px;
+  display:flex;flex-direction:column;justify-content:center;align-items:center;cursor:default;
+  transition:filter .12s;font-variant-numeric:tabular-nums}
+ .tmap .tile2:hover{filter:brightness(1.25);z-index:2}
+ .tmap .tile2 b{font-size:13px;letter-spacing:.03em}
+ .tmap .tile2 span{font-size:11px;opacity:.85}
+ .tmap .tile2 i{font-style:normal;font-size:10px;opacity:.6}
+ .ribbon{display:flex;height:26px;border-radius:6px;overflow:hidden;margin:10px 0 2px}
+ .ribbon i{flex:1;min-width:1px}
+ .raxis{display:flex;justify-content:space-between;font-size:10.5px;color:var(--mut);margin-bottom:8px}
+ .pbrow{display:flex;gap:8px;align-items:baseline;margin:4px 0;font-size:12.5px}
+ .pbrow.now{background:rgba(139,124,246,.08);border-radius:6px;padding:3px 6px;margin-left:-6px}
+ .pbdot{width:9px;height:9px;border-radius:3px;flex:none;position:relative;top:1px}
+ .radrow{margin:7px 0;font-size:13px;line-height:1.45;padding:7px 10px;border-radius:9px;
+  background:#151c26;border:1px solid var(--edge)}
 </style></head><body>
 <h1>📈 Trading Agent <span class="muted" id="asof"></span></h1>
 <div class="tabs">
  <button data-t="portfolio" class="on">Portfolio</button>
+ <button data-t="rotation">Rotation</button>
  <button data-t="macro">Macro</button>
  <button data-t="economy">Economy</button>
  <button data-t="memory">Memory</button>
@@ -323,6 +361,25 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  <div class="card"><h2>Headlines feeding the scout</h2><div id="heads"></div></div>
  <div class="card"><h2>Next up (UTC)</h2><div id="sched"></div>
   <h2 style="margin-top:14px">System</h2><div id="ops"></div></div>
+</div></div>
+
+<div class="tab" id="tab-rotation"><div class="grid">
+ <div class="card big"><h2>Relative rotation · sectors vs SPY, weekly
+  <span class="muted" style="text-transform:none;letter-spacing:0">— x: relative strength · y: momentum of that strength · sectors orbit clockwise</span></h2>
+  <div class="rrgbar">
+   <button id="rrgPlay" class="playbtn">▶ play</button>
+   <input id="rrgScrub" type="range" min="0" max="12" value="12">
+   <span id="rrgDate" class="muted" style="font-variant-numeric:tabular-nums"></span>
+  </div>
+  <div class="rrgbox"><canvas id="rrg"></canvas><div id="rrgTip" class="tip"></div></div></div>
+ <div class="card big"><h2>Money map · tile = 90d traded dollars, color = 1M vs SPY</h2>
+  <div id="treemap" class="tmap"></div></div>
+ <div class="card"><h2>Macro regime · investment clock since 2000</h2>
+  <div id="regNow"></div><div id="ribbon" class="ribbon"></div><div id="ribbonAxis" class="raxis"></div>
+  <div id="playbook"></div>
+  <div class="interp" id="regInt">Classic playbook per regime — folklore with a good track record, not a backtest. The analog engine (phase C) will replace it with measured leadership.</div></div>
+ <div class="card"><h2>Rotation radar · early signals</h2><div id="radar"></div>
+  <div class="interp" id="radarInt"></div></div>
 </div></div>
 
 <div class="tab" id="tab-macro"><div class="grid">
@@ -551,6 +608,150 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   `<div class="ev"><span>trading</span><span class="${ops.halted?'neg':'ok'}">${ops.halted?'⛔ HALTED '+(ops.halt_reason||''):'● active'}</span></div>`+
   fr('snapshot','broker snapshot',90)+fr('news','news watch',1560)+
   fr('market_watch','macro collector',1560)+fr('committee','last committee',1560)+fr('pm_book','PM book',1560);
+
+ // ---- ROTATION TAB
+ (()=>{
+  const rot=d.rotation||{};const secs=rot.sectors||[];
+  const QCOL={leading:'#3fcf8e',improving:'#58a6ff',weakening:'#e8a54b',lagging:'#f0556d'};
+  const cv=document.getElementById('rrg');
+  if(!secs.length){
+   cv.parentElement.innerHTML='<div class="muted" style="padding:24px">no rotation data yet — needs ~15 months of sector-ETF closes (yfinance fetch on next summary build)</div>';
+  } else {
+   // Shared weekly timeline: union of all trail dates.
+   const weeks=[...new Set(secs.flatMap(s=>s.trail.map(p=>p.t)))].sort();
+   const scrub=document.getElementById('rrgScrub');scrub.max=weeks.length-1;scrub.value=weeks.length-1;
+   // Per-sector point at-or-before each week index, so gaps never break trails.
+   const at=(s,k)=>{let best=null;for(const p of s.trail){if(p.t<=weeks[k])best=p;else break;}return best;};
+   // Symmetric scale around (100,100) so the quadrant cross sits centered.
+   let mx=2.5,my=2.5;
+   secs.forEach(s=>s.trail.forEach(p=>{mx=Math.max(mx,Math.abs(p.x-100)*1.18);my=Math.max(my,Math.abs(p.y-100)*1.18);}));
+   const ctx2=cv.getContext('2d');let W=0,H=0,heads=[];
+   const X=v=>W*(0.5+(v-100)/(2*mx)),Y=v=>H*(0.5-(v-100)/(2*my));
+   function fit(){const r=cv.parentElement.getBoundingClientRect();if(r.width<10)return false;
+    const dpr=window.devicePixelRatio||1;W=r.width;H=r.height;
+    cv.width=W*dpr;cv.height=H*dpr;ctx2.setTransform(dpr,0,0,dpr,0,0);return true;}
+   function draw(k){
+    if(!W&&!fit())return;
+    heads=[];ctx2.clearRect(0,0,W,H);
+    // Quadrant tints + labels: the map should read before the math does.
+    const tint=(x,y,w,h,c)=>{ctx2.fillStyle=c;ctx2.fillRect(x,y,w,h);};
+    tint(W/2,0,W/2,H/2,'rgba(63,207,142,.05)');   // leading
+    tint(0,0,W/2,H/2,'rgba(88,166,255,.05)');     // improving
+    tint(W/2,H/2,W/2,H/2,'rgba(232,165,75,.05)'); // weakening
+    tint(0,H/2,W/2,H/2,'rgba(240,85,109,.05)');   // lagging
+    ctx2.font='600 11px ui-sans-serif,system-ui';ctx2.globalAlpha=.5;
+    ctx2.fillStyle='#3fcf8e';ctx2.textAlign='right';ctx2.fillText('LEADING',W-12,20);
+    ctx2.fillStyle='#58a6ff';ctx2.textAlign='left';ctx2.fillText('IMPROVING',12,20);
+    ctx2.fillStyle='#e8a54b';ctx2.textAlign='right';ctx2.fillText('WEAKENING',W-12,H-12);
+    ctx2.fillStyle='#f0556d';ctx2.textAlign='left';ctx2.fillText('LAGGING',12,H-12);
+    ctx2.globalAlpha=1;
+    // Center cross + faint grid.
+    ctx2.strokeStyle='rgba(126,139,153,.28)';ctx2.lineWidth=1;
+    ctx2.beginPath();ctx2.moveTo(W/2,0);ctx2.lineTo(W/2,H);ctx2.moveTo(0,H/2);ctx2.lineTo(W,H/2);ctx2.stroke();
+    ctx2.strokeStyle='rgba(126,139,153,.09)';
+    for(let g=1;g<=3;g++){const dx=W/2*g/3.5,dy=H/2*g/3.5;
+     ctx2.beginPath();ctx2.moveTo(W/2+dx,0);ctx2.lineTo(W/2+dx,H);ctx2.moveTo(W/2-dx,0);ctx2.lineTo(W/2-dx,H);
+     ctx2.moveTo(0,H/2+dy);ctx2.lineTo(W,H/2+dy);ctx2.moveTo(0,H/2-dy);ctx2.lineTo(W,H/2-dy);ctx2.stroke();}
+    for(const s of secs){
+     const head=at(s,k);if(!head)continue;
+     const past=s.trail.filter(p=>p.t<=weeks[k]).slice(-8);
+     const col=QCOL[head.x>=100?(head.y>=100?'leading':'weakening'):(head.y>=100?'improving':'lagging')];
+     // Trail: comet style — segments brighten toward the head.
+     for(let i=1;i<past.length;i++){
+      ctx2.globalAlpha=.12+.5*i/past.length;ctx2.strokeStyle=col;ctx2.lineWidth=1.6;
+      ctx2.beginPath();ctx2.moveTo(X(past[i-1].x),Y(past[i-1].y));ctx2.lineTo(X(past[i].x),Y(past[i].y));ctx2.stroke();
+      ctx2.globalAlpha=.10+.4*i/past.length;ctx2.fillStyle=col;
+      ctx2.beginPath();ctx2.arc(X(past[i-1].x),Y(past[i-1].y),1.8,0,7);ctx2.fill();}
+     ctx2.globalAlpha=1;
+     const hx=X(head.x),hy=Y(head.y);
+     ctx2.shadowColor=col;ctx2.shadowBlur=12;ctx2.fillStyle=col;
+     ctx2.beginPath();ctx2.arc(hx,hy,5.2,0,7);ctx2.fill();ctx2.shadowBlur=0;
+     ctx2.fillStyle='#dce3ea';ctx2.font='600 11px ui-sans-serif,system-ui';ctx2.textAlign='left';
+     ctx2.fillText(s.sym,hx+8,hy+4);
+     heads.push({x:hx,y:hy,s,head});}
+    document.getElementById('rrgDate').textContent=weeks[k];
+   }
+   // Controls: scrub freely; play sweeps the quarter and parks at "now".
+   let playing=null;const btn=document.getElementById('rrgPlay');
+   scrub.oninput=()=>draw(+scrub.value);
+   btn.onclick=()=>{
+    if(playing){clearInterval(playing);playing=null;btn.textContent='▶ play';return;}
+    let k=0;btn.textContent='⏸ pause';
+    playing=setInterval(()=>{scrub.value=k;draw(k);
+     if(++k>=weeks.length){clearInterval(playing);playing=null;btn.textContent='▶ replay';}},550);};
+   cv.parentElement.addEventListener('mousemove',e=>{
+    const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
+    const tip=document.getElementById('rrgTip');
+    const h=heads.find(p=>(p.x-x)**2+(p.y-y)**2<196);
+    if(!h){tip.style.display='none';return;}
+    tip.innerHTML=`<b>${h.s.name.replace(/_/g,' ')}</b> · ${h.s.sym}<br>`+
+     `RS ${h.head.x.toFixed(1)} · mom ${h.head.y.toFixed(1)}<br>`+
+     `<span class="${(h.s.rel_1m||0)>=0?'pos':'neg'}">1M vs SPY ${h.s.rel_1m>=0?'+':''}${h.s.rel_1m??'–'}%</span> · `+
+     `<span class="${(h.s.rel_3m||0)>=0?'pos':'neg'}">3M ${h.s.rel_3m>=0?'+':''}${h.s.rel_3m??'–'}%</span>`;
+    tip.style.display='block';
+    tip.style.left=Math.min(x+14,r.width-170)+'px';tip.style.top=(y-10)+'px';});
+   cv.parentElement.addEventListener('mouseleave',()=>{document.getElementById('rrgTip').style.display='none';});
+   window.addEventListener('resize',()=>{if(fit())draw(+scrub.value);});
+   // Tab starts hidden (zero-size canvas): size and draw on first reveal.
+   document.querySelector('.tabs button[data-t=rotation]').addEventListener('click',()=>{
+    setTimeout(()=>{if(fit()){draw(+scrub.value);tmapDraw();}},0);});
+   draw(weeks.length-1);
+  }
+  // Money map: squarified treemap. Size = 90d traded dollars (where the
+  // money actually is), color = 1M return vs SPY (where it's going).
+  const tmEl=document.getElementById('treemap');
+  const items=secs.filter(s=>s.rel_1m!=null)
+   .map(s=>({...s,sz:Math.sqrt(s.dollar_vol||1e9)})) // sqrt tames SPY-scale outliers
+   .sort((a,b)=>b.sz-a.sz);
+  function shade(v){ // -6..+6% → red→slate→green
+   const t=Math.max(-1,Math.min(1,v/6));
+   const mix=(a,b,u)=>Math.round(a+(b-a)*u);
+   const from=[26,34,48],to=t>=0?[34,120,86]:[141,49,63],u=Math.abs(t);
+   return `rgb(${mix(from[0],to[0],u)},${mix(from[1],to[1],u)},${mix(from[2],to[2],u)})`;}
+  function squarify(list,x,y,w,h,out){
+   if(!list.length)return;
+   if(list.length===1){out.push({...list[0],x,y,w,h});return;}
+   const total=list.reduce((s,i)=>s+i.sz,0);let acc=0,i=0;
+   // take a prefix worth ~half the area for a balanced split
+   while(i<list.length-1&&acc+list[i].sz<total/2)acc+=list[i++].sz;
+   acc=Math.max(acc,list[0].sz);i=Math.max(i,1);
+   const f=acc/total;
+   if(w>=h){squarify(list.slice(0,i),x,y,w*f,h,out);squarify(list.slice(i),x+w*f,y,w*(1-f),h,out);}
+   else{squarify(list.slice(0,i),x,y,w,h*f,out);squarify(list.slice(i),x,y+h*f,w,h*(1-f),out);}}
+  function tmapDraw(){
+   const r=tmEl.getBoundingClientRect();if(r.width<10||!items.length)return;
+   const rects=[];squarify(items,0,0,r.width,r.height,rects);
+   tmEl.innerHTML=rects.map(t=>{
+    const big=t.w>86&&t.h>52;
+    return `<div class="tile2" style="left:${t.x}px;top:${t.y}px;width:${t.w}px;height:${t.h}px;background:${shade(t.rel_1m)}"
+     title="${t.name.replace(/_/g,' ')} (${t.sym}) · 1M vs SPY ${t.rel_1m>=0?'+':''}${t.rel_1m}% · 3M ${t.rel_3m>=0?'+':''}${t.rel_3m??'–'}%">
+     <b>${t.sym}</b><span>${t.rel_1m>=0?'+':''}${t.rel_1m}%</span>${big?`<i>${t.name.replace(/_/g,' ')}</i>`:''}</div>`;}).join('');}
+  window.addEventListener('resize',tmapDraw);tmapDraw();
+  // Regime ribbon + playbook.
+  const rg=rot.regimes||{};const hist=rg.history||[];const pb=rg.playbook||{};
+  if(hist.length){
+   document.getElementById('ribbon').innerHTML=hist.map(h=>
+    `<i style="background:${(pb[h.r]||{}).color||'#1a2230'}" title="${h.t} · ${(pb[h.r]||{}).label||h.r}"></i>`).join('');
+   const y0=hist[0].t.slice(0,4),y1=hist[hist.length-1].t;
+   const mid=hist[Math.floor(hist.length/2)].t.slice(0,4);
+   document.getElementById('ribbonAxis').innerHTML=`<span>${y0}</span><span>${mid}</span><span>${y1}</span>`;
+   const cur=rg.current||{};
+   document.getElementById('regNow').innerHTML=
+    `<span class="tile"><b style="color:${(pb[cur.r]||{}).color||'#dce3ea'}">${cur.label||'–'}</b><br>
+     <span class="muted">since ${cur.since||'–'} · CPI ${fx(cur.cpi_yoy,1)}% · Δff 6m ${cur.ff_chg_6m>=0?'+':''}${fx(cur.ff_chg_6m,2)}pp</span></span>`;
+   document.getElementById('playbook').innerHTML=Object.entries(pb).map(([k,v])=>
+    `<div class="pbrow${k===cur.r?' now':''}"><span class="pbdot" style="background:${v.color}"></span>
+     <span style="min-width:168px">${v.label}</span>
+     <span class="muted">${(v.favors||[]).map(f=>f.replace(/_/g,' ')).join(' · ')}</span></div>`).join('');
+  } else document.getElementById('regNow').innerHTML='<span class="muted">needs econ_watch history — collector runs weekdays 11:00 UTC</span>';
+  // Radar.
+  const al=rot.alerts||[];
+  document.getElementById('radar').innerHTML=al.length?al.map(a=>
+   `<div class="radrow">${a.msg}</div>`).join(''):
+   '<div class="muted">no quadrant crossings in the last 3 weeks — rotation is stable</div>';
+  document.getElementById('radarInt').textContent=
+   'Crossings are the earliest mechanical tell: Improving→Leading = money confirming a new leader; Leading→Weakening = money starting to leave. The scout reads the news for the same shift — agreement between the two is the signal.';
+ })();
 
  // ---- MACRO TAB
  const mh=(d.market_watch||{}).history||[];const last=(d.market_watch||{}).latest||{};
