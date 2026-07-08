@@ -50,8 +50,12 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         daily: dict[str, float] = {}
         for ts, eq in curve:
             daily[ts.date().isoformat()] = float(eq)  # last point of each day wins
-        out["equity_curve"] = [{"t": k, "v": v} for k, v in sorted(daily.items())]
         today = datetime.now(tz=timezone.utc).date().isoformat()
+        # Today's "close" is really the latest 60s snapshot — plotting it on
+        # a daily curve makes intraday wobble look like a daily drop
+        # (GO_LIVE.md §1). Today lives only in the intraday series below.
+        daily.pop(today, None)
+        out["equity_curve"] = [{"t": k, "v": v} for k, v in sorted(daily.items())]
         intraday = [(ts, eq) for ts, eq in curve if ts.date().isoformat() == today]
         step = max(1, len(intraday) // 300)
         out["equity_today"] = [{"t": ts.isoformat(), "v": float(eq)} for ts, eq in intraday[::step]]
@@ -157,6 +161,15 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         out["econ"] = json.loads(ec.read_text()) if ec.exists() else {}
     except Exception:
         out["econ"] = {}
+
+    # Live tab: per-sleeve PnL, USD curves, daily attribution.
+    try:
+        from trading.dashboard.live import build_live
+
+        out["live"] = build_live(state_dir, data_dir)
+    except Exception as e:
+        logger.bind(component="dashboard").warning(f"live tab failed: {e}")
+        out["live"] = {}
 
     # Rotation tab: RRG trails, regime ribbon, radar alerts.
     try:
@@ -339,14 +352,29 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 </style></head><body>
 <h1>📈 Trading Agent <span class="muted" id="asof"></span></h1>
 <div class="tabs">
- <button data-t="portfolio" class="on">Portfolio</button>
+ <button data-t="live" class="on">Live</button>
+ <button data-t="portfolio">Portfolio</button>
  <button data-t="rotation">Rotation</button>
  <button data-t="macro">Macro</button>
  <button data-t="economy">Economy</button>
  <button data-t="memory">Memory</button>
 </div>
 
-<div class="tab on" id="tab-portfolio"><div class="grid">
+<div class="tab on" id="tab-live">
+ <div id="lvCards" style="display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:14px"></div>
+ <div class="grid">
+ <div class="card big"><h2>Sleeve race · USD, normalized to 100
+  <span class="muted" style="text-transform:none;letter-spacing:0">— daily closes only (today's intraday point excluded); live and paper are always separate series</span></h2>
+  <div id="lvRaceEmpty" class="muted" style="display:none;padding:18px 0"></div>
+  <canvas id="lvRace" height="84"></canvas></div>
+ <div class="card big"><h2>Daily PnL · USD <span class="muted" id="lvPnlLbl" style="text-transform:none;letter-spacing:0"></span></h2>
+  <canvas id="lvPnl" height="72"></canvas></div>
+ <div class="card"><h2>Today's attribution <span class="muted" style="text-transform:none;letter-spacing:0">— which position hurt (or carried) today</span></h2>
+  <div id="lvAttr"></div></div>
+ <div class="card"><h2>Account & FX</h2><div id="lvAcct"></div></div>
+</div></div>
+
+<div class="tab" id="tab-portfolio"><div class="grid">
  <div class="card big"><h2>Equity (paper) <span id="eqret" style="float:right"></span></h2>
   <div id="ranges">
    <button data-r="today">Today</button><button data-r="1w">1W</button>
@@ -440,6 +468,77 @@ const line=(el,labels,sets)=>{
 setTimeout(()=>location.reload(),300e3); // fresh data every 5 minutes
 fetch('api/summary').then(r=>r.json()).then(d=>{
  document.getElementById('asof').textContent=' · '+new Date(d.generated_at).toLocaleString()+' · auto-refreshes';
+
+ // ---- LIVE TAB
+ (()=>{
+  const lv=d.live||{};const sleeves=lv.sleeves||[];
+  const money=(x,d2=0)=>x==null?'–':'$'+Number(x).toLocaleString(undefined,{maximumFractionDigits:d2});
+  const signed=(x)=>x==null?'–':(x>=0?'+':'−')+'$'+Math.abs(x).toLocaleString(undefined,{maximumFractionDigits:0});
+  // Sleeve cards: equity, day move, realized / unrealized / fees.
+  document.getElementById('lvCards').innerHTML=sleeves.map(s=>{
+   const c=s.curve_usd||[];
+   const incep=c.length>1?(c[c.length-1].v/c[0].v-1):null;
+   const net=(s.realized_usd!=null&&s.unrealized_usd!=null)?
+    `<div class="ev"><span>realized</span><span class="${s.realized_usd>=0?'pos':'neg'}">${signed(s.realized_usd)}</span></div>
+     <div class="ev"><span>unrealized</span><span class="${s.unrealized_usd>=0?'pos':'neg'}">${signed(s.unrealized_usd)}</span></div>
+     <div class="ev"><span>fees paid</span><span class="muted">${money(s.fees_usd,2)}</span></div>`:
+    `<div class="ev"><span>vs SPY (same window)</span><span class="muted">${s.spy_return_pct!=null?s.spy_return_pct.toFixed(1)+'%':'–'}</span></div>`;
+   return `<div class="card"><h2>${s.label}${s.currency!=='USD'?` <span class="muted" style="text-transform:none">(${s.currency} book → USD)</span>`:''}</h2>
+    <span class="tile"><b>${money(s.equity_usd)}</b><br><span class="muted">equity USD</span></span>
+    <span class="tile"><b class="${(s.day_pnl_usd||0)>=0?'pos':'neg'}">${signed(s.day_pnl_usd)}</b><br><span class="muted">last close</span></span>
+    <span class="tile"><b class="${(incep||0)>=0?'pos':'neg'}">${incep==null?'–':pct(incep,1)}</b><br><span class="muted">since incep.</span></span>
+    <div style="margin-top:8px">${net}</div></div>`;
+  }).join('')||'<div class="card"><span class="muted">no sleeve data yet</span></div>';
+
+  // Sleeve race: common window (latest inception), each series rebased to
+  // 100 at its first point in-window. Live and paper are separate series
+  // by construction — the server never merges books.
+  const series=sleeves.map((s,i)=>({label:s.label,pts:s.curve_usd||[],
+    color:['#4cc38a','#e8a54b','#b07cf6'][i%3]}));
+  if((lv.spy||[]).length)series.push({label:'SPY',pts:lv.spy,color:'#8b98a5'});
+  const usable=series.filter(s=>s.pts.length>1);
+  const raceEl=document.getElementById('lvRace'),raceEmpty=document.getElementById('lvRaceEmpty');
+  if(usable.length){
+   const start=usable.map(s=>s.pts[0].t).sort().slice(-1)[0];
+   const dates=[...new Set(usable.flatMap(s=>s.pts.map(p=>p.t)))].filter(t=>t>=start).sort();
+   const sets=usable.map(s=>{
+    const m=Object.fromEntries(s.pts.map(p=>[p.t,p.v]));
+    const first=dates.find(t=>m[t]!=null);const base=first?m[first]:null;
+    return base?{label:s.label,data:dates.map(t=>m[t]!=null?+(100*m[t]/base).toFixed(2):null),
+     borderColor:s.color,spanGaps:true}:null;}).filter(Boolean);
+   if(sets.length&&dates.length>1)line('lvRace',dates,sets);
+   else{raceEl.style.display='none';raceEmpty.style.display='';raceEmpty.textContent='not enough overlapping daily closes yet';}
+  }else{raceEl.style.display='none';raceEmpty.style.display='';raceEmpty.textContent='no daily closes yet — curves start after the first full session';}
+
+  // Daily PnL bars for the momentum sleeve(s).
+  const mom=sleeves.find(s=>s.label.startsWith('momentum'));
+  if(mom&&(mom.daily_pnl_usd||[]).length){
+   document.getElementById('lvPnlLbl').textContent='— '+mom.label;
+   new Chart(document.getElementById('lvPnl'),{type:'bar',
+    data:{labels:mom.daily_pnl_usd.map(b=>b.t.slice(5)),
+     datasets:[{data:mom.daily_pnl_usd.map(b=>b.v),
+      backgroundColor:mom.daily_pnl_usd.map(b=>b.v>=0?'rgba(63,207,142,.75)':'rgba(240,85,109,.75)')}]},
+    options:{plugins:{legend:{display:false}},
+     scales:{x:{ticks:{color:'#8b98a5',maxTicksLimit:12}},y:{ticks:{color:'#8b98a5'}}}}});
+  }
+
+  // Attribution table.
+  const at=(mom||{}).attribution_today||[];
+  document.getElementById('lvAttr').innerHTML=at.length?
+   `<table><tr><th>sym</th><th>pnl</th><th>fees</th><th>qty</th></tr>`+
+   at.map(r=>`<tr><td>${r.symbol}</td><td class="${r.pnl>=0?'pos':'neg'}">${signed(r.pnl)}</td>
+    <td class="muted">${r.fees?money(r.fees,2):'–'}</td><td class="muted">${r.qty||'–'}</td></tr>`).join('')+'</table>':
+   '<span class="muted">no snapshot pair for today yet — fills in after the first two sessions</span>';
+
+  // Account & FX.
+  const accRows=sleeves.filter(s=>s.label.startsWith('momentum')).map(s=>
+   `<div class="ev"><span>${s.label} equity</span><span>${s.currency==='USD'?money(s.equity):Number(s.equity||0).toLocaleString(undefined,{maximumFractionDigits:0})+' '+s.currency+' ≈ '+money(s.equity_usd)}</span></div>`).join('');
+  document.getElementById('lvAcct').innerHTML=
+   `<div class="ev"><span>environment</span><span class="${lv.env==='live'?'warn':'ok'}">${lv.env||'–'}</span></div>`+accRows+
+   `<div class="ev"><span>USDCHF used</span><span>${lv.usdchf!=null?Number(lv.usdchf).toFixed(4):'–'}</span></div>`+
+   (lv.fx_ok?'':'<div class="ev"><span class="warn">⚠ FX series unavailable — curves shown UNCONVERTED</span></div>');
+ })();
+
  const daily=d.equity_curve||[],today=d.equity_today||[];let eqChart=null,raceChart=null;
  const cutFor=(range)=>{
   const now=new Date();

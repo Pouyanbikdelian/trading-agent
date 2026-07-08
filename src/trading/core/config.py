@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     agents_model: str | None = Field(default=None, alias="AGENTS_MODEL")
+    # Hard dollar cap for the agent-PM sleeve IF/WHEN it is bridged into
+    # the real order path (GO_LIVE.md §4). The $1M sim book deliberately
+    # ignores this — it exists so the bridge, when built, sizes PM target
+    # weights against min(PM_SLEEVE_CAPITAL_USD, allotted equity) and can
+    # never grow the sleeve past what the operator explicitly allocated.
+    pm_sleeve_capital_usd: float = Field(default=20_000.0, alias="PM_SLEEVE_CAPITAL_USD")
 
     # ---- Notifications ----
     telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")

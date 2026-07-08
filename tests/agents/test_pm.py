@@ -51,6 +51,31 @@ def test_clamp_enforces_whitelist_cap_and_gross() -> None:
     assert all(s in UNIVERSE for s in w)
 
 
+def test_clamp_drops_operator_held_symbols() -> None:
+    w = _clamp_weights({"SMH": 0.2, "XLE": 0.2}, blocked=frozenset({"SMH"}))
+    assert "SMH" not in w and w["XLE"] == 0.2  # pinned name cut to cash
+
+
+def test_run_respects_holds_file(mem: MemoryStore, tmp_path: Path) -> None:
+    """A /hold-pinned symbol must never receive PM allocation, and the PM
+    prompt must disclose the pin (belt and braces)."""
+    from trading.runner.holds import save_holds
+
+    save_holds(tmp_path, {"SMH"})
+    seen: dict[str, str] = {}
+
+    def llm(system: str, prompt: str) -> dict[str, Any]:
+        seen["prompt"] = prompt
+        return {"target_weights": {"SMH": 0.25, "XLE": 0.2}, "rationale": "r", "watch": "w"}
+
+    res = run_agent_pm({}, mem, tmp_path, llm=llm, prices=PRICES)
+    assert res["ok"] is True
+    assert res["weights"] == {"XLE": 0.2}
+    assert "SMH" in json.loads(seen["prompt"])["operator_held_do_not_trade"]
+    book = json.loads((tmp_path / "agent_pm" / "portfolio.json").read_text())
+    assert "SMH" not in book["holdings"]
+
+
 def test_first_run_builds_book_and_journals(mem: MemoryStore, tmp_path: Path) -> None:
     llm = _pm_llm({"SMH": 0.25, "XLE": 0.2, "FAKE": 0.5})
     res = run_agent_pm({}, mem, tmp_path, llm=llm, prices=PRICES)

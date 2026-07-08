@@ -68,3 +68,18 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 - [x] Hetzner / DigitalOcean deploy runbook
 - [ ] Log shipping (optional — deferred)
 - [x] Restore-from-state drill documented
+
+## Phase 10 — Go-live (real money) — IN PROGRESS 2026-07
+The full working checklist lives in **docs/GO_LIVE.md** — read that first.
+Order of operations:
+- [x] Dashboard: per-sleeve real PnL + FX-correct curves (GO_LIVE.md §1)
+      — "Live" tab shipped 2026-07-09; PM capped at $20K via
+      PM_SLEEVE_CAPITAL_USD (bridge-time); PM blocked from /hold symbols
+- [ ] Pre-live audit: .env lint (Yan pasted into nano 2026-07-02 — verify!),
+      risk-limit review, kill-switch/reconciliation/gateway-death drills,
+      CHF sizing check, pins review (GO_LIVE.md §2)
+- [ ] Live-day config: fresh state dir, sized-down limits
+      (MAX_POSITION_PCT=0.05, MAX_GROSS_EXPOSURE=0.50), gates flipped by
+      Yan only (GO_LIVE.md §3)
+- [ ] Agent PM: sim observation → risk-manager bridge → 30d paper — NOT
+      part of the first live wave (GO_LIVE.md §4)

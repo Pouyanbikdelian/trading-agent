@@ -7,6 +7,7 @@ with the same marker already exists it does nothing, so it's safe to re-run.
 Run inside the trader container after deploy:
     docker compose exec -T trader python scripts/add_rotation_lesson.py
 """
+
 from __future__ import annotations
 
 from trading.memory.store import default_store

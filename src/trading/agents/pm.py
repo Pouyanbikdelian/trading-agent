@@ -164,6 +164,12 @@ PM_CHARTER = (
     "top three holdings by weight, allocate at least 5% there — this is "
     "the forcing function for portfolio evolution beyond existing themes.\n"
     "\n"
+    "OPERATOR HOLDS (mandatory): symbols listed in operator_held_do_not_trade "
+    "are the operator's long-term positions, pinned outside your mandate. "
+    "NEVER allocate to them — any weight you place there is cut to cash by "
+    "code. Do not count them as portfolio exposure either; they are not "
+    "your book.\n"
+    "\n"
     "STOCK PREFERENCE (mandatory): Individual stocks are the PRIMARY vehicle. "
     "When a sector thesis is clear, own the best 1-3 individual names in "
     "that sector — NOT the sector ETF. Examples: own LMT or RTX instead of "
@@ -220,9 +226,14 @@ def _default_llm(system: str, prompt: str) -> dict[str, Any]:
     return complete_json(system, prompt, tier="frontier")
 
 
-def _clamp_weights(raw: Any, stocks: tuple[str, ...] = ()) -> dict[str, float]:
+def _clamp_weights(
+    raw: Any, stocks: tuple[str, ...] = (), blocked: frozenset[str] = frozenset()
+) -> dict[str, float]:
     """Hard caps: whitelist, long-only, per-name max (tighter for single
-    stocks than for ETFs), gross max."""
+    stocks than for ETFs), gross max. ``blocked`` symbols (operator
+    ``/hold`` pins — Yan's long-term positions) are dropped to cash like
+    any off-whitelist name: the PM may never allocate to a symbol the
+    operator has pinned, in sim today and through the bridge later."""
     weights: dict[str, float] = {}
     if not isinstance(raw, dict):
         return weights
@@ -232,7 +243,7 @@ def _clamp_weights(raw: Any, stocks: tuple[str, ...] = ()) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
         sym = str(sym).upper().strip()
-        if w <= 0:
+        if w <= 0 or sym in blocked:
             continue
         if sym in UNIVERSE:
             weights[sym] = min(w, MAX_WEIGHT_PER_NAME)
@@ -402,8 +413,16 @@ def run_agent_pm(
     except Exception:
         pass
 
+    # Operator pins: one list for the whole system (state/holds.json).
+    # The PM is told about them AND hard-blocked from them — belt and
+    # braces, same as every other cap in this module.
+    from trading.runner.holds import load_holds
+
+    held = frozenset(load_holds(Path(state_dir)))
+
     prompt = json.dumps(
         {
+            "operator_held_do_not_trade": sorted(held),
             "sim_portfolio": {
                 "equity": round(equity, 2),
                 "cash": round(float(book["cash"]), 2),
@@ -436,7 +455,7 @@ def run_agent_pm(
         logger.bind(component="agent_pm").warning(f"PM call failed: {e}")
         return {"ok": False, "reason": f"PM call failed: {e}"}
 
-    weights = _clamp_weights(out.get("target_weights"), stocks)
+    weights = _clamp_weights(out.get("target_weights"), stocks, blocked=held)
     # Late pricing for newly targeted names not already marked.
     need_px = [s for s in weights if s not in px]
     if need_px and prices is None:
