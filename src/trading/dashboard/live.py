@@ -173,12 +173,47 @@ def daily_curve(
     return [{"t": t, "v": v} for t, v in sorted(daily.items())]
 
 
+# A day-over-day equity move beyond this fraction is treated as a capital
+# flow (deposit/withdrawal/paper top-up), not PnL. The paper account was
+# topped up ~5x in one day (2026-05-20) which read as "+$1.15M daily PnL"
+# and "+990% since inception" on the dashboard. No strategy in this
+# system moves a diversified book 25% in a day; a flow easily does.
+FLOW_THRESHOLD = 0.25
+
+
 def daily_pnl_bars(points: list[dict[str, Any]], n: int = 60) -> list[dict[str, Any]]:
-    """Day-over-day equity diffs for the last ``n`` closed days."""
+    """Day-over-day equity diffs for the last ``n`` closed days.
+    Capital-flow days (see FLOW_THRESHOLD) are emitted as v=0 with a
+    ``flow`` marker instead of a monster bar."""
     from itertools import pairwise
 
-    bars = [{"t": b["t"], "v": round(b["v"] - a["v"], 2)} for a, b in pairwise(points)]
+    bars = []
+    for a, b in pairwise(points):
+        diff = b["v"] - a["v"]
+        if a["v"] > 0 and abs(diff) / a["v"] > FLOW_THRESHOLD:
+            bars.append({"t": b["t"], "v": 0.0, "flow": round(diff, 2)})
+        else:
+            bars.append({"t": b["t"], "v": round(diff, 2)})
     return bars[-n:]
+
+
+def flow_adjusted_return_pct(points: list[dict[str, Any]]) -> float | None:
+    """Since-inception return from compounded daily returns, skipping
+    capital-flow days — the honest number when the account was topped up
+    mid-history. None with fewer than 2 points."""
+    from itertools import pairwise
+
+    if len(points) < 2:
+        return None
+    total = 1.0
+    for a, b in pairwise(points):
+        if a["v"] <= 0:
+            continue
+        r = b["v"] / a["v"] - 1.0
+        if abs(r) > FLOW_THRESHOLD:
+            continue  # flow day: contributes 0% return, not ±400%
+        total *= 1.0 + r
+    return round((total - 1.0) * 100, 2)
 
 
 # ---------------------------------------------------------- attribution
@@ -304,6 +339,7 @@ def _momentum_sleeve(state_dir: Path, fx: dict[str, float], label: str) -> dict[
         "currency": base_ccy,
         "equity": snap.equity if snap else None,
         "equity_usd": points_usd[-1]["v"] if points_usd else None,
+        "return_pct": flow_adjusted_return_pct(points_usd),
         "curve_usd": points_usd,
         "daily_pnl_usd": bars,
         "day_pnl_usd": bars[-1]["v"] if bars else None,
@@ -365,12 +401,15 @@ def build_live(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     s = _momentum_sleeve(Path(state_dir), fx, f"momentum ({env})")
     if s:
         sleeves.append(s)
-    # A second, live state dir may exist alongside the paper one (GO_LIVE
-    # §3 mandates a fresh state dir for the live book). Point
-    # DASHBOARD_LIVE_STATE_DIR at it and it renders as its own sleeve.
+    # A second, live state dir may exist alongside the paper one: today
+    # that's the read-only account mirror (compose profile `mirror`); on
+    # live day it's the live runner's fresh state dir (GO_LIVE §3). Point
+    # DASHBOARD_LIVE_STATE_DIR at it and it renders as its own sleeve,
+    # never merged. Override the label on live day.
     other = os.getenv("DASHBOARD_LIVE_STATE_DIR", "")
     if other and Path(other) != Path(state_dir):
-        s2 = _momentum_sleeve(Path(other), fx, "momentum (live)")
+        label = os.getenv("DASHBOARD_LIVE_LABEL", "account (live · read-only)")
+        s2 = _momentum_sleeve(Path(other), fx, label)
         if s2:
             sleeves.append(s2)
     pm = _pm_sleeve(Path(state_dir))

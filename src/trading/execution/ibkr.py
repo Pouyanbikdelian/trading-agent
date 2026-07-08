@@ -607,8 +607,28 @@ class IbkrBroker(Broker):
 
     def get_positions(self) -> list[Position]:
         self._ensure_connected()
-        raw = self._bounded("positions", self._ib.positions)
+        # portfolio() over positions(): both list holdings, but only
+        # portfolio items carry unrealizedPNL/realizedPNL. positions()
+        # left every snapshot with unrealized_pnl=0.0, which made the
+        # dashboard's PnL cards and attribution read $0 forever
+        # (bug found 2026-07-09). positions() remains the fallback for
+        # the brief post-connect window before portfolio updates arrive.
+        raw_pf = self._bounded("portfolio", self._ib.portfolio)
         out: list[Position] = []
+        if raw_pf:
+            for it in raw_pf:
+                instrument = _ibkr_contract_to_instrument(it.contract)
+                out.append(
+                    Position(
+                        instrument=instrument,
+                        quantity=float(it.position),
+                        avg_price=float(it.averageCost) / max(instrument.multiplier, 1.0),
+                        realized_pnl=float(getattr(it, "realizedPNL", 0.0) or 0.0),
+                        unrealized_pnl=float(getattr(it, "unrealizedPNL", 0.0) or 0.0),
+                    )
+                )
+            return out
+        raw = self._bounded("positions", self._ib.positions)
         for p in raw:
             instrument = _ibkr_contract_to_instrument(p.contract)
             out.append(

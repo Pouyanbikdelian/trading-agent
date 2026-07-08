@@ -37,6 +37,10 @@ class _SlowStubIB:
         time.sleep(self._sleep)
         return []
 
+    def portfolio(self):
+        time.sleep(self._sleep)
+        return []
+
     def fills(self):
         time.sleep(self._sleep)
         return []
@@ -64,7 +68,8 @@ def test_get_account_raises_timeout_when_ib_blocks(slow_broker: IbkrBroker) -> N
 def test_get_positions_raises_timeout(slow_broker: IbkrBroker) -> None:
     with pytest.raises(BrokerTimeoutError) as exc_info:
         slow_broker.get_positions()
-    assert "positions" in str(exc_info.value)
+    # portfolio() is tried first (it carries PnL), so that's what times out.
+    assert "portfolio" in str(exc_info.value)
 
 
 def test_get_fills_raises_timeout(slow_broker: IbkrBroker) -> None:
@@ -121,6 +126,9 @@ class _FlakyIb:
         ]
 
     def positions(self):
+        return []
+
+    def portfolio(self):
         return []
 
 

@@ -35,6 +35,7 @@ class _FakeIb:
         self.cancelled: list[object] = []
         self._open_trades: list[object] = []
         self._positions: list[object] = []
+        self._portfolio: list[object] = []
         self._fills: list[object] = []
         self._account_summary: list[object] = []
         self._account_values: list[object] = []
@@ -65,6 +66,9 @@ class _FakeIb:
     # state
     def positions(self) -> list[object]:
         return list(self._positions)
+
+    def portfolio(self) -> list[object]:
+        return list(self._portfolio)
 
     def fills(self) -> list[object]:
         return list(self._fills)
@@ -229,6 +233,31 @@ def test_get_positions_maps_to_our_types(broker: IbkrBroker, fake_ib: _FakeIb) -
     assert p.instrument.asset_class == AssetClass.EQUITY
     assert p.quantity == 10.0
     assert p.avg_price == 150.0
+    assert p.unrealized_pnl == 0.0  # positions() fallback carries no PnL
+
+
+def test_get_positions_prefers_portfolio_with_pnl(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
+    """portfolio() rows carry unrealized/realized PnL — the snapshot must
+    keep them (the $0-PnL dashboard bug, 2026-07-09)."""
+    contract = SimpleNamespace(
+        symbol="MU", secType="STK", exchange="SMART", currency="USD", multiplier=None
+    )
+    fake_ib._portfolio = [
+        SimpleNamespace(
+            contract=contract,
+            position=109,
+            averageCost=110.0,
+            unrealizedPNL=421.5,
+            realizedPNL=12.25,
+        )
+    ]
+    out = broker.get_positions()
+    assert len(out) == 1
+    p = out[0]
+    assert p.instrument.symbol == "MU"
+    assert p.avg_price == 110.0
+    assert p.unrealized_pnl == 421.5
+    assert p.realized_pnl == 12.25
 
 
 def test_get_account_reads_summary(broker: IbkrBroker, fake_ib: _FakeIb) -> None:

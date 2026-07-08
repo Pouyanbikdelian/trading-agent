@@ -477,7 +477,9 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   // Sleeve cards: equity, day move, realized / unrealized / fees.
   document.getElementById('lvCards').innerHTML=sleeves.map(s=>{
    const c=s.curve_usd||[];
-   const incep=c.length>1?(c[c.length-1].v/c[0].v-1):null;
+   // Server-side flow-adjusted return when available (capital injections
+   // into the paper account otherwise read as +990% "performance").
+   const incep=s.return_pct!=null?s.return_pct/100:(c.length>1?(c[c.length-1].v/c[0].v-1):null);
    const net=(s.realized_usd!=null&&s.unrealized_usd!=null)?
     `<div class="ev"><span>realized</span><span class="${s.realized_usd>=0?'pos':'neg'}">${signed(s.realized_usd)}</span></div>
      <div class="ev"><span>unrealized</span><span class="${s.unrealized_usd>=0?'pos':'neg'}">${signed(s.unrealized_usd)}</span></div>

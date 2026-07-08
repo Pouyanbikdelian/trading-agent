@@ -141,6 +141,32 @@ def test_daily_pnl_bars_are_diffs() -> None:
     assert daily_pnl_bars(pts) == [{"t": "d2", "v": 10.0}, {"t": "d3", "v": -6.0}]
 
 
+def test_daily_pnl_bars_mask_capital_flows() -> None:
+    """A 5x overnight jump is a paper top-up, not a $1.15M trading day."""
+    pts = [
+        {"t": "d1", "v": 250_000.0},
+        {"t": "d2", "v": 1_400_000.0},  # injection
+        {"t": "d3", "v": 1_407_000.0},  # real +7k day
+    ]
+    bars = daily_pnl_bars(pts)
+    assert bars[0]["v"] == 0.0 and bars[0]["flow"] == 1_150_000.0
+    assert bars[1] == {"t": "d3", "v": 7000.0}
+
+
+def test_flow_adjusted_return_skips_injections() -> None:
+    from trading.dashboard.live import flow_adjusted_return_pct
+
+    pts = [
+        {"t": "d1", "v": 250_000.0},
+        {"t": "d2", "v": 255_000.0},  # +2%
+        {"t": "d3", "v": 1_400_000.0},  # injection — must not count
+        {"t": "d4", "v": 1_428_000.0},  # +2%
+    ]
+    r = flow_adjusted_return_pct(pts)
+    assert r is not None and abs(r - 4.04) < 0.01  # 1.02 * 1.02
+    assert flow_adjusted_return_pct([{"t": "d1", "v": 1.0}]) is None
+
+
 # ------------------------------------------------------------ attribution
 
 

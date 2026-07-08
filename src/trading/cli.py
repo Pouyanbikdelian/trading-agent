@@ -733,6 +733,36 @@ def _dashboard_run(
     serve(host=host, port=port)
 
 
+mirror_app = typer.Typer(help="Read-only LIVE-account mirror for the dashboard.")
+app.add_typer(mirror_app, name="mirror")
+
+
+@mirror_app.command("run")
+def _mirror_run(
+    host: str = typer.Option("127.0.0.1", help="IB Gateway host (live-mode gateway)."),
+    port: int = typer.Option(4001, help="Gateway API port — 4001 = live."),
+    client_id: int = typer.Option(27, help="Distinct client id (never the trader's)."),
+    interval_min: int = typer.Option(15, help="Minutes between snapshots."),
+) -> None:
+    """Snapshot the live account into STATE_DIR/runner.db, forever.
+
+    Read-only by construction: never places, modifies or cancels orders,
+    and expects the gateway to be booted with READ_ONLY_API=yes. This is
+    the "see the real account before trading it" feed for the dashboard's
+    Live tab — not a trading process.
+    """
+    from trading.core.config import settings
+    from trading.runtime.live_mirror import run_loop
+
+    run_loop(
+        settings.state_dir,
+        host=host,
+        port=port,
+        client_id=client_id,
+        interval_s=interval_min * 60,
+    )
+
+
 bot_app = typer.Typer(help="Telegram command bot (long-polling).")
 app.add_typer(bot_app, name="bot")
 

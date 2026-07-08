@@ -73,13 +73,42 @@ A staged plan. Each phase is reviewable independently and unlocks the next.
 The full working checklist lives in **docs/GO_LIVE.md** — read that first.
 Order of operations:
 - [x] Dashboard: per-sleeve real PnL + FX-correct curves (GO_LIVE.md §1)
-      — "Live" tab shipped 2026-07-09; PM capped at $20K via
+      — "Live" tab shipped + deployed 2026-07-09; PM capped at $20K via
       PM_SLEEVE_CAPITAL_USD (bridge-time); PM blocked from /hold symbols
-- [ ] Pre-live audit: .env lint (Yan pasted into nano 2026-07-02 — verify!),
-      risk-limit review, kill-switch/reconciliation/gateway-death drills,
-      CHF sizing check, pins review (GO_LIVE.md §2)
+- [x] Live-tab bug fixes (2026-07-09): capital injections no longer read
+      as PnL/returns; snapshots now carry real unrealized/realized PnL
+      (ibkr get_positions uses portfolio(), was positions() with 0.0)
+- [x] Read-only LIVE-account mirror built (compose profile `mirror`:
+      second gateway with READ_ONLY_API=yes + `trading mirror run` →
+      state_live/ → dashboard sleeve). NOT yet enabled — needs RAM check
+      (`free -m`, want >700MB) + IBKR_LIVE_USERNAME in VPS .env + 2FA
+      approval on first boot.
+- [ ] Pre-live audit (GO_LIVE.md §2). Drill runbook ready: docs/DRILLS.md
+      — run during US market hours. Still open: .env lint on VPS
+      (partial: `trading status` values verified 2026-07-09), risk-limit
+      review, the four drills, CHF sizing check, pins review, cron/TZ
+      audit, tag live-candidate-1
 - [ ] Live-day config: fresh state dir, sized-down limits
       (MAX_POSITION_PCT=0.05, MAX_GROSS_EXPOSURE=0.50), gates flipped by
       Yan only (GO_LIVE.md §3)
 - [ ] Agent PM: sim observation → risk-manager bridge → 30d paper — NOT
       part of the first live wave (GO_LIVE.md §4)
+
+## Phase 11 — Telegram bot v2 (backlog, added 2026-07-09 per Yan)
+
+- [ ] **Robustness overhaul** — the bot should be "so much more robust":
+      graceful reconnect/backoff on Telegram API flaps, command timeouts
+      that never wedge the poll loop, per-command error isolation (one
+      broken handler can't kill the bot), structured error replies
+      instead of silence, health self-reporting (/health with uptime,
+      last-poll age, handler failure counts), and tests for every
+      command path.
+- [ ] **Claude-powered agent assistant in the chat** — a conversational
+      assistant (Anthropic API, reasoning-capable model) living in the
+      Telegram chat: understands the system's state (positions, halts,
+      committee journal, memory store), answers questions in natural
+      language, and can ACT like an agent — proposing/queueing the
+      existing safe commands (/cycle, /hold, /pm run...) rather than
+      free-form execution. Design constraints to settle before building:
+      tool whitelist (never the raw order path — rule #4), spend budget
+      per day, and how it defers to the human on anything gated.

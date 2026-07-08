@@ -225,8 +225,14 @@ services:
       - trader
     env_file:
       - .env
+    environment:
+      # The read-only live-account mirror (profile `mirror` below) writes
+      # snapshots here; when the dir has a runner.db the dashboard's Live
+      # tab renders it as its own sleeve — never merged with paper.
+      DASHBOARD_LIVE_STATE_DIR: /app/state_live
     volumes:
       - state:/app/state
+      - state_live:/app/state_live:ro
       - data:/app/data:ro
       - ./config:/app/config:ro
     ports:
@@ -234,6 +240,78 @@ services:
     command: ["dashboard", "run"]
     networks:
       - trading
+
+  # ---- Read-only LIVE-account mirror (opt-in) ---------------------------
+  # Shows the REAL account on the dashboard before/without trading it.
+  # Activate:   docker compose --profile mirror up -d
+  # Deactivate: docker compose --profile mirror down ib-gateway-live mirror
+  #
+  # BEFORE enabling, check RAM — the box has 2GB and a second gateway
+  # needs ~500-700MB:   free -m   (want >700MB free + swap configured).
+  #
+  # Requires in .env:  IBKR_LIVE_USERNAME (the live login; the paper one
+  # without the trailing "2"). Password is shared with the paper login.
+  # First start (and each nightly gateway restart) may ping IBKR mobile
+  # 2FA — approve it on the phone or the gateway sits at the login screen.
+  #
+  # Safety stack, outermost first:
+  #   1. READ_ONLY_API=yes — IBKR itself refuses order calls on this session.
+  #   2. `trading mirror run` only ever calls get_account() + save_snapshot().
+  #   3. Own state volume — the paper runner's state/orders are untouched.
+  #   4. Own client_id (27) — never shares the trader's API identity.
+  ib-gateway-live:
+    profiles: ["mirror"]
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ibkr-gateway-live
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      # Live-mode gateway listens on 4001 (paper one owns 4002 — both fit
+      # on host networking without clashing).
+      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/127.0.0.1/4001' || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    labels:
+      - "autoheal=true"
+      # Nightly restart 23:35 UTC — 5 min after the paper gateway's so the
+      # two IBC login dances (and possible 2FA pings) don't overlap.
+      - "ofelia.enabled=true"
+      - "ofelia.job-exec.nightly-restart-live.schedule=0 35 23 * * *"
+      - "ofelia.job-exec.nightly-restart-live.command=/bin/sh -c \"kill 1\""
+    network_mode: host
+    environment:
+      TWS_USERID: ${IBKR_LIVE_USERNAME}
+      TWS_PASSWORD: ${IBKR_PASSWORD}
+      TRADING_MODE: live
+      READ_ONLY_API: "yes"
+      TIME_ZONE: ${TZ:-UTC}
+      TWOFA_TIMEOUT_ACTION: "restart"
+      BYPASS_WARNING: "yes"
+    volumes:
+      - ib_settings_live:/home/ibgateway/Jts
+
+  mirror:
+    profiles: ["mirror"]
+    image: trading-agent:latest
+    container_name: trader-mirror
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      - ib-gateway-live
+    env_file:
+      - .env
+    # Host networking for the same TrustedIPs reason as the trader: the
+    # gateway only trusts 127.0.0.1 by default.
+    network_mode: host
+    environment:
+      IBKR_HOST: 127.0.0.1
+      IBKR_PORT: "4001"
+      IBKR_CLIENT_ID: "27"
+    volumes:
+      - state_live:/app/state
+    command: ["mirror", "run"]
 
   # Live profile flips the command. Activate with `--profile live`.
   trader-live:
@@ -303,9 +381,12 @@ services:
 
 volumes:
   ib_settings: {}
+  ib_settings_live: {}
   data: {}
   logs: {}
   state: {}
+  # The live mirror's snapshots — separate from paper state by design.
+  state_live: {}
 
 networks:
   trading:

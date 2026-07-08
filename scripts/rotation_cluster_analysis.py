@@ -479,7 +479,7 @@ print(tot.round(1).to_string())
 # --- Relative strength vs SPY and monthly relative returns ---
 rs = px[THEMES].div(px["SPY"], axis=0)  # relative-strength line
 rel = rs.pct_change().dropna()  # monthly relative return (beta-stripped)
-absr = px[THEMES + ["SPY"]].pct_change().dropna()  # absolute monthly return
+absr = px[[*THEMES, "SPY"]].pct_change().dropna()  # absolute monthly return
 
 Dr, Rr = rel[DEF].mean(axis=1), rel[RISK].mean(axis=1)  # equal-weight cluster composites
 
@@ -551,14 +551,14 @@ print("\n" + "=" * 72)
 print("4) BACKTEST  monthly rotation, signal = 3m relative momentum spread")
 mom3 = rs.pct_change(3)  # 3-month relative momentum per ETF
 sig = (mom3[RISK].mean(1) - mom3[DEF].mean(1)).dropna()  # +ve => risk-on cluster leading
-retA = absr.reindex(sig.index)  # aligned absolute returns
+ret_abs = absr.reindex(sig.index)  # aligned absolute returns
 
 
 def cluster_ret(names):
-    return retA[names].mean(1)
+    return ret_abs[names].mean(1)
 
 
-spy = retA["SPY"]
+spy = ret_abs["SPY"]
 # long-only rotation: hold whichever cluster's momentum leads (decided at t-1, realized t)
 pos = np.where(sig.shift(1) > 0, "RISK", "DEF")
 rot = pd.Series(
@@ -622,15 +622,15 @@ print(
 
 print("\n" + "=" * 72)
 print("7) MEAN-REVERSION variant (buy the LAGGING cluster; fade the spread)")
-posM = np.where(sig.shift(1) > 0, "DEF", "RISK")  # if RISK led last month, buy DEF (laggard)
-rotM = pd.Series(
+pos_mr = np.where(sig.shift(1) > 0, "DEF", "RISK")  # if RISK led last month, buy DEF (laggard)
+rot_mr = pd.Series(
     [
-        cluster_ret(RISK).iloc[i] if posM[i] == "RISK" else cluster_ret(DEF).iloc[i]
+        cluster_ret(RISK).iloc[i] if pos_mr[i] == "RISK" else cluster_ret(DEF).iloc[i]
         for i in range(len(sig))
     ],
     index=sig.index,
 )
-mnM = pd.Series(
+mn_mr = pd.Series(
     [
         (cluster_ret(DEF).iloc[i] - cluster_ret(RISK).iloc[i])
         if sig.shift(1).iloc[i] > 0
@@ -639,8 +639,8 @@ mnM = pd.Series(
     ],
     index=sig.index,
 ).dropna()
-stats(rotM, "MeanRev long-only")
-stats(mnM, "MeanRev long/short")
+stats(rot_mr, "MeanRev long-only")
+stats(mn_mr, "MeanRev long/short")
 
 print("\n" + "=" * 72)
 print("8) CURRENT STATE (as of last obs)")
