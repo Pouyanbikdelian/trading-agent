@@ -341,9 +341,11 @@ class Runner:
                 id="options_monitor",
                 replace_existing=True,
             )
-            # Agent committee: weekdays 14:00 UTC (pre-US-open, after
-            # the macro monitor refreshes its dial). Advisory only;
-            # requires AGENTS_ENABLED=true + an LLM API key in .env.
+            # Agent committee: TWICE weekly — Mon & Fri, mid-session NYSE time
+            # (default 13:00 ET: prices settled, well clear of the noisy open).
+            # NYSE tz so it tracks the US session across DST. Env-tunable via
+            # AGENTS_COMMITTEE_CRON. Advisory only; requires AGENTS_ENABLED=true
+            # + an LLM API key in .env.
             import os as _os
 
             if _os.getenv("AGENTS_ENABLED", "false").lower() in ("true", "1", "yes") and (
@@ -351,7 +353,10 @@ class Runner:
             ):
                 self._scheduler.add_job(
                     self._run_committee_async,
-                    CronTrigger(day_of_week="mon-fri", hour=14, minute=0, timezone="UTC"),
+                    CronTrigger.from_crontab(
+                        _os.getenv("AGENTS_COMMITTEE_CRON", "0 13 * * MON,FRI"),
+                        timezone="America/New_York",
+                    ),
                     id="agent_committee",
                     replace_existing=True,
                 )
@@ -363,9 +368,10 @@ class Runner:
                     id="econ_watch",
                     replace_existing=True,
                 )
-                # News watch: feeds the scout. 13:40 UTC weekdays — fresh
-                # headlines + sector momentum land just before the 14:00
-                # committee. Pure RSS/yfinance; failures degrade, not break.
+                # News watch: feeds the daily scout dashboard. 13:40 UTC
+                # weekdays — fresh headlines + sector momentum. The on-demand
+                # /committee path refreshes this again before it debates.
+                # Pure RSS/yfinance; failures degrade, not break.
                 self._scheduler.add_job(
                     self._run_news_watch_async,
                     CronTrigger(day_of_week="mon-fri", hour=13, minute=40, timezone="UTC"),
@@ -409,10 +415,25 @@ class Runner:
                 # 13:30-20:00 UTC covers 9:30-16:00 ET in summer (shifts an
                 # hour in winter — acceptable for a tripwire). Mechanical
                 # checks are free; the LLM runs only when a wire trips.
+                # INFORMATION ONLY — it alerts, it never convenes the committee.
                 self._scheduler.add_job(
                     self._run_sentinel_async,
                     CronTrigger(day_of_week="mon-fri", hour="13-20", minute="*/15", timezone="UTC"),
                     id="sentinel",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+                # Late-day de-risk: ONE check ~50 min before the close (default
+                # 15:10 ET). If a holding is down >= SENTINEL_DERISK_DROP_PCT on
+                # the day by then, convene the committee once. The noisy open is
+                # excluded by design; nothing fires after the close. NYSE tz.
+                self._scheduler.add_job(
+                    self._run_lateday_derisk_async,
+                    CronTrigger.from_crontab(
+                        _os.getenv("SENTINEL_DERISK_CRON", "10 15 * * MON-FRI"),
+                        timezone="America/New_York",
+                    ),
+                    id="committee_lateday",
                     replace_existing=True,
                     max_instances=1,
                 )
@@ -1110,8 +1131,10 @@ class Runner:
             logger.bind(component="guards").exception("guards run failed")
 
     async def _run_sentinel_async(self) -> None:
-        """Intraday risk watch — free unless a tripwire fires. Advisory:
-        alerts + optional committee convening, never the order path."""
+        """Intraday risk watch — INFORMATION ONLY. Sends a caution alert when a
+        tripwire fires; it never convenes the committee (that path is the
+        twice-weekly schedule, the late-day de-risk check, and /committee) and
+        never touches the order path."""
         try:
             from trading.runtime.sentinel import format_sentinel_alert, run_sentinel
 
@@ -1119,10 +1142,25 @@ class Runner:
             if result.get("quiet"):
                 return
             self.alerts.info(format_sentinel_alert(result))
-            if result.get("convene_committee"):
-                await self._run_committee_async()
         except Exception:
             logger.bind(component="sentinel").exception("sentinel run failed")
+
+    async def _run_lateday_derisk_async(self) -> None:
+        """Late-day de-risk gate (~50 min before the close). If a holding has
+        cratered on the day (>= DERISK_DROP_PCT), convene the committee once —
+        the noisy open is excluded, and nothing fires after the close.
+        Advisory only; never the order path."""
+        try:
+            from trading.runtime.sentinel import format_derisk_alert, run_late_day_derisk
+
+            result = await asyncio.to_thread(run_late_day_derisk, settings.state_dir)
+            if result.get("quiet"):
+                return
+            self.alerts.info(format_derisk_alert(result))
+            if result.get("convene"):
+                await self._run_committee_async()
+        except Exception:
+            logger.bind(component="sentinel").exception("late-day de-risk run failed")
 
     async def _run_historian_async(self) -> None:
         """Weekly lesson distillation — see agents/historian.py."""

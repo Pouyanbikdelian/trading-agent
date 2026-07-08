@@ -354,7 +354,10 @@ def _cmd_detail() -> str:
 
     path = settings.state_dir / "last_committee.json"
     if not path.exists():
-        return "_no committee run recorded yet — the committee convenes weekdays 14:00 UTC._"
+        return (
+            "_no committee run recorded yet — it convenes Mon & Fri ~1pm ET "
+            "plus a late-day de-risk check; or run /committee now._"
+        )
     try:
         digest = _json.loads(path.read_text())
     except Exception as e:
