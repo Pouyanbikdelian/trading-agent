@@ -739,9 +739,15 @@ app.add_typer(mirror_app, name="mirror")
 
 @mirror_app.command("run")
 def _mirror_run(
-    host: str = typer.Option("127.0.0.1", help="IB Gateway host (live-mode gateway)."),
-    port: int = typer.Option(4001, help="Gateway API port — 4001 = live."),
-    client_id: int = typer.Option(27, help="Distinct client id (never the trader's)."),
+    host: str = typer.Option(
+        None, help="IB Gateway host (live-mode gateway). Default: IBKR_HOST."
+    ),
+    port: int = typer.Option(
+        None, help="Gateway API port (4001 direct, 4003 via socat relay). Default: IBKR_PORT."
+    ),
+    client_id: int = typer.Option(
+        None, help="Distinct client id (never the trader's). Default: IBKR_CLIENT_ID."
+    ),
     interval_min: int = typer.Option(15, help="Minutes between snapshots."),
 ) -> None:
     """Snapshot the live account into STATE_DIR/runner.db, forever.
@@ -756,9 +762,9 @@ def _mirror_run(
 
     run_loop(
         settings.state_dir,
-        host=host,
-        port=port,
-        client_id=client_id,
+        host=host or settings.ibkr_host,
+        port=port or settings.ibkr_port,
+        client_id=client_id or settings.ibkr_client_id,
         interval_s=interval_min * 60,
     )
 

@@ -44,14 +44,18 @@ Built 2026-07-09 as a new FIRST tab **"Live"** (`dashboard/live.py` +
 ## 2. Sanity checks before arming  [Claude runs, Yan reviews]
 
 Code / config audit:
-- [ ] `.env` on VPS: full lint after Yan's nano copy-paste session —
-      check for glued lines, duplicate keys, stray characters
-      (`MAX_DRAWDOWN_PCT` line looked suspicious on 2026-07-02).
-      `docker compose exec trader trading status` must match intent.
-- [ ] Risk limits sanity: MAX_POSITION_PCT=0.10, MAX_GROSS_EXPOSURE=1.0,
-      MAX_DAILY_LOSS_PCT=0.02, MAX_DRAWDOWN_PCT=0.15 — confirm these are
-      what Yan wants for LIVE (they were set for paper), and that
-      config/risk.yaml agrees with .env (document which one wins).
+- [x] `.env` on VPS: full lint done 2026-07-09 via `cat -A` — no glued
+      lines, no duplicates, no stray characters; the 2026-07-02
+      `MAX_DRAWDOWN_PCT` suspicion was a false alarm (inline comments
+      parse fine, `trading status` matches intent). GUARD_* confirmed
+      present + enabled. Remaining: verify the IBKR_USERNAME line ends
+      at the username (`grep -n "for live" .env` must be empty).
+- [x] Risk limits sanity — PRECEDENCE RESOLVED 2026-07-09: the risk
+      manager reads limits from .env ONLY; config/risk.yaml's limit
+      numbers are never loaded (its header was wrong; fixed). Values
+      confirmed for paper: 0.10 / 1.0 / 0.02 / 0.15. Live-day values
+      are set in §3 (sized down). Yan still owns the final "yes these
+      are my live numbers" on live day.
 - [ ] Kill-switch drill on paper: force a >2% daily loss scenario (or
       inject via test) and watch the halt actually fire + alert + block
       subsequent orders. Same for MAX_DRAWDOWN_PCT.

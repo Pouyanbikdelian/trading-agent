@@ -1,6 +1,12 @@
 # Risk manager configuration.
-# Values here override the per-account defaults in .env when present.
-# The risk manager applies these limits in ALL modes (research, paper, live).
+#
+# PRECEDENCE (verified in code 2026-07-09, GO_LIVE.md §2 audit): the risk
+# manager builds its limits from .env (core/config.py Settings) ONLY.
+# The portfolio/position/drawdown numbers below are NOT loaded by the
+# risk manager — .env is the single source of truth for those. This file
+# still feeds the backtester/simulator sections (slippage_model) and
+# documents intent; an earlier version of this header claimed it
+# overrides .env, which was never true.
 
 portfolio:
   # Max total long+short exposure as a fraction of equity. 1.0 = fully invested, no leverage.

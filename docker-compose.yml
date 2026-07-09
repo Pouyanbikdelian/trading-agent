@@ -266,8 +266,7 @@ services:
     restart: unless-stopped
     logging: *default-logging
     healthcheck:
-      # Live-mode gateway listens on 4001 (paper one owns 4002 — both fit
-      # on host networking without clashing).
+      # Live-mode gateway listens on 4001 inside the container.
       test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/127.0.0.1/4001' || exit 1"]
       interval: 60s
       timeout: 10s
@@ -280,7 +279,15 @@ services:
       - "ofelia.enabled=true"
       - "ofelia.job-exec.nightly-restart-live.schedule=0 35 23 * * *"
       - "ofelia.job-exec.nightly-restart-live.command=/bin/sh -c \"kill 1\""
-    network_mode: host
+    # BRIDGE network, unlike the paper gateway. Two gateways can't share
+    # host networking: with a shared network namespace the second Xvfb
+    # collides with the first's X display socket (seen 2026-07-09,
+    # "Cannot establish any listening sockets"). On the bridge the image's
+    # built-in socat relay (port 4003 → 127.0.0.1:4001) lets the mirror
+    # connect from another container while the gateway still sees a
+    # trusted 127.0.0.1 source — TrustedIPs stays happy.
+    networks:
+      - trading
     environment:
       TWS_USERID: ${IBKR_LIVE_USERNAME}
       TWS_PASSWORD: ${IBKR_PASSWORD}
@@ -302,12 +309,14 @@ services:
       - ib-gateway-live
     env_file:
       - .env
-    # Host networking for the same TrustedIPs reason as the trader: the
-    # gateway only trusts 127.0.0.1 by default.
-    network_mode: host
+    networks:
+      - trading
     environment:
-      IBKR_HOST: 127.0.0.1
-      IBKR_PORT: "4001"
+      # 4003 = the live gateway's socat relay (see ib-gateway-live note);
+      # the relay delivers us to the gateway as 127.0.0.1, which is the
+      # only source its TrustedIPs default accepts.
+      IBKR_HOST: ib-gateway-live
+      IBKR_PORT: "4003"
       IBKR_CLIENT_ID: "27"
     volumes:
       - state_live:/app/state
