@@ -195,10 +195,15 @@ class RiskManager:
         if self._state.halted:
             return RiskDecision(action="halt", reason=f"already halted: {self._state.reason}")
 
-        # Lazily stamp the daily open if start_of_day() wasn't called — useful
-        # for backtests and unit tests that don't model trading sessions.
-        if self._state.last_day is None or self._state.daily_equity_open == 0:
-            self.start_of_day(account)
+        # Roll the daily baseline. start_of_day() is idempotent within a
+        # day (no-ops when last_day == today), so call it unconditionally.
+        # The previous "lazy" guard (only when state was empty) meant the
+        # baseline stamped on the FIRST ever cycle was never rolled
+        # forward — the daily-loss kill switch spent 7 weeks comparing
+        # against 2026-05-22 equity and, with the book up 14% since,
+        # could never fire (found by the GO_LIVE §2 kill-switch drill,
+        # 2026-07-09).
+        self.start_of_day(account)
 
         # Update high-water mark.
         if account.equity > self._state.equity_high_watermark:

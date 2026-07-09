@@ -52,6 +52,34 @@ def test_drawdown_below_threshold_passes(mgr, t0) -> None:
     assert not mgr.is_halted()
 
 
+def test_daily_baseline_rolls_forward_across_days(mgr, account_100k, t0) -> None:
+    """Regression for the 2026-07-09 drill finding: evaluate_intraday only
+    stamped the daily open when state was EMPTY, so the baseline froze at
+    the first-ever cycle's date and the daily-loss kill switch compared
+    every later day against weeks-old equity. With the book up since
+    then, a catastrophic intraday loss could never trip it. The baseline
+    must roll forward on the first check of each new day."""
+    # Day 1: baseline stamps at 100k via evaluate_intraday alone (no
+    # explicit start_of_day — mirrors the live runner, which never calls it).
+    assert mgr.evaluate_intraday(account_100k).action == "allow"
+    assert mgr.state.daily_equity_open == 100_000.0
+
+    # Weeks later the book is up 14% — a new day must re-baseline to
+    # 114k, not keep comparing against the stale 100k.
+    day2 = t0 + timedelta(days=48)
+    up = AccountSnapshot(ts=day2, cash=114_000.0, equity=114_000.0)
+    assert mgr.evaluate_intraday(up).action == "allow"
+    assert mgr.state.daily_equity_open == 114_000.0
+    assert mgr.state.last_day == day2.date()
+
+    # Same day, equity drops 3% from TODAY'S open (still +10% vs day 1):
+    # with the stale baseline this was invisible; now it must halt.
+    crash = AccountSnapshot(ts=day2 + timedelta(hours=3), cash=110_500.0, equity=110_500.0)
+    decision = mgr.evaluate_intraday(crash)
+    assert decision.action == "halt"
+    assert "daily loss" in decision.reason
+
+
 def test_start_of_day_idempotent_within_day(mgr, account_100k, t0) -> None:
     mgr.start_of_day(account_100k)
     # Equity changes during the day — start_of_day must NOT reset the open value.
