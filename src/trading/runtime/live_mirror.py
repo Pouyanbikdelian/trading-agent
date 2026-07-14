@@ -23,16 +23,32 @@ from __future__ import annotations
 import contextlib
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from trading.runner.state import RunnerStore
 
 from trading.core.logging import logger
 
 _LOG = logger.bind(component="live_mirror")
 
 
-def snapshot_once(state_dir: Path, host: str, port: int, client_id: int) -> bool:
+def snapshot_once(
+    state_dir: Path,
+    host: str,
+    port: int,
+    client_id: int,
+    *,
+    store: RunnerStore | None = None,
+) -> bool:
     """One connect → snapshot → persist pass. Returns True on success.
-    Fresh connection each pass: at a 5-15 min cadence the reconnect cost
-    is trivial and it sidesteps every stale-session failure mode."""
+
+    Fresh broker connection each pass (cheap at this cadence, dodges
+    stale-session failure modes) but the connection is ALWAYS torn down
+    in ``finally``, and the SQLite store is reused when the loop passes
+    one in. The original version leaked one sqlite handle per pass —
+    ~96/day — until the process hit EMFILE after 5 days and couldn't
+    even open its log file (VPS incident 2026-07-14)."""
     from trading.execution.ibkr import IbkrBroker
     from trading.runner.state import RunnerStore
 
@@ -46,7 +62,14 @@ def snapshot_once(state_dir: Path, host: str, port: int, client_id: int) -> bool
     finally:
         with contextlib.suppress(Exception):
             broker.disconnect()
-    RunnerStore(Path(state_dir) / "runner.db").save_snapshot(snap)
+    own_store = store is None
+    st = store if store is not None else RunnerStore(Path(state_dir) / "runner.db")
+    try:
+        st.save_snapshot(snap)
+    finally:
+        if own_store:
+            with contextlib.suppress(Exception):
+                st.close()
     _LOG.info(
         f"live mirror: equity {snap.equity:,.0f} {snap.base_currency}, "
         f"{len(snap.positions)} positions"
@@ -63,8 +86,12 @@ def run_loop(
     interval_s: int = 900,
 ) -> None:
     """Snapshot forever. Failures are logged and retried next tick — the
-    mirror is a viewing convenience, never worth crashing over."""
+    mirror is a viewing convenience, never worth crashing over. One
+    store for the process lifetime (see snapshot_once on the FD leak)."""
+    from trading.runner.state import RunnerStore
+
     _LOG.info(f"live mirror starting: {host}:{port} every {interval_s}s → {state_dir}")
+    store = RunnerStore(Path(state_dir) / "runner.db")
     while True:
-        snapshot_once(Path(state_dir), host, port, client_id)
+        snapshot_once(Path(state_dir), host, port, client_id, store=store)
         time.sleep(interval_s)

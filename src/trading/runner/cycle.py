@@ -668,7 +668,27 @@ class Cycle:
 
         if not series:
             return pd.DataFrame()
-        wide = pd.DataFrame(series).sort_index().dropna(how="any")
+        wide = pd.DataFrame(series).sort_index()
+        # Drop short-history symbols BEFORE the row-wise dropna. The old
+        # inner-join (`dropna(how="any")` alone) let a single recently
+        # listed symbol truncate the entire price matrix to ITS length:
+        # June 2026 incident — one fresh universe addition with ~26 bars
+        # cut 503 symbols down to 26 rows, starved the 126-day momentum
+        # lookback, and the paper strategy silently stopped trading for a
+        # month ("no orders — portfolio already on target" every cycle).
+        # A symbol too young to have real history can't carry a momentum
+        # signal anyway — exclude it until it matures.
+        counts = wide.notna().sum()
+        required = max(int(counts.median() * 0.8), min(60, int(counts.max())))
+        short = sorted(counts[counts < required].index)
+        if short:
+            logger.bind(component="cycle").warning(
+                f"dropping {len(short)} short-history symbol(s) "
+                f"(<{required} bars, matrix has {int(counts.max())}): "
+                f"{', '.join(short[:12])}{'…' if len(short) > 12 else ''}"
+            )
+            wide = wide.drop(columns=short)
+        wide = wide.dropna(how="any")
         return wide
 
     def _apply_screens(

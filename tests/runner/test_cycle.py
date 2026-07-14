@@ -302,3 +302,46 @@ def test_cycle_handles_short_history_gracefully(
     )
     report = cycle.run_cycle()
     assert report.status == "no_orders"
+
+
+def test_short_history_symbol_does_not_truncate_price_matrix(
+    tiny_universe_yaml, primed_cache, tmp_state, tmp_path
+) -> None:
+    """Regression for the June-2026 dead-month: one freshly listed symbol
+    with ~26 bars inner-joined the whole 300-bar matrix down to 26 rows,
+    starving the momentum lookback — the strategy silently held for
+    weeks. Short-history symbols must be dropped, not the matrix rows."""
+    idx = pd.date_range("2024-10-01", periods=26, freq="1D", tz="UTC", name="ts")
+    prices = np.linspace(50.0, 55.0, 26)
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": prices * 1.001,
+            "low": prices * 0.999,
+            "close": prices,
+            "volume": np.full(26, 1000.0),
+            "adj_close": prices,
+        },
+        index=idx,
+    )
+    baby = Instrument(symbol="TEST_IPO", asset_class=AssetClass.EQUITY)
+    primed_cache.write(baby, "1D", df)
+
+    cfg = RunnerConfig(
+        universe=tiny_universe_yaml,
+        strategies=["donchian"],
+        freq="1D",
+        auto_refresh=False,
+        history_bars=250,
+    )
+    cycle, _broker, _alerts = _make_cycle(cfg, primed_cache, tmp_path)
+    instruments = [
+        Instrument(symbol=s, asset_class=AssetClass.EQUITY)
+        for s in ("TEST_A", "TEST_B", "TEST_IPO")
+    ]
+    ts = datetime(2024, 10, 26, tzinfo=timezone.utc)
+    wide = cycle._load_prices(instruments, ts)
+
+    assert "TEST_IPO" not in wide.columns  # baby symbol excluded…
+    assert set(wide.columns) == {"TEST_A", "TEST_B"}
+    assert len(wide) >= 200  # …and the matrix keeps its full history

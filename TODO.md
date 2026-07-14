@@ -112,3 +112,19 @@ Order of operations:
       free-form execution. Design constraints to settle before building:
       tool whitelist (never the raw order path — rule #4), spend budget
       per day, and how it defers to the human on anything gated.
+
+## Phase 12 — HedgeAgents-inspired upgrades (backlog, added 2026-07-11)
+
+Full specs in **docs/HEDGEAGENTS_BACKLOG.md**. Advisory-layer only, never
+the order path. Do after go-live wave 1.
+
+- [ ] **Extreme Market Review** — extend sentinel with a 3-day ±10%
+      cumulative wire per held symbol; on held-position alarms run a
+      structured loss-review (owner presents thesis-broken?/plan, risk
+      officer + challenger critique, quant adds numbers) → journaled
+      verdict + Telegram; outcome tagged 5 trading days later. (~1 session)
+- [ ] **Three-tier memory: reflection + retrieval + distillation** — add
+      per-decision Reflection rows with 5d/21d outcomes; embed + retrieve
+      top-5 closed cases/lessons into committee & PM prompts; historian
+      distills from sleeve-nominated closed reflections with source_ids.
+      (~2 sessions)

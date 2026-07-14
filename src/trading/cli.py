@@ -739,9 +739,7 @@ app.add_typer(mirror_app, name="mirror")
 
 @mirror_app.command("run")
 def _mirror_run(
-    host: str = typer.Option(
-        None, help="IB Gateway host (live-mode gateway). Default: IBKR_HOST."
-    ),
+    host: str = typer.Option(None, help="IB Gateway host (live-mode gateway). Default: IBKR_HOST."),
     port: int = typer.Option(
         None, help="Gateway API port (4001 direct, 4003 via socat relay). Default: IBKR_PORT."
     ),
