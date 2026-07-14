@@ -71,6 +71,28 @@ def test_apply_runtime_overrides_reserves_slots_and_k_override(tmp_path) -> None
     assert out.k == 1
 
 
+def test_ghost_pins_do_not_reserve_slots(tmp_path) -> None:
+    """A pin without an open position protects nothing and must not
+    shrink the basket (2026-07-14: a stale '/hold A' from months back
+    silently ate a slot — 'A' had no position). When the caller passes
+    the live position set, only pins WITH positions reserve slots;
+    without it (previews), the old conservative behavior stands."""
+    from trading.runner.holds import apply_runtime_overrides, save_holds
+    from trading.strategies.top_k_momentum import TopKMomentumParams
+
+    params = TopKMomentumParams(k=8)
+    save_holds(tmp_path, {"A", "MU", "SNDK"})
+
+    # With live positions known: only MU + SNDK reserve; ghost 'A' noted.
+    out, notes = apply_runtime_overrides(params, tmp_path, position_symbols={"MU", "SNDK", "DELL"})
+    assert out.k == 6  # 8 - 2, not 8 - 3
+    assert any("A" in n and "unhold" in n for n in notes)
+
+    # Without position info: all 3 count (conservative preview path).
+    out, _ = apply_runtime_overrides(params, tmp_path)
+    assert out.k == 5
+
+
 def test_apply_runtime_overrides_passthrough_without_k(tmp_path) -> None:
     from trading.runner.holds import apply_runtime_overrides, save_k_override
 

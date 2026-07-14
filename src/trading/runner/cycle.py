@@ -305,7 +305,12 @@ class Cycle:
             f"generating weights: strategies={cfg.strategies}, "
             f"combiner={cfg.combiner}, prices_shape={prices.shape}"
         )
-        weights = self._generate_combined_weights(prices, cfg=cfg)
+        position_symbols = {
+            p.instrument.symbol.upper() for p in (getattr(account, "positions", {}) or {}).values()
+        }
+        weights = self._generate_combined_weights(
+            prices, cfg=cfg, position_symbols=position_symbols
+        )
 
         # 6. Optional vol-target overlay.
         if cfg.vol_target is not None:
@@ -1388,6 +1393,7 @@ class Cycle:
         prices: pd.DataFrame,
         *,
         cfg: RunnerConfig | None = None,
+        position_symbols: set[str] | None = None,
     ) -> pd.DataFrame:
         """Run each configured strategy on ``prices`` and combine the
         per-strategy weight frames.
@@ -1416,7 +1422,9 @@ class Cycle:
             from trading.core.config import settings as _settings_k
             from trading.runner.holds import apply_runtime_overrides
 
-            params, notes = apply_runtime_overrides(params, _settings_k.state_dir)
+            params, notes = apply_runtime_overrides(
+                params, _settings_k.state_dir, position_symbols=position_symbols
+            )
             for note in notes:
                 logger.bind(component="cycle", strategy=name).info(note)
             strat = cls(params=params)

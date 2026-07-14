@@ -102,17 +102,29 @@ def save_k_override(state_dir: Path, k: int | None) -> None:
         os.replace(tmp, path)
 
 
-def apply_runtime_overrides(params: object, state_dir: Path) -> tuple[object, list[str]]:
+def apply_runtime_overrides(
+    params: object,
+    state_dir: Path,
+    *,
+    position_symbols: set[str] | None = None,
+) -> tuple[object, list[str]]:
     """Adjust a strategy's params for operator runtime state.
 
     Two adjustments, both only when the params object has a ``k`` field
     (top-K style strategies; everything else passes through untouched):
 
     1. ``/k N`` override replaces the configured k.
-    2. Each held symbol (``/hold``) reserves one basket slot:
-       effective_k = max(1, k - n_holds). The strategy then picks fewer
-       names because the operator's pinned positions occupy the rest of
-       the book — "if I hold 2, cycle 6 more".
+    2. Each held symbol (``/hold``) WITH AN OPEN POSITION reserves one
+       basket slot: effective_k = max(1, k - n_holds). The strategy then
+       picks fewer names because the operator's pinned positions occupy
+       the rest of the book — "if I hold 2, cycle 6 more".
+
+       ``position_symbols`` is the set of symbols with live positions.
+       A pin without a position protects nothing and must not shrink the
+       basket (found 2026-07-14: a stale pin on an unheld symbol silently
+       ate a slot). When the caller can't supply positions (previews),
+       pass ``None`` — every pin then counts, the old conservative
+       behavior.
 
     Returns (params, notes) where notes are human-readable lines for
     the basket message.
@@ -126,6 +138,14 @@ def apply_runtime_overrides(params: object, state_dir: Path) -> tuple[object, li
         notes.append(f"k overridden via /k: {k} → {override}")
         k = override
     held = load_holds(state_dir)
+    if position_symbols is not None:
+        ghost = held - {s.upper() for s in position_symbols}
+        held = held - ghost
+        if ghost:
+            notes.append(
+                f"{len(ghost)} pin(s) without a position ignored for slot math: "
+                f"{', '.join(sorted(ghost))} (consider /unhold)"
+            )
     if held:
         reserved = min(len(held), k - 1)
         if reserved > 0:
