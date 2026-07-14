@@ -728,6 +728,31 @@ class IbkrBroker(Broker):
             out[ccy] = out.get(ccy, 0.0) + amount
         return out
 
+    def get_fx_rates(self) -> dict[str, float]:
+        r"""Base-currency units per 1 unit of each foreign currency, from
+        the account's ``ExchangeRate`` rows (IBKR publishes one per
+        currency it holds or marks, quoted INTO the base currency — on a
+        CHF account the USD row is ~0.81). Free, no market-data lines.
+        Used by the risk manager so a 10% target weight means 10% of
+        base-currency equity even when the instrument trades in USD
+        (sizing was off by the USDCHF factor before 2026-07-14)."""
+        self._ensure_connected()
+        raw = self._bounded("accountValues", self._ib.accountValues)
+        out: dict[str, float] = {}
+        for row in raw:
+            if getattr(row, "tag", None) != "ExchangeRate":
+                continue
+            ccy = getattr(row, "currency", None)
+            if not ccy or ccy == "BASE":
+                continue
+            try:
+                rate = float(getattr(row, "value", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if rate > 0:
+                out[str(ccy)] = rate
+        return out
+
     def get_fx_rate(self, base_ccy: str, quote_ccy: str) -> float:
         r"""Spot rate ``base_ccy``/``quote_ccy`` — i.e. how many units of
         ``quote_ccy`` one unit of ``base_ccy`` buys right now.

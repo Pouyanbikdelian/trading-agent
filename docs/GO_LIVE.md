@@ -56,23 +56,54 @@ Code / config audit:
       confirmed for paper: 0.10 / 1.0 / 0.02 / 0.15. Live-day values
       are set in §3 (sized down). Yan still owns the final "yes these
       are my live numbers" on live day.
-- [ ] Kill-switch drill on paper: force a >2% daily loss scenario (or
-      inject via test) and watch the halt actually fire + alert + block
-      subsequent orders. Same for MAX_DRAWDOWN_PCT.
-- [ ] Startup reconciliation drill: restart trader mid-day with open
-      positions; verify broker-vs-state drift detection works and alerts.
-- [ ] Order idempotency: kill trader mid-cycle (paper), restart, confirm
-      no duplicated orders (orders.db + broker both).
-- [ ] IB Gateway death drill: `docker stop ibkr-gateway` during market
-      hours on paper; verify self-heal restart + trader reconnect + alert.
-- [ ] Currency check: CHF base account buying USD stocks — verify sizing
-      uses the right FX rate and MAX_POSITION_PCT is computed on the
-      right equity number (found the fallback comment in execution/ibkr.py).
-- [ ] Pinned holds review: 3 pins currently active — decide each one
-      deliberately before live (pins block BOTH strategy sells AND guard
-      exits... guard exits are blocked by design; confirm Yan wants pins live).
-- [ ] Clock/timezone audit of the live cron (21:05 UTC Friday = 4:05pm ET
-      standard, 5:05pm during DST — confirm intended behavior in July).
+- [x] Kill-switch drill (2026-07-09) — REAL BUG, FIXED: the daily-loss
+      baseline never rolled forward past the first-ever cycle, so that
+      kill switch could never fire (7 weeks stale). Fixed + regression
+      test. Drawdown halt drilled live: fired at a tightened limit,
+      alerted, persisted across restart, blocked the next cycle,
+      /resume cleared it. PASS.
+- [x] Startup reconciliation drill (2026-07-14): clean restart → ✅ match
+      alert; forced drift (1 SPY bought behind the trader's back) →
+      `startup drift: 1 symbol(s)` + 🚨 alert. PASS. Side-finding: the
+      IBKR web-portal login steals the gateway session (single-session
+      accounts) — expect a gateway wedge + auto-restart after any manual
+      portal visit.
+- [x] Order idempotency (2026-07-14): `docker kill` mid-cycle + a
+      double-triggered cycle two minutes apart — zero duplicate
+      client_order_ids, second cycle correctly saw the first's fills.
+      PASS.
+- [x] IB Gateway death (2026-07-14): fired organically during the
+      session-steal wedge — trader detected the dead session, restarted
+      the gateway itself, reconnected. PASS (alert delivery confirmed by
+      operator in Telegram).
+- [x] Currency check — REAL BUG, FIXED 2026-07-14: sizing divided CHF
+      equity by USD prices, undersizing every position by the USDCHF
+      factor (~19%). Now: `broker.get_fx_rates()` (IBKR ExchangeRate
+      rows) → `signal_to_orders(fx_rates=...)` sizes against the
+      base-currency price. Missing rate degrades to old behavior with a
+      logged decision. NOTE: first cycle after deploy will top positions
+      up ~20% to true target weights.
+- [x] Pinned holds review (2026-07-14): all 3 released by Yan — 'A' was
+      a ghost pin (no position) that had silently eaten a basket slot;
+      MU/SNDK released and promptly trailing-stopped at a profit. Code
+      fix: pins without positions no longer reserve slots.
+- [x] Clock/timezone audit (2026-07-14): CRON=5 21 * * FRI (UTC) =
+      17:05 ET in summer (fine, 65 min after close) but 16:05 ET in
+      winter — only 5 min after close, when the daily bar may not be
+      final. RECOMMENDATION before November: set `CRON=5 22 * * FRI` in
+      the VPS .env (year-round ≥65 min after close; fills still land at
+      Monday's open either way). Sentinel/PM-mark UTC crons drift 1h in
+      winter — cosmetic, accepted. Committee crons are already
+      NYSE-anchored.
+- [x] Sector cap — REAL BUG, FIXED 2026-07-14 (found via "why only
+      semis?"): the 30% sector cap NEVER bound in production because no
+      fundamentals cache existed and the failure was silent. Now: cycle
+      falls back to `<data_dir>/fundamentals.parquet`, warns loudly
+      (log + Telegram) when the cap is disabled, and a new CLI populates
+      it: `trading data fundamentals sp500` (weekly refresh is plenty —
+      add an ofelia label later if manual gets old). NOTE: once enabled,
+      the first cycle will cut the ~90% tech book down toward 30% tech —
+      expect a big rebalance.
 - [ ] Full test suite green on the exact commit being deployed; tag it
       (`git tag live-candidate-1`).
 

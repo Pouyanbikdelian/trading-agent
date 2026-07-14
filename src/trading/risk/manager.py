@@ -243,11 +243,21 @@ class RiskManager:
         instruments: dict[str, Instrument],
         sector_map: dict[str, str] | None = None,
         order_id_factory: Callable[[], str] = new_client_order_id,
+        fx_rates: dict[str, float] | None = None,
     ) -> tuple[list[Order], list[RiskDecision]]:
         """Convert a Signal's target weights into Orders, applying limits.
 
         Parameters are keyed by ``instrument.key`` (e.g. ``"equity:AAPL"``)
         to match ``Signal.target_weights`` and ``AccountSnapshot.positions``.
+
+        ``fx_rates`` maps currency -> base-currency units per 1 unit (e.g.
+        {"USD": 0.81} on a CHF account). Sizing divides base-currency
+        equity by the price CONVERTED TO BASE, so a 10% weight is 10% of
+        real equity. Before 2026-07-14 the raw instrument-currency price
+        was used against CHF equity, undersizing every USD position by
+        the USDCHF factor (~19%) — found by the GO_LIVE §2 CHF check.
+        Missing rate for a foreign currency: sized at 1.0 (old behavior)
+        with a logged decision, so research/backtests are unaffected.
         """
         decisions: list[RiskDecision] = []
         if self._state.halted:
@@ -340,8 +350,26 @@ class RiskManager:
             ins = instruments[key]
             whole_shares_only = ins.asset_class in (AssetClass.EQUITY, AssetClass.ETF)
 
+            # Price in BASE currency: weight * equity is base-denominated,
+            # so the divisor must be too.
+            ccy = ins.currency or account.base_currency
+            rate = 1.0
+            if ccy != account.base_currency:
+                rate = (fx_rates or {}).get(ccy, 0.0)
+                if rate <= 0:
+                    decisions.append(
+                        RiskDecision(
+                            action="scale",
+                            reason=f"no FX rate for {ccy}; sizing {key} at 1.0 — "
+                            "verify broker.get_fx_rates()",
+                            scale_factor=1.0,
+                        )
+                    )
+                    rate = 1.0
+            price_base = last_prices[key] * rate
+
             target_value = target_w * account.equity
-            target_qty = target_value / last_prices[key]
+            target_qty = target_value / price_base
             if whole_shares_only:
                 # int() truncates toward zero — fine for both long and short legs.
                 target_qty = float(int(target_qty))

@@ -345,3 +345,27 @@ def test_short_history_symbol_does_not_truncate_price_matrix(
     assert "TEST_IPO" not in wide.columns  # baby symbol excluded…
     assert set(wide.columns) == {"TEST_A", "TEST_B"}
     assert len(wide) >= 200  # …and the matrix keeps its full history
+
+
+def test_missing_fundamentals_warns_sector_cap_disabled(
+    tiny_universe_yaml, primed_cache, tmp_state, tmp_path
+) -> None:
+    """The 30% sector cap silently never bound in production because no
+    fundamentals cache existed (found 2026-07-14 with ~90% in one
+    sector). A cycle without sector tags must alert the operator that
+    the cap is NOT enforced — failing open is allowed, silence is not."""
+    cfg = RunnerConfig(
+        universe=tiny_universe_yaml,
+        strategies=["donchian"],
+        strategy_params={"donchian": {"lookback": 20}},
+        freq="1D",
+        auto_refresh=False,
+        history_bars=250,
+        fundamentals_path=str(tmp_path / "nope" / "fundamentals.parquet"),
+    )
+    cycle, _broker, alerts = _make_cycle(cfg, primed_cache, tmp_path)
+    cycle.run_cycle()
+    assert any(
+        lvl == "warning" and "sector cap" in msg.lower() and "not enforced" in msg.lower()
+        for lvl, msg in alerts.sent
+    )

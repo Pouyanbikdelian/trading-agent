@@ -56,6 +56,14 @@ class Broker(Protocol):
 
         ``since`` is inclusive of its own bar (``>= since``)."""
 
+    def get_fx_rates(self) -> dict[str, float]:
+        """Base-currency units per 1 unit of each foreign currency, e.g.
+        ``{"USD": 0.8081}`` on a CHF-base account. Used by the risk
+        manager to size positions in base-currency terms when the
+        instrument trades in another currency (the CHF/USD sizing bug,
+        2026-07-14). Default: empty — same-currency sizing assumed."""
+        return {}
+
     def tick(self, ts: datetime, bars: dict[str, Bar]) -> list[Fill]:
         """Advance the broker's internal clock by one bar (if it has one).
 

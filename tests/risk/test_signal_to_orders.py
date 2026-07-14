@@ -302,3 +302,55 @@ def test_cross_currency_overdraw_called_out_explicitly(mgr, t0) -> None:
     reject = next((d for d in decisions if d.action == "reject"), None)
     assert reject is not None
     assert "USD" in reject.reason, "rejection should name the deficit currency"
+
+
+def test_fx_rates_size_in_base_currency(mgr, aapl, t0) -> None:
+    """CHF-base account buying a USD stock: a 10% weight must deploy 10%
+    of CHF equity. qty = w*equity / (price_usd * CHF_per_USD). Before the
+    2026-07-14 fix the raw USD price was divided into CHF equity,
+    undersizing by the USDCHF factor."""
+    from trading.core.types import AccountSnapshot
+
+    account = AccountSnapshot(
+        ts=t0,
+        cash=100_000.0,
+        equity=100_000.0,
+        base_currency="CHF",
+        # USD cash on hand so the no-margin check can fund the buy.
+        cash_by_currency={"CHF": 50_000.0, "USD": 50_000.0},
+    )
+    sig = signal_from(t0, {"equity:AAPL": 0.10})
+    prices = {"equity:AAPL": 100.0}  # USD
+
+    # With the rate: 10_000 CHF / (100 USD * 0.80 CHF/USD) = 125 shares.
+    orders, _ = mgr.signal_to_orders(
+        sig,
+        account=account,
+        last_prices=prices,
+        instruments=instruments_dict(aapl),
+        fx_rates={"USD": 0.80},
+    )
+    assert orders[0].quantity == pytest.approx(125.0)
+
+    # Missing rate: falls back to 1.0 (old behavior) and records it.
+    orders, decisions = mgr.signal_to_orders(
+        sig,
+        account=account,
+        last_prices=prices,
+        instruments=instruments_dict(aapl),
+    )
+    assert orders[0].quantity == pytest.approx(100.0)
+    assert any("no FX rate for USD" in d.reason for d in decisions)
+
+
+def test_fx_rates_ignored_for_base_currency_instruments(mgr, aapl, account_100k, t0) -> None:
+    """USD instrument on a USD account: rates must not apply."""
+    sig = signal_from(t0, {"equity:AAPL": 0.10})
+    orders, _ = mgr.signal_to_orders(
+        sig,
+        account=account_100k,
+        last_prices={"equity:AAPL": 100.0},
+        instruments=instruments_dict(aapl),
+        fx_rates={"USD": 0.80},  # irrelevant: USD IS the base
+    )
+    assert orders[0].quantity == pytest.approx(100.0)

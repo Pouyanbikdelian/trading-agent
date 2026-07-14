@@ -337,9 +337,20 @@ class Cycle:
         # actually binds instead of silently no-op'ing on an empty map.
         sector_map = self._resolve_sector_map(instruments_by_key, cfg)
 
+        # FX rates so the risk manager sizes in base-currency terms (CHF
+        # account buying USD stocks — the sizing was off by the USDCHF
+        # factor before 2026-07-14). Failure degrades to {}: the manager
+        # then sizes at 1.0 and records a decision, never crashes.
+        fx_rates: dict[str, float] = {}
+        try:
+            fx_rates = self.broker.get_fx_rates()
+        except Exception as e:
+            logger.bind(component="cycle").warning(f"get_fx_rates failed ({e!r}); sizing at 1.0")
+
         # 8. Risk manager: signal -> orders.
         logger.bind(component="cycle").info(
             f"risk manager: signal has {len(signal.target_weights)} target weights"
+            + (f", fx_rates={fx_rates}" if fx_rates else "")
         )
         orders, decisions = self.risk_manager.signal_to_orders(
             signal,
@@ -347,6 +358,7 @@ class Cycle:
             last_prices=last_prices,
             instruments=instruments_by_key,
             sector_map=sector_map,
+            fx_rates=fx_rates,
             **({"order_id_factory": self._order_id_factory} if self._order_id_factory else {}),
         )
 
@@ -781,17 +793,51 @@ class Cycle:
         """
         if cfg.sector_map:
             return dict(cfg.sector_map)
-        if not cfg.fundamentals_path:
+        # Fall back to the conventional cache location when no explicit
+        # path is configured. Before 2026-07-14 a missing fundamentals_path
+        # returned None here and the 30% sector cap silently NEVER bound in
+        # production — the book reached ~90% in one correlated sector with
+        # the cap "configured" the whole time. Populate the cache with
+        # `trading data fundamentals <universe>`.
+        path = Path(cfg.fundamentals_path) if cfg.fundamentals_path else None
+        if path is None:
+            from trading.core.config import settings as _settings
+
+            path = Path(_settings.data_dir) / "fundamentals.parquet"
+        if not path.exists():
+            self._warn_sector_cap_disabled(f"fundamentals cache missing at {path}")
             return None
         from trading.data.fundamentals_source import read_fundamentals_cache
 
-        funds = read_fundamentals_cache(Path(cfg.fundamentals_path))
+        funds = read_fundamentals_cache(path)
         out: dict[str, str] = {}
         for key, ins in instruments_by_key.items():
             f = funds.get(ins.symbol)
             if f is not None and f.sector:
                 out[key] = str(f.sector)
-        return out or None
+        if not out:
+            self._warn_sector_cap_disabled(f"no sector tags for this universe in {path}")
+            return None
+        untagged = len(instruments_by_key) - len(out)
+        if untagged:
+            logger.bind(component="cycle").info(
+                f"sector map covers {len(out)}/{len(instruments_by_key)} instruments "
+                f"({untagged} untagged — those escape the sector cap)"
+            )
+        return out
+
+    def _warn_sector_cap_disabled(self, why: str) -> None:
+        """The sector cap failing OPEN must be loud, not silent — a limit
+        the operator believes in but that never fires is worse than no
+        limit. Alert once per process, log every cycle."""
+        logger.bind(component="cycle").warning(f"SECTOR CAP DISABLED — {why}")
+        if not getattr(self, "_sector_cap_warned", False):
+            self._sector_cap_warned = True
+            self.alerts.warning(
+                f"⚠️ sector cap ({self.risk_manager.limits.max_sector_exposure:.0%}) is "
+                f"NOT enforced — {why}. Run `trading data fundamentals <universe>` "
+                "to enable it."
+            )
 
     def _load_sector_prices(self, freq: Frequency) -> pd.DataFrame:
         """Read sector-ETF closes from the cache and re-key by sector name

@@ -179,6 +179,39 @@ def _data_fetch(
     console.print(table)
 
 
+@data_app.command("fundamentals")
+def _data_fundamentals(
+    universes: list[str] = typer.Argument(..., help="Universe name(s) from universes.yaml."),
+) -> None:
+    """Refresh the fundamentals Parquet (sector tags etc.) from yfinance.
+
+    The risk manager's sector cap and the quality/sector screens read
+    ``<data_dir>/fundamentals.parquet``; without it the sector cap is
+    DISABLED (the runner alerts about this). Weekly refresh is plenty.
+    """
+    from trading.data.fundamentals_source import (
+        fetch_fundamentals_yf,
+        read_fundamentals_cache,
+        write_fundamentals_cache,
+    )
+
+    settings.ensure_dirs()
+    symbols: list[str] = []
+    for name in universes:
+        symbols.extend(i.symbol for i in load_universe(name))
+    symbols = list(dict.fromkeys(symbols))
+    path = settings.data_dir / "fundamentals.parquet"
+    existing = read_fundamentals_cache(path)
+    console.print(f"fetching fundamentals for {len(symbols)} symbols (cache: {len(existing)})…")
+    fresh = fetch_fundamentals_yf(symbols)
+    merged = {**existing, **fresh}
+    write_fundamentals_cache(path, merged)
+    tagged = sum(1 for f in merged.values() if f.sector)
+    console.print(
+        f"[green]wrote {len(merged)} symbols to {path} — {tagged} with sector tags[/green]"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Backtest subcommands
 # ---------------------------------------------------------------------------
