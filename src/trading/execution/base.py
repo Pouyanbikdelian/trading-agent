@@ -56,6 +56,16 @@ class Broker(Protocol):
 
         ``since`` is inclusive of its own bar (``>= since``)."""
 
+    def get_open_orders(self) -> list[Order]:
+        """Orders working at the broker RIGHT NOW (submitted, unfilled),
+        from ALL sources — cycle, guard exits, manual commands. The risk
+        manager nets these into current positions when sizing deltas.
+        Without this, after-hours order batches stack blindly: on
+        2026-07-15 guard closes + two cycles all filled at the open and
+        the paper book went SHORT two names. Default: [] (no working
+        orders)."""
+        return []
+
     def get_fx_rates(self) -> dict[str, float]:
         """Base-currency units per 1 unit of each foreign currency, e.g.
         ``{"USD": 0.8081}`` on a CHF-base account. Used by the risk

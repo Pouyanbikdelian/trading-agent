@@ -29,6 +29,16 @@ class RiskLimits(BaseModel):
     max_position_pct: float = Field(default=0.10, gt=0.0, le=1.0)
     """Per-instrument cap. |position_value| <= max_position_pct * equity."""
 
+    allow_short: bool = Field(default=False)
+    """Invariant: when False (default — this is a long-only system), no
+    generated order may take a position below zero, PERIOD. Negative
+    target weights are clamped to 0 and sell quantities are clamped to
+    the effective current position (holdings net of working orders).
+    Added 2026-07-15 after stacked after-hours orders shorted two names
+    on paper: fixing the stacking addressed the cause; this enforces the
+    invariant regardless of upstream confusion. Strategies that
+    genuinely short must opt in explicitly."""
+
     max_gross_exposure: float = Field(default=1.0, gt=0.0)
     """Sum of |weights| across positions. >1.0 means leverage."""
 

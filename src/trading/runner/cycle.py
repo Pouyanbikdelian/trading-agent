@@ -347,6 +347,25 @@ class Cycle:
         except Exception as e:
             logger.bind(component="cycle").warning(f"get_fx_rates failed ({e!r}); sizing at 1.0")
 
+        # Orders already working at the broker — from ANY source (earlier
+        # after-hours cycles, guard exits, manual commands). The risk
+        # manager nets them into positions so this cycle can't stack on
+        # top of them (the 2026-07-15 short-MU/SNDK incident). Failure
+        # degrades to [] with a loud warning: stacking risk returns, so
+        # the operator should avoid off-cycle /cycle until it recovers.
+        pending_orders: list[Any] = []
+        try:
+            pending_orders = self.broker.get_open_orders()
+            if pending_orders:
+                pend = ", ".join(
+                    f"{o.side.value} {o.quantity:g} {o.instrument.symbol}" for o in pending_orders
+                )
+                logger.bind(component="cycle").info(f"netting working orders: {pend}")
+        except Exception as e:
+            logger.bind(component="cycle").warning(
+                f"get_open_orders failed ({e!r}); sizing WITHOUT pending-order netting"
+            )
+
         # 8. Risk manager: signal -> orders.
         logger.bind(component="cycle").info(
             f"risk manager: signal has {len(signal.target_weights)} target weights"
@@ -359,6 +378,7 @@ class Cycle:
             instruments=instruments_by_key,
             sector_map=sector_map,
             fx_rates=fx_rates,
+            pending_orders=pending_orders,
             **({"order_id_factory": self._order_id_factory} if self._order_id_factory else {}),
         )
 

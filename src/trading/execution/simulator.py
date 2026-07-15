@@ -247,6 +247,10 @@ class Simulator(Broker):
             fills = [f for f in fills if f.ts >= since]
         return fills
 
+    def get_open_orders(self) -> list[Order]:
+        """Queued-but-unfilled orders (they fill on the next ``step()``)."""
+        return list(self._pending)
+
     def get_order_status(self, client_order_id: str) -> OrderStatus:
         rec = self._orders.get(client_order_id)
         if rec is None:

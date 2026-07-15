@@ -148,7 +148,8 @@ Decisions locked 2026-07-09 (Yan):
   side too. Yan's long-term positions: `/hold` them and every automated
   path leaves them alone.
 
-- [ ] Finish sim observation window (~2026-07-12 per plan).
+- [x] Finish sim observation window (ended ~2026-07-12). Next: pull the
+      PM's final record vs SPY + the paper sleeve and decide the bridge.
 - [ ] Build PM → `Signal` bridge through the REAL risk manager (never a
       new order path); code-reviewed + tested.
 - [ ] Run as ~20% PAPER sleeve ≥30 days.
@@ -159,5 +160,6 @@ Decisions locked 2026-07-09 (Yan):
 - [ ] Wire Rotation-radar crossings into committee context as a standing
       input (analysis 2026-07-02: reaction speed belongs in the fast
       layers, not the slow sleeve).
-- [ ] Race chart: rebase both sleeves to a common start AND common
-      currency; label axes.
+- [x] Race chart: rebase both sleeves to a common start AND common
+      currency; label axes. (Done 2026-07-09 — the Live tab's "Sleeve
+      race" is USD-converted, common-window, rebased to 100.)

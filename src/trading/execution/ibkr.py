@@ -37,6 +37,7 @@ from trading.core.types import (
     OrderType,
     Position,
     Side,
+    TimeInForce,
 )
 from trading.execution.base import Broker, BrokerError, NotConnectedError
 
@@ -590,6 +591,41 @@ class IbkrBroker(Broker):
             why = getattr(trade.orderStatus, "whyHeld", "") or ""
             return f"status={order_status} whyHeld={why}"[:300]
         return None
+
+    def get_open_orders(self) -> list[Order]:
+        """Working (unfilled) orders from IBKR's openTrades — the ground
+        truth across every submission path (cycle, guard closes, manual
+        commands). Quantity is the REMAINING size where IBKR reports it,
+        so partially filled orders net correctly."""
+        self._ensure_connected()
+        open_trades = self._bounded("openTrades", self._ib.openTrades)
+        out: list[Order] = []
+        for trade in open_trades:
+            try:
+                instrument = _ibkr_contract_to_instrument(trade.contract)
+                remaining = float(
+                    getattr(getattr(trade, "orderStatus", None), "remaining", 0.0)
+                    or getattr(trade.order, "totalQuantity", 0.0)
+                )
+                if remaining <= 0:
+                    continue
+                out.append(
+                    Order(
+                        client_order_id=str(
+                            getattr(trade.order, "orderRef", "")
+                            or f"broker-{getattr(trade.order, 'orderId', '?')}"
+                        ),
+                        instrument=instrument,
+                        side=Side.BUY if str(trade.order.action).upper() == "BUY" else Side.SELL,
+                        quantity=remaining,
+                        order_type=OrderType.MARKET,
+                        tif=TimeInForce.DAY,
+                        created_at=datetime.now(tz=timezone.utc),
+                    )
+                )
+            except Exception:
+                logger.bind(broker=self.name).exception("get_open_orders: skipping trade")
+        return out
 
     def cancel_order(self, client_order_id: str) -> None:
         self._ensure_connected()

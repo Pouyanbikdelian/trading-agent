@@ -112,6 +112,8 @@ def test_delta_against_existing_position(mgr, aapl, account_100k, t0) -> None:
 
 
 def test_delta_flips_long_to_short(mgr, aapl, account_100k, t0) -> None:
+    """Shorting requires explicit opt-in since 2026-07-15 (allow_short)."""
+    mgr.limits = mgr.limits.model_copy(update={"allow_short": True})
     pos = Position(instrument=aapl, quantity=100.0, avg_price=100.0)
     account = account_100k.model_copy(update={"positions": {"equity:AAPL": pos}})
     sig = signal_from(t0, {"equity:AAPL": -0.05})  # -50 shares
@@ -124,6 +126,56 @@ def test_delta_flips_long_to_short(mgr, aapl, account_100k, t0) -> None:
     # Must sell 150 shares: close 100 long + open 50 short.
     assert orders[0].side == Side.SELL
     assert orders[0].quantity == pytest.approx(150.0)
+
+
+def test_long_only_clamps_negative_weight_and_oversized_sell(mgr, aapl, account_100k, t0) -> None:
+    """The long-only invariant (default): a negative target becomes a
+    flatten, never a short — regardless of what upstream produced."""
+    pos = Position(instrument=aapl, quantity=100.0, avg_price=100.0)
+    account = account_100k.model_copy(update={"positions": {"equity:AAPL": pos}})
+    sig = signal_from(t0, {"equity:AAPL": -0.05})  # would be -50 shares
+    orders, decisions = mgr.signal_to_orders(
+        sig,
+        account=account,
+        last_prices={"equity:AAPL": 100.0},
+        instruments={"equity:AAPL": aapl},
+    )
+    # Clamped to weight 0 → sell exactly the 100 held, no short leg.
+    assert len(orders) == 1
+    assert orders[0].side == Side.SELL
+    assert orders[0].quantity == pytest.approx(100.0)
+    assert any("long-only" in d.reason for d in decisions)
+
+
+def test_long_only_never_sells_past_working_close(mgr, aapl, account_100k, t0) -> None:
+    """The 2026-07-15 incident shape, invariant half: full guard close
+    working + cycle wants ZERO weight (name dropped from basket). The
+    naive delta would sell the whole position AGAIN → short. Long-only
+    must emit nothing."""
+    from trading.core.types import Order, OrderType, TimeInForce
+
+    pos = Position(instrument=aapl, quantity=100.0, avg_price=100.0)
+    account = account_100k.model_copy(update={"positions": {"equity:AAPL": pos}})
+    pending = [
+        Order(
+            client_order_id="guard-close",
+            instrument=aapl,
+            side=Side.SELL,
+            quantity=100.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            created_at=t0,
+        )
+    ]
+    sig = signal_from(t0, {"equity:AAPL": 0.0})
+    orders, _ = mgr.signal_to_orders(
+        sig,
+        account=account,
+        last_prices={"equity:AAPL": 100.0},
+        instruments={"equity:AAPL": aapl},
+        pending_orders=pending,
+    )
+    assert orders == []  # effective position is 0 — nothing to sell
 
 
 def test_no_trade_when_already_at_target(mgr, aapl, account_100k, t0) -> None:
@@ -352,5 +404,61 @@ def test_fx_rates_ignored_for_base_currency_instruments(mgr, aapl, account_100k,
         last_prices={"equity:AAPL": 100.0},
         instruments=instruments_dict(aapl),
         fx_rates={"USD": 0.80},  # irrelevant: USD IS the base
+    )
+    assert orders[0].quantity == pytest.approx(100.0)
+
+
+def test_pending_orders_are_netted_into_sizing(mgr, aapl, account_100k, t0) -> None:
+    """Replay of the 2026-07-15 incident: a full-position guard close was
+    working at the broker while the cycle, blind to it, submitted its own
+    partial sell — both filled and the book went short. With the pending
+    close netted in, the cycle must BUY the difference back up to target,
+    never sell on top."""
+    from trading.core.types import AccountSnapshot, Order, OrderType, Position, TimeInForce
+
+    # Held: 100 AAPL. Pending: guard close SELL 100 (full exit working).
+    account = AccountSnapshot(
+        ts=t0,
+        cash=90_000.0,
+        equity=100_000.0,
+        positions={
+            "equity:AAPL": Position(instrument=aapl, quantity=100.0, avg_price=100.0),
+        },
+    )
+    pending = [
+        Order(
+            client_order_id="guard-close",
+            instrument=aapl,
+            side=Side.SELL,
+            quantity=100.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            created_at=t0,
+        )
+    ]
+    # Strategy still wants 10% AAPL (=100 shares @ $100).
+    sig = signal_from(t0, {"equity:AAPL": 0.10})
+    orders, decisions = mgr.signal_to_orders(
+        sig,
+        account=account,
+        last_prices={"equity:AAPL": 100.0},
+        instruments=instruments_dict(aapl),
+        pending_orders=pending,
+    )
+    # Effective current = 100 - 100 = 0 → BUY 100 back, not SELL on top.
+    assert len(orders) == 1
+    assert orders[0].side == Side.BUY
+    assert orders[0].quantity == pytest.approx(100.0)
+    assert any("netting" in d.reason for d in decisions)
+
+
+def test_no_pending_orders_keeps_old_behavior(mgr, aapl, account_100k, t0) -> None:
+    sig = signal_from(t0, {"equity:AAPL": 0.10})
+    orders, _ = mgr.signal_to_orders(
+        sig,
+        account=account_100k,
+        last_prices={"equity:AAPL": 100.0},
+        instruments=instruments_dict(aapl),
+        pending_orders=[],
     )
     assert orders[0].quantity == pytest.approx(100.0)

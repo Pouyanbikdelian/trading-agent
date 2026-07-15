@@ -14,6 +14,100 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-07-15 — Paper book goes SHORT two names at the open
+
+**TL;DR:** Three independent order batches (a guard full-close and two
+after-hours `/cycle` runs) sat unfilled at IBKR overnight, none aware of
+the others, and all filled on top of each other at the open. MU ended
+−63, SNDK −51. The cycle sized deltas against *positions* only — never
+against *working orders* — and nothing enforced "long-only" as an
+invariant.
+
+### Symptoms
+
+- Morning after two evening `/cycle` runs: MU −63, SNDK −51 in the
+  paper account; AMD/ON/CIEN roughly doubled vs their target weights.
+
+### Wrong theories
+
+- "The second cycle will see the first's fills" — true intraday (fills
+  land in the same session), FALSE after hours (everything queues).
+- "The no-margin check would block it" — it guards cash going
+  *negative*; short sells ADD cash, so they sail through.
+- "Guard closes are in orders.db, the cycle can read them" — guard
+  exits go through the command pipeline straight to the broker and are
+  never persisted to orders.db.
+
+### Actual root cause
+
+Delta sizing used `account.positions` as "current," ignoring orders
+already working at the broker. Compounding design gap: no long-only
+invariant anywhere in the order path.
+
+### Fix (2026-07-15)
+
+1. `Broker.get_open_orders()` — cycle nets ALL working orders (any
+   source) into effective position before sizing.
+2. `RiskLimits.allow_short=False` (default): negative targets clamp to
+   0, sells clamp to the effective position. Shorting is opt-in.
+
+### Lessons
+
+- After-hours automation must reason about *pending* state, not just
+  settled state.
+- Every "this strategy never does X" belief needs an invariant in the
+  risk manager, not an assumption in the strategy.
+- Cash-flow-based guards don't catch shorts.
+
+---
+
+## 2026-07-14 — Strategy silently traded NOTHING for a month
+
+**TL;DR:** Two freshly listed symbols (FDXF, Q) with ~26 bars of history
+joined the sp500 universe in June. The cycle's price matrix used an
+inner join across all 503 symbols, so the whole matrix truncated to 26
+rows — starving the 126-day momentum lookback. The strategy fell back to
+"hold" and reported "no orders — portfolio already on target" for ~5
+weeks while sitting 84% in cash.
+
+### Symptoms
+
+- Every cycle since 2026-06-10: "no orders — portfolio already on
+  target". Last real order 2026-06-10.
+- Log showed `prices_shape=(26, 503)` — visible for weeks, alarming to
+  nobody, because nothing about it *looked* like an error.
+
+### Wrong theories
+
+- "Portfolio is genuinely on target" (the bot's own message).
+- "The FX/no-margin rejection from June is back" — decisions said
+  `allow`, so no.
+
+### Actual root cause
+
+`pd.DataFrame(series).dropna(how="any")` — one short-history column
+truncates every row. A data-shape bug masquerading as a calm strategy.
+
+### Fix
+
+Short-history symbols are dropped from the matrix (loud
+`dropping N short-history symbol(s)` warning) instead of truncating it;
+regression test pins it. Backlog: a "no orders in N consecutive cycles"
+watchdog — silence should never look healthy.
+
+### Lessons
+
+- Inner joins across a universe are a time bomb; every universe refresh
+  can add a young symbol.
+- "No orders" is a state needing positive confirmation, not a default
+  message.
+- The same week's audit found the daily-loss kill switch had never
+  armed (stale baseline) and the sector cap had never bound (missing
+  fundamentals file): **a safety that has never fired is untested, not
+  working.** Drills exist to fire them on purpose.
+
+---
+
 ## 2026-05-22 — IBKR `accountSummary` hangs at 30s for every cycle
 
 **TL;DR:** Trader called `ib_async`'s sync API from a worker thread that

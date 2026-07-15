@@ -8,6 +8,12 @@ edits, not model retuning.
 Already applied separately (tested): the PPI series fix (`econ_watch.py`) and the
 `sector_map` wiring that switches on the existing sector cap (`cycle.py`).
 
+> **CORRECTION 2026-07-15:** the sector-cap "wiring" above was code-path only —
+> in production it never bound because no fundamentals cache existed on the VPS
+> and the failure was silent. Fixed for real on 2026-07-14: default cache path,
+> loud alert when disabled, and a `trading data fundamentals` CLI to populate
+> it. See docs/incidents.md. Lesson: "wired" is not the same as "firing".
+
 The edits below are left for your review because they change agent behaviour at
 the prompt level.
 

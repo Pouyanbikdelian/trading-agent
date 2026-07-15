@@ -83,19 +83,36 @@ Order of operations:
       state_live/ → dashboard sleeve). NOT yet enabled — needs RAM check
       (`free -m`, want >700MB) + IBKR_LIVE_USERNAME in VPS .env + 2FA
       approval on first boot.
-- [ ] Pre-live audit (GO_LIVE.md §2). Drill runbook ready: docs/DRILLS.md
-      — run during US market hours. Still open: .env lint on VPS
-      (partial: `trading status` values verified 2026-07-09), risk-limit
-      review, the four drills, CHF sizing check, pins review, cron/TZ
-      audit, tag live-candidate-1
+- [x] Pre-live audit (GO_LIVE.md §2) — COMPLETE 2026-07-15 except the
+      final tag. All 4 drills passed; SIX real defects found + fixed:
+      dead daily-loss kill switch, month of silent no-trading
+      (short-history symbol truncated the price matrix), CHF sizing off
+      by the USDCHF factor, sector cap never bound (no fundamentals),
+      ghost pins eating basket slots, and order-stacking → paper shorts
+      (fixed via working-order netting + long-only invariant). See
+      docs/incidents.md 2026-07-14/15.
+- [ ] Tag `live-candidate-1` after one clean cycle on the deployed
+      commit (book un-shorted, ~9 names, no clamp surprises)
 - [ ] Live-day config: fresh state dir, sized-down limits
       (MAX_POSITION_PCT=0.05, MAX_GROSS_EXPOSURE=0.50), gates flipped by
-      Yan only (GO_LIVE.md §3)
-- [ ] Agent PM: sim observation → risk-manager bridge → 30d paper — NOT
-      part of the first live wave (GO_LIVE.md §4)
+      Yan only (GO_LIVE.md §3). NOTE stale `trader-live` compose service
+      needs rework first (shares paper state dir + bridged networking).
+- [ ] Agent PM: sim observation window ENDED ~2026-07-12 — review
+      PM-vs-SPY record, then build the PM→Signal bridge (through the
+      real risk manager; $20K cap via PM_SLEEVE_CAPITAL_USD), then 30d
+      as ~20% paper sleeve — NOT part of the first live wave (§4)
+- [ ] Before November: `CRON=5 22 * * FRI` in VPS .env (winter DST —
+      21:05 UTC is only 5 min after the close in winter; see GO_LIVE §2)
 
 ## Phase 11 — Telegram bot v2 (backlog, added 2026-07-09 per Yan)
 
+- [ ] **"No trades in N cycles" watchdog** — alert when the cycle
+      produces no orders for N consecutive runs ("verify this is
+      intentional"). Would have caught the June dead month in week one.
+      Small; do first.
+- [ ] **Execution upgrade** — IBKR Adaptive algo or marketable-limit
+      orders instead of raw market orders (protects against bad opens;
+      TWAP/VWAP overkill at current size).
 - [ ] **Robustness overhaul** — the bot should be "so much more robust":
       graceful reconnect/backoff on Telegram API flaps, command timeouts
       that never wedge the poll loop, per-command error isolation (one
@@ -128,3 +145,21 @@ the order path. Do after go-live wave 1.
       top-5 closed cases/lessons into committee & PM prompts; historian
       distills from sleeve-nominated closed reflections with source_ids.
       (~2 sessions)
+- [ ] **Anomaly watch MVP ("Mathematician", demoted — added 2026-07-15
+      per Yan)** — deterministic scanners, NO new committee voice yet.
+      Honest framing: a risk sensor, not an alpha source (stat anomalies
+      in liquid names on free daily data are picked clean; own research
+      precedent: rotation-cluster study — "real but not naively
+      tradeable"). Scanners (pure code, after close, into
+      state/anomalies.json): (1) correlation clustering on CURRENT
+      holdings — alert when the book has become one trade (would have
+      flagged the 90%-semis book); (2) long-standing pair/spread breaks;
+      (3) realized-vs-implied vol dislocation on SPY + held names. Every
+      finding reports effect size, sample size, AND search breadth
+      (multiple-testing honesty — a scanner that hides how many things
+      it tested is a p-hacking machine). Findings feed committee context
+      as data; existing voices react. Promotion rule: if journaled
+      findings prove useful for ~2 months (graded via the calibration
+      store), THEN consider a full Mathematician voice with graded
+      predictions; if noise, delete 3 functions. (~1-2 sessions; after
+      go-live wave 1 + PM bridge)

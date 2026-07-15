@@ -244,6 +244,7 @@ class RiskManager:
         sector_map: dict[str, str] | None = None,
         order_id_factory: Callable[[], str] = new_client_order_id,
         fx_rates: dict[str, float] | None = None,
+        pending_orders: list[Order] | None = None,
     ) -> tuple[list[Order], list[RiskDecision]]:
         """Convert a Signal's target weights into Orders, applying limits.
 
@@ -258,6 +259,14 @@ class RiskManager:
         the USDCHF factor (~19%) — found by the GO_LIVE §2 CHF check.
         Missing rate for a foreign currency: sized at 1.0 (old behavior)
         with a logged decision, so research/backtests are unaffected.
+
+        ``pending_orders`` — orders already WORKING at the broker (from
+        any source: earlier cycles, guard exits, manual commands). Their
+        signed quantity is netted into current position before deltas
+        are computed, so this cycle sizes against where the book WILL be
+        once they fill. Without this, after-hours batches stack blindly:
+        2026-07-15, guard closes + two queued cycles all filled at the
+        open and the paper book went short two names.
         """
         decisions: list[RiskDecision] = []
         if self._state.halted:
@@ -265,8 +274,43 @@ class RiskManager:
         if account.equity <= 0:
             return [], [RiskDecision(action="reject", reason="non-positive equity")]
 
+        # Signed share deltas of orders already working at the broker,
+        # keyed by instrument.key — netted into current position below.
+        pending_delta: dict[str, float] = {}
+        for po in pending_orders or []:
+            signed = po.quantity if po.side == Side.BUY else -po.quantity
+            pending_delta[po.instrument.key] = pending_delta.get(po.instrument.key, 0.0) + signed
+        if pending_delta:
+            decisions.append(
+                RiskDecision(
+                    action="scale",
+                    reason=(
+                        f"netting {len(pending_delta)} pending order position(s) "
+                        f"into sizing: {sorted(pending_delta)}"
+                    ),
+                    scale_factor=1.0,
+                )
+            )
+
         # Work on a mutable copy.
         weights: dict[str, float] = dict(signal.target_weights)
+
+        # --- 0. Long-only invariant (allow_short=False, the default).
+        # Clamp negative TARGETS here; sell QUANTITIES are clamped at
+        # order construction below. Both halves matter: a negative weight
+        # is an intent to short, an oversized sell is an accident that
+        # ends short — this system permits neither.
+        if not self.limits.allow_short:
+            for key in list(weights):
+                if weights[key] < 0:
+                    decisions.append(
+                        RiskDecision(
+                            action="scale",
+                            reason=f"long-only: negative target weight on {key} clamped to 0",
+                            scale_factor=0.0,
+                        )
+                    )
+                    weights[key] = 0.0
 
         # --- 1. Per-position cap (scale individual weights down if needed).
         for key in list(weights):
@@ -374,9 +418,31 @@ class RiskManager:
                 # int() truncates toward zero — fine for both long and short legs.
                 target_qty = float(int(target_qty))
             current_qty = account.positions[key].quantity if key in account.positions else 0.0
+            # Where the book WILL be once working orders fill.
+            current_qty += pending_delta.get(key, 0.0)
             delta = target_qty - current_qty
             if whole_shares_only:
                 delta = float(int(delta))
+            # Long-only invariant, quantity half: a sell may flatten the
+            # effective position but never cross zero. If the effective
+            # position is already <= 0 (e.g. a working close covers it),
+            # emit nothing rather than sell air.
+            if not self.limits.allow_short and delta < 0:
+                max_sell = max(current_qty, 0.0)
+                if abs(delta) > max_sell:
+                    decisions.append(
+                        RiskDecision(
+                            action="scale",
+                            reason=(
+                                f"long-only: sell on {key} clamped from {abs(delta):g} "
+                                f"to {max_sell:g} (effective position incl. working orders)"
+                            ),
+                            scale_factor=0.0 if max_sell == 0 else max_sell / abs(delta),
+                        )
+                    )
+                    delta = -max_sell
+                    if whole_shares_only:
+                        delta = float(int(delta))
             if abs(delta) < _EPS_QTY:
                 continue
 
