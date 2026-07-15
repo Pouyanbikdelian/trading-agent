@@ -545,9 +545,16 @@ class IbkrBroker(Broker):
         contract = self._contract(order.instrument)
         ib_order = self._build_ib_order(order)
         # placeOrder is fire-and-forget; the trade-status update arrives
-        # async. But the call itself can wedge if the gateway's order book
-        # isn't accepting submissions — bound it.
-        trade = self._bounded("placeOrder", lambda: self._ib.placeOrder(contract, ib_order))
+        # async. Bound it — but NEVER auto-retry (external review,
+        # 2026-07-15): a timeout does not mean the order failed to reach
+        # IBKR, and _bounded's reconnect-and-retry would re-send it,
+        # potentially duplicating a live order. Reads are safe to retry;
+        # writes are not. On timeout the cycle marks this order REJECTED
+        # locally and startup/next-cycle reconciliation surfaces any
+        # divergence from what IBKR actually did.
+        trade = self._call_with_timeout(
+            "placeOrder", lambda: self._ib.placeOrder(contract, ib_order), None
+        )
         logger.bind(broker=self.name, symbol=order.instrument.symbol).info(
             f"submitted {order.side.value} {order.quantity} {order.instrument.symbol} "
             f"as {order.order_type.value}"
@@ -952,10 +959,19 @@ def _fx_pair_for(a: str, b: str) -> tuple[str, str]:
 
 def _ibkr_contract_to_instrument(contract: Any) -> Instrument:
     """Best-effort reverse mapping; the runner uses this to keep the broker's
-    position view inside our type system."""
+    position view inside our type system.
+
+    IDENTITY MATTERS (external review, 2026-07-15): ``Instrument.key``
+    embeds the exchange when set. Position contracts usually carry no
+    exchange, but OPEN-ORDER contracts are routed ``SMART`` — mapping
+    that through produced keys like ``equity:SMART:INTC`` that never
+    match the universe's ``equity:INTC``, silently defeating pending-
+    order netting on real IBKR. For stocks the routing exchange carries
+    no identity, so we DROP it; FX/futures keep theirs (it's part of
+    the instrument there)."""
     sec_type = getattr(contract, "secType", "STK")
     asset_class_map = {
-        "STK": AssetClass.EQUITY,
+        "STK": AssetClass.EQUITY,  # NB: IBKR reports ETFs as STK too
         "ETF": AssetClass.ETF,
         "CASH": AssetClass.FX,
         "CRYPTO": AssetClass.CRYPTO,
@@ -963,10 +979,13 @@ def _ibkr_contract_to_instrument(contract: Any) -> Instrument:
         "OPT": AssetClass.OPTION,
     }
     asset_class = asset_class_map.get(sec_type, AssetClass.EQUITY)
+    exchange = getattr(contract, "exchange", None) or None
+    if sec_type in ("STK", "ETF"):
+        exchange = None  # routing venue, not identity — keep keys aligned
     return Instrument(
         symbol=contract.symbol if sec_type != "CASH" else f"{contract.symbol}{contract.currency}",
         asset_class=asset_class,
-        exchange=getattr(contract, "exchange", None),
+        exchange=exchange,
         currency=getattr(contract, "currency", "USD") or "USD",
         multiplier=float(getattr(contract, "multiplier", None) or 1.0),
     )

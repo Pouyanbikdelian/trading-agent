@@ -113,6 +113,16 @@ Order of operations:
 - [ ] **Execution upgrade** — IBKR Adaptive algo or marketable-limit
       orders instead of raw market orders (protects against bad opens;
       TWAP/VWAP overkill at current size).
+- [x] **Telegram update-offset persistence** (external review 2026-07-15,
+      fixed 2026-07-16) — offset persisted atomically to
+      state/telegram_offset.json BEFORE dispatch; crash-restart can no
+      longer replay an executed command. Corrupt/missing file degrades
+      to the old behavior.
+- [ ] **Single execution lock** (external review 2026-07-15) — cron
+      cycle, trigger cycle, approval flow and manual commands lack one
+      mutual-exclusion primitive. Mitigated by per-job locks, the 10s
+      cooldown and the new submit-gate re-checks; a proper cross-path
+      lock (file-lock around order submission) is the clean fix.
 - [ ] **Robustness overhaul** — the bot should be "so much more robust":
       graceful reconnect/backoff on Telegram API flaps, command timeouts
       that never wedge the poll loop, per-command error isolation (one

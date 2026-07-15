@@ -519,3 +519,16 @@ def test_convert_currency_returns_when_no_rejection(broker: IbkrBroker, fake_ib:
     assert result["from_ccy"] == "CHF"
     assert result["to_ccy"] == "USD"
     assert result["from_amount"] == 30000.0
+
+
+def test_contract_mapping_drops_routing_exchange_for_stocks() -> None:
+    """SMART is a routing venue, not identity: an open-order contract
+    routed SMART must map to the same key as the universe instrument
+    (external review 2026-07-15 — pending-order netting depended on it)."""
+    from trading.execution.ibkr import _ibkr_contract_to_instrument
+
+    routed = SimpleNamespace(
+        symbol="INTC", secType="STK", exchange="SMART", currency="USD", multiplier=None
+    )
+    ins = _ibkr_contract_to_instrument(routed)
+    assert ins.key == "equity:INTC"  # not equity:SMART:INTC

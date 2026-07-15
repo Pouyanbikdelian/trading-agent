@@ -1641,6 +1641,43 @@ async def _dispatch(text: str) -> str | None:
     return f"unknown command `{cmd}` — try /help"
 
 
+_OFFSET_FILE = "telegram_offset.json"
+
+
+def _load_offset() -> int:
+    """Last confirmed Telegram update offset, persisted across restarts.
+
+    Starting from 0 after a crash re-delivers every update Telegram
+    hasn't had confirmed — including an order command executed seconds
+    before the crash (external review, 2026-07-15). The command TTL
+    bounds the damage; persisting the offset removes it. Missing or
+    corrupt file degrades to 0 — the old behavior."""
+    import json as _json
+
+    path = settings.state_dir / _OFFSET_FILE
+    try:
+        return int(_json.loads(path.read_text()).get("offset", 0))
+    except Exception:
+        return 0
+
+
+def _save_offset(offset: int) -> None:
+    """Atomic write; failure is logged, never fatal to the poll loop."""
+    import json as _json
+    import os as _os
+    import tempfile as _tempfile
+
+    path = settings.state_dir / _OFFSET_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = _tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.")
+        with _os.fdopen(fd, "w") as f:
+            _json.dump({"offset": offset}, f)
+        _os.replace(tmp, path)
+    except Exception:
+        logger.exception("failed to persist telegram offset")
+
+
 async def run_bot() -> None:
     """Run the long-poll loop. Blocks until cancelled.
 
@@ -1653,7 +1690,7 @@ async def run_bot() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must both be set in .env")
 
     logger.info("telegram bot starting (long-poll)")
-    offset = 0
+    offset = _load_offset()
     async with httpx.AsyncClient() as client:
         # Greet on startup so the operator knows the bot is up.
         await _send(
@@ -1665,7 +1702,11 @@ async def run_bot() -> None:
         while True:
             updates = await _get_updates(client, token, offset)
             for upd in updates:
+                # Persist BEFORE dispatching: crash mid-command must not
+                # replay it on restart. Losing one un-dispatched command
+                # (operator re-sends) beats re-executing one.
                 offset = max(offset, upd["update_id"] + 1)
+                _save_offset(offset)
                 msg = upd.get("message") or upd.get("edited_message")
                 if not msg:
                     continue

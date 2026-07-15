@@ -104,6 +104,21 @@ Code / config audit:
       add an ofelia label later if manual gets old). NOTE: once enabled,
       the first cycle will cut the ~90% tech book down toward 30% tech —
       expect a big rebalance.
+- [x] External code review (OpenAI, 2026-07-15) — verified 7 claims:
+      5 real, fixed same day: (1) SMART-routed open-order contracts broke
+      key matching (pending netting silently no-op'd on real IBKR) +
+      etf:/equity: key mismatch (would have bitten the PM bridge) — both
+      normalized; (2) freeze not atomic — added last-instant halt
+      re-check + zombie-cycle guard at the submit gate; (4) placeOrder
+      was auto-retried after timeout (duplicate risk) — writes are never
+      retried now, reads still are; (6) unfilled BUYs counted as
+      sellable — sellable base is settled + pending sells only.
+      Claim 3 (halt blocks manual /buy /sell /flatten) is INTENDED
+      design — open policy question for Yan: should /flatten work while
+      halted (panic button vs frozen-means-frozen)?
+      Claims 5 & 7 (Telegram offset replay, no global execution lock)
+      real but bounded (15-min command TTL; per-job locks + cooldown) —
+      queued in Phase 11.
 - [ ] Full test suite green on the exact commit being deployed; tag it
       (`git tag live-candidate-1`).
 

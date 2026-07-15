@@ -275,11 +275,25 @@ class RiskManager:
             return [], [RiskDecision(action="reject", reason="non-positive equity")]
 
         # Signed share deltas of orders already working at the broker,
-        # keyed by instrument.key — netted into current position below.
+        # keyed by NORMALIZED instrument key — netted into current
+        # position below. Normalization: IBKR reports ETFs as plain
+        # stocks (secType STK), so a broker-side ``equity:SPY`` must
+        # match a universe-side ``etf:SPY``. ``pending_sell`` tracks the
+        # sell side alone: only sells shrink what we're allowed to sell
+        # (long-only clamp) — counting an UNFILLED buy as owned could
+        # let a sell fire before the buy fills and end short (external
+        # review, 2026-07-15).
+        def _norm(key: str) -> str:
+            return f"equity:{key.split(':', 1)[1]}" if key.startswith("etf:") else key
+
         pending_delta: dict[str, float] = {}
+        pending_sell: dict[str, float] = {}
         for po in pending_orders or []:
+            k = _norm(po.instrument.key)
             signed = po.quantity if po.side == Side.BUY else -po.quantity
-            pending_delta[po.instrument.key] = pending_delta.get(po.instrument.key, 0.0) + signed
+            pending_delta[k] = pending_delta.get(k, 0.0) + signed
+            if signed < 0:
+                pending_sell[k] = pending_sell.get(k, 0.0) + signed
         if pending_delta:
             decisions.append(
                 RiskDecision(
@@ -417,18 +431,24 @@ class RiskManager:
             if whole_shares_only:
                 # int() truncates toward zero — fine for both long and short legs.
                 target_qty = float(int(target_qty))
-            current_qty = account.positions[key].quantity if key in account.positions else 0.0
-            # Where the book WILL be once working orders fill.
-            current_qty += pending_delta.get(key, 0.0)
+            # Position lookup through the same normalization as pending
+            # orders (etf:X ≡ equity:X — IBKR reports ETFs as STK).
+            nkey = _norm(key)
+            settled_qty = 0.0
+            for pkey, pos in account.positions.items():
+                if _norm(pkey) == nkey:
+                    settled_qty += pos.quantity
+            # Where the book WILL be once working orders fill (sizing).
+            current_qty = settled_qty + pending_delta.get(nkey, 0.0)
             delta = target_qty - current_qty
             if whole_shares_only:
                 delta = float(int(delta))
             # Long-only invariant, quantity half: a sell may flatten the
-            # effective position but never cross zero. If the effective
-            # position is already <= 0 (e.g. a working close covers it),
-            # emit nothing rather than sell air.
+            # effective position but never cross zero. The sellable base
+            # is settled shares net of pending SELLS only — an unfilled
+            # buy is not ours to sell yet.
             if not self.limits.allow_short and delta < 0:
-                max_sell = max(current_qty, 0.0)
+                max_sell = max(settled_qty + pending_sell.get(nkey, 0.0), 0.0)
                 if abs(delta) > max_sell:
                     decisions.append(
                         RiskDecision(

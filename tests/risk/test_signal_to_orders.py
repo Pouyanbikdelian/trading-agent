@@ -462,3 +462,75 @@ def test_no_pending_orders_keeps_old_behavior(mgr, aapl, account_100k, t0) -> No
         pending_orders=[],
     )
     assert orders[0].quantity == pytest.approx(100.0)
+
+
+def test_etf_equity_key_normalization_in_netting(mgr, account_100k, t0) -> None:
+    """IBKR reports ETFs as plain stocks: a broker-side equity:SPY
+    position/order must match a universe-side etf:SPY target (external
+    review 2026-07-15 — the PM bridge trades ETF universes)."""
+    from trading.core.types import Order, OrderType, TimeInForce
+
+    spy_etf = Instrument(symbol="SPY", asset_class=AssetClass.ETF)
+    spy_stk = Instrument(symbol="SPY", asset_class=AssetClass.EQUITY)
+    # Broker sees an equity:SPY position of 50 + a working SELL 50 (close).
+    account = account_100k.model_copy(
+        update={
+            "positions": {spy_stk.key: Position(instrument=spy_stk, quantity=50.0, avg_price=100.0)}
+        }
+    )
+    pending = [
+        Order(
+            client_order_id="close-spy",
+            instrument=spy_stk,
+            side=Side.SELL,
+            quantity=50.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            created_at=t0,
+        )
+    ]
+    # Strategy targets etf:SPY at 5% (=50 shares @ $100).
+    sig = signal_from(t0, {spy_etf.key: 0.05})
+    orders, _ = mgr.signal_to_orders(
+        sig,
+        account=account,
+        last_prices={spy_etf.key: 100.0},
+        instruments={spy_etf.key: spy_etf},
+        pending_orders=pending,
+    )
+    # Effective = 50 (equity) - 50 (pending sell) = 0 → BUY 50 back.
+    assert len(orders) == 1
+    assert orders[0].side == Side.BUY
+    assert orders[0].quantity == pytest.approx(50.0)
+
+
+def test_unfilled_buy_does_not_expand_sellable_base(mgr, aapl, account_100k, t0) -> None:
+    """A resting (unfilled) BUY is not ours to sell: with 100 settled +
+    BUY 50 working and a target of 0, the sell must be 100 — selling 150
+    would go short if the buy never fills (external review 2026-07-15)."""
+    from trading.core.types import Order, OrderType, TimeInForce
+
+    pos = Position(instrument=aapl, quantity=100.0, avg_price=100.0)
+    account = account_100k.model_copy(update={"positions": {"equity:AAPL": pos}})
+    pending = [
+        Order(
+            client_order_id="resting-buy",
+            instrument=aapl,
+            side=Side.BUY,
+            quantity=50.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            created_at=t0,
+        )
+    ]
+    sig = signal_from(t0, {"equity:AAPL": 0.0})
+    orders, _ = mgr.signal_to_orders(
+        sig,
+        account=account,
+        last_prices={"equity:AAPL": 100.0},
+        instruments={"equity:AAPL": aapl},
+        pending_orders=pending,
+    )
+    assert len(orders) == 1
+    assert orders[0].side == Side.SELL
+    assert orders[0].quantity == pytest.approx(100.0)  # never 150

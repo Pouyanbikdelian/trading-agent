@@ -519,6 +519,47 @@ class Cycle:
             # that will trade.
             self._announce_basket(orders, account, last_prices)
 
+        # 8f. LAST-INSTANT gates before any order leaves the building
+        # (external review, 2026-07-15 — "the freeze is not atomic"):
+        #
+        # (a) Halt re-check. The step-4 check can be minutes old by now
+        #     (price load + approval wait). If the operator /halt'ed or a
+        #     kill switch fired in another process meanwhile, this cycle
+        #     must submit NOTHING.
+        # (b) Zombie guard. The runner's asyncio.wait_for cancels the
+        #     awaiting coroutine on timeout but NOT this worker thread —
+        #     a "timed out" cycle keeps running and could submit long
+        #     after the operator was told it aborted. If we're past the
+        #     runner's cycle timeout, stand down.
+        self.risk_manager._reload_halt_state()
+        if self.risk_manager.is_halted():
+            self.alerts.critical(
+                "⛔ submit gate: halt engaged after planning — dropping "
+                f"{len(orders)} planned order(s), submitting nothing."
+            )
+            return CycleReport(
+                ts=ts_start,
+                status="halted",
+                orders_submitted=0,
+                fills_received=0,
+                decisions=decisions,
+                duration_ms=self._elapsed_ms(ts_start),
+            )
+        if self._elapsed_ms(ts_start) > 290_000:  # runner aborts awaiting at 300s
+            self.alerts.critical(
+                "⛔ submit gate: cycle exceeded its timeout before submission "
+                f"— dropping {len(orders)} planned order(s) (zombie-cycle guard)."
+            )
+            return CycleReport(
+                ts=ts_start,
+                status="error",
+                orders_submitted=0,
+                fills_received=0,
+                decisions=decisions,
+                error="zombie-cycle guard: planning outlived the cycle timeout",
+                duration_ms=self._elapsed_ms(ts_start),
+            )
+
         # 9. Submit each order. The cycle stops at first hard failure to
         #    avoid partial portfolio bringups, but logs and alerts.
         orders_submitted = 0
