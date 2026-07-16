@@ -230,3 +230,68 @@ def test_provider_config_requires_key(monkeypatch) -> None:
     cfg = ProviderConfig.from_env()
     assert cfg.name == "deepseek" and cfg.model == "deepseek-chat"
     assert cfg.base_url and "deepseek.com" in cfg.base_url
+
+
+# ------------------------------------------------- two-books arithmetic
+
+
+def _pm_fixture(tmp_path: Path) -> Path:
+    state = tmp_path / "state"
+    pm = state / "agent_pm"
+    pm.mkdir(parents=True)
+    (pm / "portfolio.json").write_text(
+        json.dumps(
+            {
+                "cash": 40_000.0,
+                # fractional SHARE quantities — these read like weights
+                # and the LLM once presented them as such (2026-07-16)
+                "holdings": {"JPM": 100.0, "GLD": 50.0},
+                "start_equity": 100_000.0,
+                "history": [{"t": "2026-07-13T20:00:00+00:00", "equity": 99_000.0}],
+            }
+        )
+    )
+    return state
+
+
+def test_pm_book_precomputes_weights_and_deployed(tmp_path: Path, monkeypatch) -> None:
+    """With prices available the book carries weight_pct / deployed_pct so
+    the model never derives percentages from raw share counts."""
+    from trading.copilot import facts
+
+    state = _pm_fixture(tmp_path)
+    px = {"JPM": 300.0, "GLD": 400.0}  # values: 30k + 20k, equity 90k
+
+    monkeypatch.setattr(
+        facts,
+        "last_close",
+        lambda data_dir, sym: {"available": True, "close": px[sym], "as_of": "2026-07-15"},
+    )
+    book = facts.pm_book(state, tmp_path / "data")
+    assert book["available"]
+    assert book["marked_equity_now"] == 90_000.0
+    assert book["deployed_pct"] == round((1 - 40_000 / 90_000) * 100, 1)
+    assert book["holdings"]["JPM"]["weight_pct"] == round(30_000 / 90_000 * 100, 1)
+    assert book["holdings"]["JPM"]["shares"] == 100.0
+    assert "NOT weights" in book["note"]
+    # raw share dict must not leak alongside the marked one
+    assert "holdings_share_quantities_NOT_weights" not in book
+
+
+def test_pm_book_without_prices_labels_shares_loudly(tmp_path: Path) -> None:
+    from trading.copilot import facts
+
+    state = _pm_fixture(tmp_path)
+    book = facts.pm_book(state)  # no data_dir → no marks
+    assert book["available"]
+    assert book["holdings_share_quantities_NOT_weights"] == {"JPM": 100.0, "GLD": 50.0}
+    assert "deployed_pct" not in book  # never a made-up percentage
+
+
+def test_charter_pins_two_books_and_no_arithmetic() -> None:
+    """The prompt rules the 2026-07-16 transcript bugs regressed on."""
+    from trading.copilot.engine import CHARTER
+
+    assert "NO ARITHMETIC" in CHARTER
+    assert "never write underscores" in CHARTER
+    assert "share quantities, not weights" in CHARTER.lower()

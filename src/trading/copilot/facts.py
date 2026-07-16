@@ -54,13 +54,19 @@ def positions_now(state_dir: Path, symbol: str | None = None) -> dict[str, Any]:
                 "realized_pnl": p.get("realized_pnl"),
             }
         )
-    return {
+    out: dict[str, Any] = {
         "available": True,
+        "note": "the REAL momentum trading account (paper mode)",
         "as_of": datetime.fromtimestamp(row["ts"], tz=timezone.utc).isoformat(),
         "equity": row["equity"],
         "cash": row["cash"],
         "positions": positions,
     }
+    # Precomputed so the LLM never derives its own percentages (it
+    # invented a "70% deployed" from raw numbers, 2026-07-16).
+    if row["equity"]:
+        out["deployed_pct"] = round((1 - row["cash"] / row["equity"]) * 100, 1)
+    return out
 
 
 def orders_and_fills(
@@ -120,9 +126,18 @@ def orders_and_fills(
     return {"available": True, "orders": out}
 
 
-def pm_book(state_dir: Path) -> dict[str, Any]:
+def pm_book(state_dir: Path, data_dir: Path | None = None) -> dict[str, Any]:
     """The agent PM's SIMULATED book — a separate virtual portfolio,
-    never to be conflated with the real/paper momentum account."""
+    never to be conflated with the real/paper momentum account.
+
+    Raw holdings are fractional SHARE quantities (``w * equity / px``),
+    which read like weights (``JPM: 0.1``) — the LLM presented them as
+    portfolio weights (operator report, 2026-07-16). So when ``data_dir``
+    is given each holding is marked at the last cached close and carries
+    an explicit ``weight_pct``; the book carries ``deployed_pct``. The
+    model is charter-bound to use these precomputed fields, never its
+    own arithmetic.
+    """
     path = Path(state_dir) / "agent_pm" / "portfolio.json"
     if not path.exists():
         return {"available": False}
@@ -131,15 +146,43 @@ def pm_book(state_dir: Path) -> dict[str, Any]:
     except Exception:
         return {"available": False}
     hist = book.get("history", [])
-    return {
+    cash = book.get("cash")
+    out: dict[str, Any] = {
         "available": True,
-        "note": "SIMULATED virtual book (paper-money experiment), not the trading account",
-        "holdings_shares": book.get("holdings", {}),
-        "cash": book.get("cash"),
+        "note": (
+            "SIMULATED virtual book (paper-money experiment), not the trading "
+            "account. Holdings are fractional SHARE quantities, NOT weights."
+        ),
+        "cash": cash,
         "last_marked_equity": hist[-1].get("equity") if hist else None,
         "last_mark_ts": hist[-1].get("t") if hist else None,
         "start_equity": book.get("start_equity"),
     }
+    holdings: dict[str, float] = book.get("holdings", {}) or {}
+    marked: dict[str, Any] = {}
+    values: dict[str, float] = {}
+    if data_dir is not None:
+        for sym, qty in holdings.items():
+            mkt = last_close(data_dir, sym)
+            if mkt.get("available"):
+                values[sym] = float(qty) * float(mkt["close"])
+                marked[sym] = {
+                    "shares": qty,
+                    "last_close": mkt["close"],
+                    "value": round(values[sym], 2),
+                    "price_as_of": mkt["as_of"],
+                }
+    if values and cash is not None and len(values) == len(holdings):
+        equity_now = float(cash) + sum(values.values())
+        for sym, v in values.items():
+            marked[sym]["weight_pct"] = round(v / equity_now * 100, 1)
+        out["holdings"] = marked
+        out["marked_equity_now"] = round(equity_now, 2)
+        out["deployed_pct"] = round((1 - float(cash) / equity_now) * 100, 1)
+    else:
+        # No/partial prices: fall back to raw shares, loudly labeled.
+        out["holdings_share_quantities_NOT_weights"] = holdings
+    return out
 
 
 def risk_now(state_dir: Path) -> dict[str, Any]:

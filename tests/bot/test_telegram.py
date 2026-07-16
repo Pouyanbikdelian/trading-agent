@@ -182,3 +182,51 @@ def test_snapshot_age_warning_handles_naive_datetime() -> None:
     stale = (datetime.now(tz=timezone.utc) - timedelta(minutes=45)).replace(tzinfo=None)
     msg = _snapshot_age_warning(stale)
     assert msg is not None
+
+
+# ------------------------------------------------- copilot plain-text sending
+
+
+def test_copilot_reply_is_plain_reply(tmp_path: Path, monkeypatch) -> None:
+    """LLM answers must bypass Telegram markdown: legacy markdown eats
+    underscore pairs, so 'NOW_agent_pm_simulated_book' rendered as
+    'NOWagentpmsimulatedbook' (operator report, 2026-07-16)."""
+    import trading.copilot as copilot_pkg
+    from trading.bot.telegram import PlainReply
+
+    stub = _settings_stub(tmp_path)
+    stub.data_dir = tmp_path / "data"
+    monkeypatch.setattr(telegram_module, "settings", stub)
+    monkeypatch.setattr(copilot_pkg, "answer", lambda q, **kw: "answer with_under_scores intact")
+    out = asyncio.run(_dispatch("what is the PM book holding today?"))
+    assert isinstance(out, PlainReply)
+    assert out == "answer with_under_scores intact"
+
+    # Errors from the copilot are bot-authored (markdown-safe) — not plain.
+    def boom(q, **kw):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(copilot_pkg, "answer", boom)
+    out = asyncio.run(_dispatch("what is the PM book holding today?"))
+    assert not isinstance(out, PlainReply)
+    assert "copilot error" in (out or "")
+
+
+def test_send_plain_omits_parse_mode() -> None:
+    from trading.bot.telegram import _send
+
+    sent: list[dict] = []
+
+    class FakeResp:
+        status_code = 200
+        text = ""
+
+    class FakeClient:
+        async def post(self, url, json=None, timeout=None):
+            sent.append(json)
+            return FakeResp()
+
+    asyncio.run(_send(FakeClient(), "tok", "42", "a_b_c", plain=True))
+    asyncio.run(_send(FakeClient(), "tok", "42", "a_b_c"))
+    assert "parse_mode" not in sent[0]  # plain: text goes out verbatim
+    assert sent[1].get("parse_mode") == "Markdown"  # default path unchanged

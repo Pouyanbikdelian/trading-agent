@@ -133,13 +133,27 @@ def _split_for_telegram(text: str, limit: int = 3800, max_chunks: int = 4) -> li
     return chunks
 
 
-async def _send(client: httpx.AsyncClient, token: str, chat_id: str, text: str) -> None:
+class PlainReply(str):
+    """A reply that must be sent WITHOUT Telegram markdown parsing.
+
+    LLM-generated copilot answers are not markdown-safe: legacy Telegram
+    markdown silently eats underscore pairs, so an answer quoting an
+    evidence key like ``NOW_agent_pm_simulated_book`` rendered as
+    ``NOWagentpmsimulatedbook`` (operator report, 2026-07-16). str
+    subclass so every existing dispatch/test path is unaffected.
+    """
+
+
+async def _send(
+    client: httpx.AsyncClient, token: str, chat_id: str, text: str, *, plain: bool = False
+) -> None:
     """POST sendMessage. Never raises — bot loop must keep running.
 
     Markdown parse failures (400 with "can't parse entities") have caused us
     to drop critical alerts (e.g. broker rejection messages with unbalanced
     backticks). On any 400 we retry once as plain text so the operator
     *always* sees the message; aesthetics lose to deliverability.
+    ``plain=True`` skips markdown entirely (see PlainReply).
     """
     url = f"{BOT_API_BASE}/bot{token}/sendMessage"
     base = {
@@ -148,6 +162,11 @@ async def _send(client: httpx.AsyncClient, token: str, chat_id: str, text: str) 
         "disable_web_page_preview": True,
     }
     try:
+        if plain:
+            r = await client.post(url, json=base, timeout=10.0)
+            if r.status_code >= 400:
+                logger.warning(f"telegram send failed: {r.status_code} {r.text[:200]}")
+            return
         r = await client.post(url, json={**base, "parse_mode": "Markdown"}, timeout=10.0)
         if r.status_code == 400:
             logger.warning(
@@ -1566,13 +1585,15 @@ async def _cmd_copilot(question: str, symbol: str | None = None) -> str:
     from trading.copilot import answer as _copilot_answer
 
     try:
-        return await _asyncio.to_thread(
+        text = await _asyncio.to_thread(
             _copilot_answer,
             question,
             state_dir=settings.state_dir,
             data_dir=settings.data_dir,
             symbol=symbol,
         )
+        # LLM output is not markdown-safe — send verbatim (PlainReply).
+        return PlainReply(text)
     except Exception as e:  # never let the copilot take the bot down
         logger.exception("copilot failed")
         return f"copilot error: {type(e).__name__}: {e}"
@@ -1786,5 +1807,6 @@ async def run_bot() -> None:
                 text = msg.get("text", "")
                 reply = await _dispatch(text)
                 if reply is not None:
+                    plain = isinstance(reply, PlainReply)
                     for chunk in _split_for_telegram(reply):
-                        await _send(client, token, chat_id, chunk)
+                        await _send(client, token, chat_id, chunk, plain=plain)
