@@ -45,8 +45,29 @@ def test_dispatch_unknown_returns_help_hint() -> None:
     assert "unknown command" in (out or "")
 
 
-def test_dispatch_non_command_returns_none() -> None:
-    assert asyncio.run(_dispatch("hello bot")) is None
+def test_dispatch_plain_text_routes_to_copilot(monkeypatch) -> None:
+    """Since 2026-07-16 plain chat goes to the read-only copilot instead
+    of being ignored — the bot IS the assistant, no /ask prefix needed."""
+    seen: dict[str, str] = {}
+
+    async def fake_copilot(question: str, symbol: str | None = None) -> str:
+        seen["q"] = question
+        return "copilot reply"
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", fake_copilot)
+    out = asyncio.run(_dispatch("why did we buy MU last week?"))
+    assert out == "copilot reply"
+    assert seen["q"] == "why did we buy MU last week?"
+
+
+def test_dispatch_tiny_fragment_gets_hint_not_llm(monkeypatch) -> None:
+    async def fake_copilot(question: str, symbol: str | None = None) -> str:
+        raise AssertionError("copilot must not be called for fragments")
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", fake_copilot)
+    out = asyncio.run(_dispatch("ok"))
+    assert out is not None and "full question" in out
+    assert asyncio.run(_dispatch("")) is None  # empty stays silent
 
 
 def test_cmd_halt_writes_halt_file(tmp_path: Path, monkeypatch) -> None:

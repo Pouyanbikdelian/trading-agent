@@ -1579,9 +1579,21 @@ async def _cmd_copilot(question: str, symbol: str | None = None) -> str:
 
 
 async def _dispatch(text: str) -> str | None:
-    """Parse a command and return a reply, or None if not a command."""
-    if not text or not text.startswith("/"):
+    """Parse a command and return a reply, or None to stay silent."""
+    if not text:
         return None
+    if not text.startswith("/"):
+        # Plain chat goes to the read-only copilot — the bot IS the
+        # assistant now, no /ask prefix needed. Guard rails: very short
+        # fragments ("ok", "👍") get a hint instead of an LLM call, and
+        # the copilot's own 15s rate limit bounds a chatty evening.
+        # NOTE Phase-1 limit: each message stands alone — the copilot
+        # has no conversation memory yet, so pack context into one
+        # message ("is the MU thesis still valid?" not "and MU?").
+        stripped = text.strip()
+        if len(stripped) < 8 or not any(c.isalpha() for c in stripped):
+            return "Ask me a full question — e.g. `why did we buy MU?` — or /help for commands."
+        return await _cmd_copilot(stripped)
     parts = shlex.split(text)
     cmd = parts[0].lower().split("@")[0]  # strip "@botname" suffix
     args = parts[1:]
