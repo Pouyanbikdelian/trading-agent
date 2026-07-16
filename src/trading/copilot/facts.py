@@ -81,33 +81,65 @@ def orders_and_fills(
     finally:
         conn.close()
     out = []
+    now_ts = datetime.now(tz=timezone.utc).timestamp()
     for r in rows:
         sym = str(json.loads(r["instrument_json"]).get("symbol", "?")).upper()
         if symbol and sym != symbol.upper():
             continue
-        out.append(
-            {
-                "order_id": r["client_order_id"],
-                "symbol": sym,
-                "side": r["side"],
-                "qty": r["quantity"],
-                "status": r["status"],
-                "created": datetime.fromtimestamp(r["created_at"], tz=timezone.utc).isoformat(),
-                "fill": (
-                    {
-                        "ts": datetime.fromtimestamp(r["fill_ts"], tz=timezone.utc).isoformat(),
-                        "qty": r["fill_qty"],
-                        "price": r["fill_price"],
-                        "commission": r["commission"],
-                    }
-                    if r["fill_ts"] is not None
-                    else None
-                ),
-            }
-        )
+        rec = {
+            "order_id": r["client_order_id"],
+            "symbol": sym,
+            "side": r["side"],
+            "qty": r["quantity"],
+            "status": r["status"],
+            "created": datetime.fromtimestamp(r["created_at"], tz=timezone.utc).isoformat(),
+            "fill": (
+                {
+                    "ts": datetime.fromtimestamp(r["fill_ts"], tz=timezone.utc).isoformat(),
+                    "qty": r["fill_qty"],
+                    "price": r["fill_price"],
+                    "commission": r["commission"],
+                }
+                if r["fill_ts"] is not None
+                else None
+            ),
+        }
+        # KNOWN BOOKKEEPING GAP (2026-07-16): fills are only promoted to
+        # FILLED if they arrive within the submitting cycle — orders that
+        # fill at the NEXT session's open stay 'submitted' in this table
+        # forever. Flag it so the copilot never presents a stale status
+        # as a working order.
+        if r["status"] == "submitted" and r["fill_ts"] is None and now_ts - r["created_at"] > 86400:
+            rec["status_note"] = (
+                "STALE — recorded 'submitted' >1 day ago; almost certainly filled at the "
+                "next open or expired (DAY order). Trust the position snapshot, not this status."
+            )
+        out.append(rec)
         if len(out) >= limit:
             break
     return {"available": True, "orders": out}
+
+
+def pm_book(state_dir: Path) -> dict[str, Any]:
+    """The agent PM's SIMULATED book — a separate virtual portfolio,
+    never to be conflated with the real/paper momentum account."""
+    path = Path(state_dir) / "agent_pm" / "portfolio.json"
+    if not path.exists():
+        return {"available": False}
+    try:
+        book = json.loads(path.read_text())
+    except Exception:
+        return {"available": False}
+    hist = book.get("history", [])
+    return {
+        "available": True,
+        "note": "SIMULATED virtual book (paper-money experiment), not the trading account",
+        "holdings_shares": book.get("holdings", {}),
+        "cash": book.get("cash"),
+        "last_marked_equity": hist[-1].get("equity") if hist else None,
+        "last_mark_ts": hist[-1].get("t") if hist else None,
+        "start_equity": book.get("start_equity"),
+    }
 
 
 def risk_now(state_dir: Path) -> dict[str, Any]:

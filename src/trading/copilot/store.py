@@ -328,9 +328,16 @@ class CopilotStore:
         return " OR ".join(f'"{t}"' for t in safe[:12])
 
     def search_decisions(
-        self, terms: list[str], *, symbol: str | None = None, limit: int = 6
+        self, terms: list[str], *, symbol: str | None = None, limit: int = 6, strict: bool = False
     ) -> list[dict[str, Any]]:
-        """FTS + symbol filter, newest first. Terms empty → newest overall."""
+        """FTS + symbol filter, newest first.
+
+        ``strict=True``: only genuine FTS/symbol matches — no match means
+        an EMPTY list, never "here's something recent instead". The
+        engine depends on that: padding off-topic questions with
+        unrelated rulings made the copilot narrate noise (2026-07-16).
+        ``strict=False`` keeps the newest-overall fallback for browsing
+        callers that want "latest decisions" semantics."""
         rows: list[sqlite3.Row] = []
         q = self._fts_query(terms)
         if q:
@@ -339,7 +346,7 @@ class CopilotStore:
                 "WHERE decisions_fts MATCH ? ORDER BY d.ts DESC LIMIT ?",
                 (q, limit * 3),
             ).fetchall()
-        if not rows:
+        if not rows and not strict:
             rows = self.conn.execute(
                 "SELECT * FROM decisions ORDER BY ts DESC LIMIT ?", (limit * 3,)
             ).fetchall()

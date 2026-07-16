@@ -118,6 +118,13 @@ Order of operations:
       state/telegram_offset.json BEFORE dispatch; crash-restart can no
       longer replay an executed command. Corrupt/missing file degrades
       to the old behavior.
+- [ ] **Order status never promoted for overnight fills** (found via
+      copilot 2026-07-16) — the cycle marks FILLED only for fills that
+      arrive within the submitting cycle; after-hours orders that fill
+      at the next open stay 'submitted' in orders.db forever (all of
+      June 10 + July 14 rows). Fix: reconcile fills since the LAST
+      cycle, not since this cycle's start; backfill existing rows.
+      Copilot flags these as stale meanwhile.
 - [ ] **Single execution lock** (external review 2026-07-15) — cron
       cycle, trigger cycle, approval flow and manual commands lack one
       mutual-exclusion primitive. Mitigated by per-job locks, the 10s
