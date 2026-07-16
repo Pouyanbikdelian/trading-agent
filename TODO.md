@@ -130,15 +130,20 @@ Order of operations:
       instead of silence, health self-reporting (/health with uptime,
       last-poll age, handler failure counts), and tests for every
       command path.
-- [ ] **Claude-powered agent assistant in the chat** — a conversational
-      assistant (Anthropic API, reasoning-capable model) living in the
-      Telegram chat: understands the system's state (positions, halts,
-      committee journal, memory store), answers questions in natural
-      language, and can ACT like an agent — proposing/queueing the
-      existing safe commands (/cycle, /hold, /pm run...) rather than
-      free-form execution. Design constraints to settle before building:
-      tool whitelist (never the raw order path — rule #4), spend budget
-      per day, and how it defers to the human on anything gated.
+- [x] **Copilot Phase 1 (read-only) — SHIPPED 2026-07-16.**
+      `src/trading/copilot/` + `/ask` `/why SYM` `/thesis SYM`
+      `/committee SYM` in the bot. Derives decisions+transcripts from
+      the memory journal into state/copilot.db (FTS5), links orders/
+      fills, answers THEN/NOW/CHANGED with mandatory citations, honest
+      no-evidence path (no LLM call), Haiku default (Qwen/DeepSeek via
+      env), rate-limited + audited, import-guard test bans any
+      execution path. Docs: docs/COPILOT.md.
+- [ ] **Copilot Phase 2 (acting assistant)** — propose/queue the
+      existing safe commands (/cycle, /hold, /pm run...) with explicit
+      confirmation; never the raw order path (rule #4). Design gates:
+      tool whitelist, daily spend budget, human confirmation for
+      anything gated. Build only after Phase 1 proves useful in daily
+      use.
 
 ## Phase 12 — HedgeAgents-inspired upgrades (backlog, added 2026-07-11)
 

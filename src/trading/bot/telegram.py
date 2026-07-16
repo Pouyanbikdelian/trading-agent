@@ -73,6 +73,11 @@ HELP_TEXT = (
     "*Trigger work*\n"
     "/cycle — force a rebalance now (~2 min)\n"
     "/refresh — queue a data refresh\n\n"
+    "*Copilot* (read-only — explains, never trades)\n"
+    "/ask QUESTION — anything about past decisions or current state\n"
+    "/why SYM — why did we buy/sell/hold it, and what happened\n"
+    "/thesis SYM — latest thesis + is it still valid\n"
+    "/committee SYM — decision history for a symbol (bare /committee still convenes)\n\n"
     "*Manual orders* (queued, run within ~5s)\n"
     "/buy SYM QTY \\[LIMIT] — e.g. `/buy AAPL 10 180`\n"
     "/sell SYM \\[QTY|all] \\[LIMIT] — e.g. `/sell AAPL all`\n"
@@ -1550,6 +1555,29 @@ def _cmd_pick(args: list[str]) -> str:
     )
 
 
+async def _cmd_copilot(question: str, symbol: str | None = None) -> str:
+    """Read-only Investment Committee Copilot (docs/COPILOT.md).
+
+    Runs in a worker thread: the engine does SQLite + one HTTP call and
+    must not block the poll loop. It has no order path by construction —
+    it explains decisions, it cannot make them."""
+    import asyncio as _asyncio
+
+    from trading.copilot import answer as _copilot_answer
+
+    try:
+        return await _asyncio.to_thread(
+            _copilot_answer,
+            question,
+            state_dir=settings.state_dir,
+            data_dir=settings.data_dir,
+            symbol=symbol,
+        )
+    except Exception as e:  # never let the copilot take the bot down
+        logger.exception("copilot failed")
+        return f"copilot error: {type(e).__name__}: {e}"
+
+
 async def _dispatch(text: str) -> str | None:
     """Parse a command and return a reply, or None if not a command."""
     if not text or not text.startswith("/"):
@@ -1583,7 +1611,35 @@ async def _dispatch(text: str) -> str | None:
     if cmd == "/detail":
         return _cmd_detail()
     if cmd == "/committee":
+        # With a symbol argument: copilot history view (read-only).
+        # Bare: original behavior — convene the committee.
+        if args:
+            return await _cmd_copilot(
+                f"Show the committee's decision history and votes for {args[0].upper()}: "
+                "what was decided, when, with what dissent, and did it execute?",
+                symbol=args[0].upper(),
+            )
         return _cmd_committee()
+    if cmd == "/ask":
+        if not args:
+            return "usage: /ask <question>  — e.g. /ask why are we so heavy in semis?"
+        return await _cmd_copilot(" ".join(args))
+    if cmd == "/why":
+        if not args:
+            return "usage: /why <SYMBOL>"
+        return await _cmd_copilot(
+            f"Why did we buy, sell, or hold {args[0].upper()}? What was the thesis, "
+            "the votes and dissent, did the trade execute, and what happened after?",
+            symbol=args[0].upper(),
+        )
+    if cmd == "/thesis":
+        if not args:
+            return "usage: /thesis <SYMBOL>"
+        return await _cmd_copilot(
+            f"What was the committee's most recent thesis for {args[0].upper()}, what were "
+            "its invalidation conditions, and is it still valid given current data?",
+            symbol=args[0].upper(),
+        )
     if cmd == "/pm":
         return _cmd_pm(args)
     if cmd == "/resume":
