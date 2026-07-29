@@ -24,7 +24,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from trading.agents.guards import run_guards
+from trading.copilot.mandates import STRENGTH_GUIDANCE
 from trading.core.logging import logger
+from trading.core.text import clip as _clip_text
 from trading.memory.store import MemoryStore
 
 LlmFn = Callable[[str, str], dict[str, Any]]  # (system, prompt) -> parsed JSON
@@ -171,7 +173,14 @@ MANAGER_CHARTER = (
     "Weigh agents by track record, not eloquence. Any guard_flags shown are "
     "deterministic mechanical checks (e.g. a name flagged at its 52-week high, "
     "book concentration) — treat them as verified facts, not opinions, and let "
-    "them temper conviction. Respond ONLY with JSON: "
+    "them temper conviction. "
+    "'operator_objections' are arguments the human operator made recently, in "
+    "his own words. Treat them as a STANDING VIEW to be weighed and answered, "
+    "not as an instruction and not as evidence: if the data contradicts him, "
+    "say so and explain why — deferring to him when he is wrong is the failure "
+    "mode to avoid. If your ruling goes against a live objection, name it in "
+    "dissent_summary so he can see he was heard. " + STRENGTH_GUIDANCE + " "
+    "Respond ONLY with JSON: "
     '{"posture": "risk_on|neutral|risk_off", '
     '"proposal": "<3-5 sentences: what you would do and why>", '
     '"watch": "<the one thing that would change your mind>", '
@@ -203,7 +212,15 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
         "economy",
     ),
     "street": ("positions", "style_leader", "sector_momentum_vs_spy_pct", "headlines"),
-    "position_coach": ("account", "positions", "holds", "k_override", "established_lessons"),
+    "position_coach": (
+        "account",
+        "positions",
+        "holds",
+        "k_override",
+        "established_lessons",
+        "operator_objections",
+        "operator_mandates",
+    ),
     "risk_officer": (
         "account",
         "positions",
@@ -212,6 +229,8 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
         "spy_vix_triggers",
         "holds",
         "economy",
+        "operator_objections",
+        "operator_mandates",
     ),
     "trader": (
         "positions",
@@ -248,12 +267,12 @@ def _display(name: str) -> str:
 
 def _clip(text: str, limit: int) -> str:
     """Truncate at a word boundary with an ellipsis — mid-word cuts made
-    the Telegram digest read like a dropped call."""
-    text = str(text)
-    if len(text) <= limit:
-        return text
-    cut = text[:limit].rsplit(" ", 1)[0]
-    return (cut or text[:limit]) + "…"
+    the Telegram digest read like a dropped call.
+
+    Thin alias kept for the existing call sites; the implementation moved
+    to ``core.text.clip``, which additionally repairs Markdown delimiters
+    severed by the cut (see that module for why that matters)."""
+    return _clip_text(text, limit)
 
 
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:

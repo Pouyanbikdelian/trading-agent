@@ -1278,7 +1278,11 @@ class Cycle:
                 mark = "✅" if c["in_basket"] else "  "
                 prompt_lines.append(f"  `{i:>2}` {mark} `{c['symbol']:<6}` {c['score']:+.1%}")
 
-        self.alerts.info("\n".join(prompt_lines))
+        # Buttons carry the cycle id, so a tap on an older prompt in the
+        # chat history is refused rather than applied to this basket.
+        from trading.bot.keyboards import approval_keyboard
+
+        self.alerts.info("\n".join(prompt_lines), buttons=approval_keyboard(cycle_id))
 
         deadline = _time.monotonic() + timeout_s
         decision: dict[str, Any] | None = None

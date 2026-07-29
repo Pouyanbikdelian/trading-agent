@@ -126,3 +126,36 @@ def test_lateday_derisk_runs_once_per_day(tmp_path: Path) -> None:
     assert first["convene"] is True
     second = run_late_day_derisk(tmp_path, moves={"MU": -16.0}, now=t0 + timedelta(minutes=5))
     assert second["quiet"] is True and second.get("already_convened") is True
+
+
+def test_long_verdict_is_clipped_at_a_word_boundary(tmp_path: Path) -> None:
+    """Regression, 2026-07-29 transcript: the suggested action arrived as
+    '…and consider trimmin' — a raw [:200] slice through a word, with the
+    orphaned italic marker that followed it risking the whole message.
+
+    The suggestion is the most useful line in a risk alert; it must
+    survive intact or end cleanly."""
+    action = (
+        "Watch INTC into the close for volume confirmation of the move; if no "
+        "stock-specific catalyst such as earnings, a guidance cut or export news "
+        "emerges by the end of the day, treat the move as correlated tech selling "
+        "and consider trimming the position into any late strength."
+    )
+    assessment = "INTC is down 5% against a broad tape. " * 30
+
+    def verbose(_s: str, _p: str) -> dict[str, Any]:
+        return {"severity": "caution", "assessment": assessment, "suggested_action": action}
+
+    _seed_book(tmp_path, {"INTC": 10})
+    res = run_sentinel(tmp_path, llm=verbose, moves={"SPY": -2.1, "INTC": -6.0})
+
+    # The full suggestion now fits where the old 200-char cap severed it.
+    assert res["suggested_action"] == action
+    assert "trimmin…" not in res["suggested_action"]
+    # The assessment is long enough to clip, but never mid-word.
+    assert res["assessment"].endswith(("…", "."))
+    for word in res["assessment"].rstrip("…").split():
+        assert word in assessment.split()
+    # And the rendered alert carries balanced Markdown.
+    alert = format_sentinel_alert(res)
+    assert alert.count("*") % 2 == 0 and alert.count("_") % 2 == 0

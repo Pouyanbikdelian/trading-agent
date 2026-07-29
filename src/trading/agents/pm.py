@@ -31,7 +31,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from trading.copilot.mandates import STRENGTH_GUIDANCE
 from trading.core.logging import logger
+from trading.core.text import clip
 from trading.memory.store import MemoryStore
 
 LlmFn = Callable[[str, str], dict[str, Any]]
@@ -163,6 +165,8 @@ PM_CHARTER = (
     "take with confidence ≥ 0.70 on a stock or sector NOT currently in the "
     "top three holdings by weight, allocate at least 5% there — this is "
     "the forcing function for portfolio evolution beyond existing themes.\n"
+    "\n"
+    "OPERATOR MANDATES: " + STRENGTH_GUIDANCE + "\n"
     "\n"
     "OPERATOR HOLDS (mandatory): symbols listed in operator_held_do_not_trade "
     "are the operator's long-term positions, pinned outside your mandate. "
@@ -337,6 +341,14 @@ def mark_to_market(state_dir: Path, *, prices: dict[str, float] | None = None) -
     today = entry["t"][:10]
     history = [h for h in book.get("history", []) if str(h.get("t", ""))[:10] != today]
     book["history"] = [*history, entry][-520:]
+    # Persist the per-symbol marks alongside the equity point. /pm runs in
+    # the bot's command path, which must not make a network call — a
+    # yfinance round-trip there would block the poll loop. Storing the
+    # closes we already fetched lets the digest show value and weight per
+    # holding (a bare share count is unreadable) and lets it say how stale
+    # those numbers are.
+    book["marks"] = {s: round(float(px[s]), 4) for s in book["holdings"] if s in px}
+    book["marks_ts"] = entry["t"]
     _save(pm_dir, "portfolio.json", book)
     return {"ok": True, **entry}
 
@@ -420,8 +432,14 @@ def run_agent_pm(
 
     held = frozenset(load_holds(Path(state_dir)))
 
+    # Standing instructions the operator left from Telegram. Passed as
+    # context for the decision — the weights this produces still go
+    # through _clamp_weights, so a mandate can never lift a cap.
+    from trading.copilot.mandates import for_context as _mandates_for_context
+
     prompt = json.dumps(
         {
+            "operator_mandates": _mandates_for_context(Path(state_dir)),
             "operator_held_do_not_trade": sorted(held),
             "sim_portfolio": {
                 "equity": round(equity, 2),
@@ -481,47 +499,161 @@ def run_agent_pm(
         if s in px
     )
     costs = turnover * COST_BPS / 10_000.0
+    prior_holdings = dict(book["holdings"])
+    now_iso = datetime.now(tz=timezone.utc).isoformat()
     book = {
         "cash": round(equity - target_value - costs, 2),
         "holdings": new_holdings,
         "start_equity": float(book.get("start_equity") or START_EQUITY),
         "history": [
             *book.get("history", []),
-            {"t": datetime.now(tz=timezone.utc).isoformat(), "equity": round(equity, 2)},
+            {"t": now_iso, "equity": round(equity, 2)},
         ][-520:],
+        # Marks from this rebalance — see mark_to_market for why /pm needs
+        # them persisted rather than fetched.
+        "marks": {s: round(float(px[s]), 4) for s in new_holdings if s in px},
+        "marks_ts": now_iso,
     }
     _save(pm_dir, "portfolio.json", book)
 
     result = {
         "ok": True,
-        "ts": datetime.now(tz=timezone.utc).isoformat(),
+        "ts": now_iso,
         "equity": round(equity, 2),
         "weights": weights,
         "dropped": dropped,
         "turnover": round(turnover, 2),
         "costs": round(costs, 2),
-        "rationale": str(out.get("rationale", ""))[:800],
-        "watch": str(out.get("watch", ""))[:300],
+        # clip, not a raw slice: this text goes straight to Telegram and a
+        # mid-word cut through a Markdown pair can cost the whole message.
+        "rationale": clip(out.get("rationale", ""), 900),
+        "watch": clip(out.get("watch", ""), 400),
+        # What actually changed, so the digest can lead with the delta
+        # instead of restating the whole book.
+        "opened": sorted(set(new_holdings) - set(prior_holdings)),
+        "closed": sorted(set(prior_holdings) - set(new_holdings)),
+        "prior_holdings": prior_holdings,
     }
     _save(pm_dir, "last_run.json", result)
     mem.journal("agent_pm", {k: result[k] for k in ("equity", "weights", "rationale")}, actor="pm")
     return result
 
 
-def format_pm_digest(result: dict[str, Any]) -> str:
-    from trading.agents.committee import _clip
+def _money(v: float) -> str:
+    """Compact USD for a phone screen: $81.6k, $1.07M, $437k."""
+    a = abs(v)
+    if a >= 1_000_000:
+        return f"${v / 1_000_000:,.2f}M"
+    if a >= 1_000:
+        return f"${v / 1_000:,.1f}k"
+    return f"${v:,.0f}"
 
+
+def _marks_age_note(book: dict[str, Any]) -> str:
+    """'· marks 3d old' when the stored closes are stale, else ''.
+
+    A weight computed from week-old closes is not wrong so much as
+    unlabelled — say how old it is rather than quietly implying live."""
+    ts = book.get("marks_ts")
+    if not ts:
+        return ""
+    try:
+        age = datetime.now(tz=timezone.utc) - datetime.fromisoformat(str(ts))
+    except ValueError:
+        return ""
+    days = age.days
+    if days >= 1:
+        return f" · marks {days}d old"
+    if age.total_seconds() >= 6 * 3600:
+        return f" · marks {int(age.total_seconds() // 3600)}h old"
+    return ""
+
+
+def format_holdings(book: dict[str, Any]) -> list[str]:
+    """Holding lines carrying their own units.
+
+    A bare ``GLD: 285.839`` is unreadable — a 2026-07-29 transcript shows
+    it posted ninety seconds before ``GLD 10%``, the same ticker in a
+    different unit with neither one labelled. Share counts, dollar value
+    and weight together remove the ambiguity; without marks we still say
+    ``sh`` so the number is at least self-describing.
+    """
+    holdings: dict[str, float] = book.get("holdings", {}) or {}
+    if not holdings:
+        return ["  _all cash_"]
+    marks: dict[str, float] = book.get("marks", {}) or {}
+    cash = float(book.get("cash", 0.0))
+    values = {s: q * marks[s] for s, q in holdings.items() if s in marks}
+    equity = cash + sum(values.values())
+    lines = []
+    for sym, qty in sorted(holdings.items(), key=lambda kv: -values.get(kv[0], 0.0)):
+        if sym in values and equity > 0:
+            lines.append(
+                f"  `{sym:<5}` {qty:,.1f} sh · {_money(values[sym])} · {values[sym] / equity:.1%}"
+            )
+        else:
+            lines.append(f"  `{sym:<5}` {qty:,.1f} sh · _unmarked_")
+    if equity > 0:
+        lines.append(f"  `cash ` {_money(cash)} · {cash / equity:.1%}")
+    else:
+        lines.append(f"  `cash ` {_money(cash)}")
+    return lines
+
+
+def format_pm_digest(result: dict[str, Any], book: dict[str, Any] | None = None) -> str:
+    """One message per rebalance — what changed, the resulting book, why.
+
+    Previously the runner sent this *and* a separate book dump for the
+    same event, ninety seconds apart, the first carrying the *previous*
+    cycle's rationale. One event, one message, led by the delta.
+    """
     if not result.get("ok"):
         return f"🤖 Agent PM did not trade: {result.get('reason', 'unknown')}"
+
+    # Always name the book and the currency. This sim is quoted in USD
+    # while the real account reports in CHF, and the two used to appear in
+    # adjacent messages with neither one labelled.
     lines = [
-        f"🧪 *Agent PM (simulated)* — equity ${result['equity']:,.0f}",
-        "",
-        "*Target book:* "
-        + (", ".join(f"{s} {w:.0%}" for s, w in sorted(result["weights"].items())) or "all cash"),
-        f"*Why:* {_clip(result.get('rationale', ''), 500)}",
-        f"_Watching: {_clip(result.get('watch', ''), 200)}_",
+        "🧪 *Agent PM — simulated book* (USD, not the trading account)",
+        f"equity {_money(float(result['equity']))}",
     ]
+
+    opened, closed = result.get("opened") or [], result.get("closed") or []
+    if opened or closed:
+        change = []
+        if closed:
+            change.append("exited " + ", ".join(f"`{s}`" for s in closed))
+        if opened:
+            change.append("opened " + ", ".join(f"`{s}`" for s in opened))
+        lines.append("*Changed:* " + " · ".join(change))
+    elif result.get("turnover"):
+        lines.append("*Changed:* weights only, no names added or dropped")
+    else:
+        lines.append("*Changed:* nothing")
+
+    lines.append("")
+    if book is not None:
+        lines.append("*Book now:*")
+        lines.extend(format_holdings(book))
+    else:
+        lines.append(
+            "*Target book:* "
+            + (
+                ", ".join(f"`{s}` {w:.0%}" for s, w in sorted(result["weights"].items()))
+                or "all cash"
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            f"*Why:* {clip(result.get('rationale', ''), 700)}",
+            f"_Watching: {clip(result.get('watch', ''), 300)}_",
+        ]
+    )
     if result.get("dropped"):
         lines.append(f"_(dropped off-universe/invalid: {', '.join(result['dropped'])})_")
-    lines.append(f"_turnover ${result['turnover']:,.0f} · costs ${result['costs']:,.2f}_")
+    lines.append(
+        f"_turnover {_money(float(result['turnover']))} · costs {_money(float(result['costs']))}_"
+    )
     return "\n".join(lines)

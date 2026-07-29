@@ -121,7 +121,87 @@ def test_llm_failure_is_reported_not_raised(mem: MemoryStore, tmp_path: Path) ->
 def test_digest_renders(mem: MemoryStore, tmp_path: Path) -> None:
     res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
     text = format_pm_digest(res)
-    assert "Agent PM" in text and "SMH 25%" in text and len(text) < 1500
+    assert "Agent PM" in text and "`SMH` 25%" in text and len(text) < 2000
+
+
+def test_digest_names_the_book_and_currency(mem: MemoryStore, tmp_path: Path) -> None:
+    """The sim posts USD into the same chat as a CHF-reporting real
+    account. An unlabelled equity figure reads as the other book."""
+    res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
+    text = format_pm_digest(res)
+    assert "simulated" in text.lower()
+    assert "USD" in text
+    assert "not the trading account" in text
+
+
+def test_digest_leads_with_what_changed(mem: MemoryStore, tmp_path: Path) -> None:
+    run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
+    res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"XLE": 0.2}), prices=PRICES)
+    assert res["closed"] == ["SMH"] and res["opened"] == ["XLE"]
+    text = format_pm_digest(res)
+    assert "Changed:" in text and "exited" in text and "opened" in text
+
+
+def test_digest_embeds_the_book_with_units(mem: MemoryStore, tmp_path: Path) -> None:
+    """One message per event: the digest carries the resulting holdings so
+    a second share-count-only message is not needed."""
+    res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
+    book = json.loads((tmp_path / "agent_pm" / "portfolio.json").read_text())
+    text = format_pm_digest(res, book)
+    assert "Book now:" in text
+    assert "sh ·" in text  # share count carries its unit
+    assert "cash" in text
+
+
+def test_rebalance_persists_marks(mem: MemoryStore, tmp_path: Path) -> None:
+    """/pm must render value and weight without a network call."""
+    run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
+    book = json.loads((tmp_path / "agent_pm" / "portfolio.json").read_text())
+    assert book["marks"]["SMH"] == pytest.approx(100.0)
+    assert book["marks_ts"]
+
+
+def test_mark_to_market_refreshes_marks(mem: MemoryStore, tmp_path: Path) -> None:
+    from trading.agents.pm import mark_to_market
+
+    run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
+    mark_to_market(tmp_path, prices={"SMH": 110.0, "SPY": 510.0})
+    book = json.loads((tmp_path / "agent_pm" / "portfolio.json").read_text())
+    assert book["marks"]["SMH"] == pytest.approx(110.0)
+
+
+class TestFormatHoldings:
+    def test_holdings_carry_units_value_and_weight(self) -> None:
+        from trading.agents.pm import format_holdings
+
+        lines = format_holdings(
+            {"holdings": {"GLD": 285.839}, "cash": 100.0, "marks": {"GLD": 285.6}}
+        )
+        body = "\n".join(lines)
+        assert "285.8 sh" in body  # shares, labelled
+        assert "$81.6k" in body  # value
+        assert "%" in body  # weight
+        assert "cash" in body
+
+    def test_unmarked_holding_is_flagged_not_guessed(self) -> None:
+        from trading.agents.pm import format_holdings
+
+        body = "\n".join(format_holdings({"holdings": {"GLD": 10.0}, "cash": 0.0, "marks": {}}))
+        assert "unmarked" in body
+        assert "sh" in body
+
+    def test_empty_book_says_all_cash(self) -> None:
+        from trading.agents.pm import format_holdings
+
+        assert "all cash" in "\n".join(format_holdings({"holdings": {}, "cash": 1.0}))
+
+    def test_stale_marks_are_disclosed(self) -> None:
+        from trading.agents.pm import _marks_age_note
+
+        old = (datetime.now(tz=timezone.utc) - timedelta(days=3)).isoformat()
+        assert "3d old" in _marks_age_note({"marks_ts": old})
+        assert _marks_age_note({"marks_ts": datetime.now(tz=timezone.utc).isoformat()}) == ""
+        assert _marks_age_note({}) == ""
 
 
 def test_daily_mark_and_performance(mem: MemoryStore, tmp_path: Path) -> None:

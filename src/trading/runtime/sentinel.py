@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from trading.core.logging import logger
+from trading.core.text import clip
 
 STATE_FILENAME = "sentinel.json"
 SPY_TRIGGER_PCT = -1.5  # day move that wakes the sentinel
@@ -296,8 +297,13 @@ def run_sentinel(
         "quiet": False,
         "triggers": triggers,
         "severity": str(verdict.get("severity", "caution")),
-        "assessment": str(verdict.get("assessment", ""))[:400],
-        "suggested_action": str(verdict.get("suggested_action", ""))[:200],
+        # Word-boundary clips, not raw slices: a severed suggestion
+        # ("…consider trimmin") is worse than no suggestion, and a cut
+        # through a Markdown pair can cost the whole message. Limits are
+        # generous because the alert is ~500 chars against a 4096 budget
+        # — the old 200-char cap was truncating the most useful line.
+        "assessment": clip(verdict.get("assessment", ""), 700),
+        "suggested_action": clip(verdict.get("suggested_action", ""), 400),
     }
 
 
