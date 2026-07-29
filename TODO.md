@@ -130,13 +130,48 @@ Order of operations:
       mutual-exclusion primitive. Mitigated by per-job locks, the 10s
       cooldown and the new submit-gate re-checks; a proper cross-path
       lock (file-lock around order submission) is the clean fix.
-- [ ] **Robustness overhaul** — the bot should be "so much more robust":
-      graceful reconnect/backoff on Telegram API flaps, command timeouts
-      that never wedge the poll loop, per-command error isolation (one
-      broken handler can't kill the bot), structured error replies
-      instead of silence, health self-reporting (/health with uptime,
-      last-poll age, handler failure counts), and tests for every
-      command path.
+- [~] **Robustness overhaul** — PARTIALLY SHIPPED 2026-07-29 (see the
+      "Telegram UX overhaul" block below). Done: structured error replies
+      instead of silence (state-aware: every rejection reports current
+      state + the valid next step), error isolation on the callback path,
+      and tests for every command path touched. STILL OPEN: graceful
+      reconnect/backoff on Telegram API flaps, per-command timeouts that
+      can't wedge the poll loop, and /health reporting uptime, last-poll
+      age and handler failure counts.
+
+- [x] **Telegram UX overhaul — SHIPPED 2026-07-29** (commits 652d5a8,
+      e989034; 856 tests). Five batches, driven by defects visible in a
+      real 2026-07-29 chat transcript:
+      1. *Alert readability*: three raw `[:N]` slices were cutting alerts
+         mid-word — worst was the sentinel's `suggested_action` capped at
+         200 chars, i.e. the most useful line in a risk alert. New
+         `core/text.py::clip` cuts on word boundaries AND repairs Markdown
+         delimiters severed by the cut (an orphaned `_` makes Telegram
+         reject the whole message). PM holdings now carry shares + value +
+         weight (a bare `GLD: 285.839` sat 90s from `GLD 10%`, same ticker,
+         different unit, neither labelled); every equity figure names its
+         book and currency (sim USD vs account CHF).
+      2. *Forgiving commands*: `src/trading/bot/registry.py` — typo
+         suggestions (`/postions` → `/positions`), usage examples, and
+         unrecognised prose routed to the copilot. Matching requires a
+         first-letter match + 0.7 similarity because at difflib's default
+         `/whats` matched **/halt**; multi-word messages need 0.85.
+      3. *Inline keyboards*: `src/trading/bot/keyboards.py` — buttons on
+         approval, sentinel and mode preview. Every state-changing button
+         carries the id of the thing it was minted for, so tapping a
+         three-week-old approval prompt is refused instead of approving
+         today's basket. Buttons are stripped BEFORE the action runs.
+         **No order path gets a button** (no /buy /sell /close /flatten,
+         and not /halt either — it force-flattens); pinned by a test.
+      4. *Conversational copilot*: `copilot/thread.py` — rolling turn
+         window with 45-min expiry and symbol carry-forward; answer length
+         computed in code as a hard limit ("What is XLV?" drew four
+         sentences of thesis before).
+      5. *Operator voice*: objections + tone-graded mandates
+         (`copilot/mandates.py`) journaled and fed to the committee/PM;
+         reply-to-alert context; capability manifest so the copilot says
+         "I can't access fundamentals" rather than improvising.
+      Docs: `docs/COPILOT.md`. No new mypy errors (223 before and after).
 - [x] **Copilot Phase 1 (read-only) — SHIPPED 2026-07-16.**
       `src/trading/copilot/` + `/ask` `/why SYM` `/thesis SYM`
       `/committee SYM` in the bot. Derives decisions+transcripts from
@@ -150,7 +185,29 @@ Order of operations:
       confirmation; never the raw order path (rule #4). Design gates:
       tool whitelist, daily spend budget, human confirmation for
       anything gated. Build only after Phase 1 proves useful in daily
-      use.
+      use. NOTE 2026-07-29: partly anticipated — the inline keyboards
+      already queue whitelisted actions behind a tap, and mandates let the
+      operator steer the next run. What remains is the copilot itself
+      *proposing* an action from a conversation.
+
+- [ ] **Journal the ranked candidate ladder** (surfaced 2026-07-29 while
+      answering "why JPM and not GS?"). `_compute_top_candidates` builds
+      the ranked list with scores each cycle, writes it into
+      `cycle_approval_pending.json`, and `cycle.py` deletes that file when
+      the decision lands. So the one piece of evidence that answers "why X
+      and not Y" for the MOMENTUM book — "JPM ranked 6th at +9.2%, GS 23rd
+      at +4.1%, cutoff top-9" — exists for ~10 minutes and is discarded.
+      Fix: journal the ladder (kind `candidates`) so the copilot can cite
+      it. Small; high explainability value. Note this is a momentum-book
+      gap only — committee/PM picks come with prose rationale already.
+
+- [ ] **Grade operator objections and mandates** (surfaced 2026-07-29).
+      Both are journaled with symbols and timestamps, so the existing
+      `predictions` / `grade_prediction` / `source_trust` machinery could
+      score them at a 21-day horizon and answer the question that
+      actually matters: do the operator's overrides add or destroy value?
+      Without this there is no feedback loop on his own calls — the one
+      participant in the system currently exempt from calibration.
 
 ## Phase 12 — HedgeAgents-inspired upgrades (backlog, added 2026-07-11)
 
