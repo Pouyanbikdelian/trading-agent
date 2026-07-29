@@ -19,6 +19,8 @@ nowhere.
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 
 from trading.core.config import settings
@@ -47,12 +49,19 @@ def _truncate(text: str) -> str:
     return text[: MAX_MESSAGE_LENGTH - 32] + "\n\n... [truncated]"
 
 
-async def send_message(text: str, *, parse_mode: str | None = "Markdown") -> bool:
+async def send_message(
+    text: str,
+    *,
+    parse_mode: str | None = "Markdown",
+    reply_markup: dict[str, Any] | None = None,
+) -> bool:
     """POST a message to the configured Telegram chat.
 
     Returns True on a 2xx response, False on any failure (network, auth,
     or missing config). Never raises — callers are typically inside a
     runner loop where one bad alert mustn't kill the cycle.
+
+    ``reply_markup`` attaches an inline keyboard (see ``bot.keyboards``).
     """
     creds = _enabled()
     if creds is None:
@@ -60,13 +69,15 @@ async def send_message(text: str, *, parse_mode: str | None = "Markdown") -> boo
         return False
     token, chat_id = creds
     url = f"{BOT_API_BASE}/bot{token}/sendMessage"
-    payload: dict[str, str | bool] = {
+    payload: dict[str, Any] = {
         "chat_id": chat_id,
         "text": _truncate(text),
         "disable_web_page_preview": True,
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(url, json=payload)
@@ -79,7 +90,12 @@ async def send_message(text: str, *, parse_mode: str | None = "Markdown") -> boo
         return False
 
 
-def send_message_sync(text: str, *, parse_mode: str | None = "Markdown") -> bool:
+def send_message_sync(
+    text: str,
+    *,
+    parse_mode: str | None = "Markdown",
+    reply_markup: dict[str, Any] | None = None,
+) -> bool:
     """Synchronous variant — useful from CLI commands and tests."""
     creds = _enabled()
     if creds is None:
@@ -87,13 +103,15 @@ def send_message_sync(text: str, *, parse_mode: str | None = "Markdown") -> bool
         return False
     token, chat_id = creds
     url = f"{BOT_API_BASE}/bot{token}/sendMessage"
-    payload: dict[str, str | bool] = {
+    payload: dict[str, Any] = {
         "chat_id": chat_id,
         "text": _truncate(text),
         "disable_web_page_preview": True,
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     try:
         with httpx.Client(timeout=10.0) as client:
             r = client.post(url, json=payload)

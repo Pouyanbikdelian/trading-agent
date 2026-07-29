@@ -1062,7 +1062,16 @@ class Runner:
             mem = default_store()
             ctx = await asyncio.to_thread(build_context, settings.state_dir, settings.data_dir)
             result = await asyncio.to_thread(run_agent_pm, ctx, mem, settings.state_dir)
-            self.alerts.info(format_pm_digest(result))
+            # Pass the freshly-written book so the digest is self-contained:
+            # one message showing what changed AND the resulting holdings
+            # with units. Previously the book arrived separately, in share
+            # counts, next to a digest quoting target weights.
+            book = None
+            with contextlib.suppress(Exception):
+                import json as _json
+
+                book = _json.loads((settings.state_dir / "agent_pm" / "portfolio.json").read_text())
+            self.alerts.info(format_pm_digest(result, book))
         except Exception:
             logger.bind(component="agent_pm").exception("agent PM run failed")
 
@@ -1141,7 +1150,12 @@ class Runner:
             result = await asyncio.to_thread(run_sentinel, settings.state_dir)
             if result.get("quiet"):
                 return
-            self.alerts.info(format_sentinel_alert(result))
+            from trading.bot.keyboards import sentinel_keyboard
+
+            # Read-only buttons only: "look closer" and "argue about it".
+            # Trimming from a tap is deliberately not offered — see
+            # bot/keyboards.py on what gets a button and what stays typed.
+            self.alerts.info(format_sentinel_alert(result), buttons=sentinel_keyboard())
         except Exception:
             logger.bind(component="sentinel").exception("sentinel run failed")
 
@@ -1230,8 +1244,13 @@ class Runner:
             snap = self.cycle.runner_store.latest_snapshot()
             ccy = getattr(snap, "base_currency", None) or "USD" if snap else "USD"
             arrow, verb = ("📈", "up") if pct >= 0 else ("📉", "down")
+            # Name the book explicitly. This figure is the real IBKR
+            # account in its base currency; the simulated PM sleeve posts
+            # USD equity into the same chat, and unlabelled the two read
+            # as one number that moved.
+            env_label = "live" if settings.trading_env == "live" else "paper"
             lines = [
-                f"{arrow} Equity {verb} {pct:+.2%} today",
+                f"{arrow} Trading account ({env_label}) {verb} {pct:+.2%} today",
                 f"Total equity: {ccy} {last:,.0f}",
             ]
             # Portfolio beta vs SPY — cache reads only; skip silently if

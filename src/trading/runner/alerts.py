@@ -17,9 +17,10 @@ Behavior
 
 from __future__ import annotations
 
+import json
 import urllib.parse
 import urllib.request
-from typing import Literal
+from typing import Any, Literal
 
 from trading.core.logging import logger
 
@@ -43,11 +44,11 @@ class TelegramAlerts:
         self.enabled = bool(enabled and token and chat_id)
         self._sent: list[tuple[Level, str]] = []  # in-memory log for tests
 
-    def info(self, msg: str) -> None:
-        self._send("info", msg)
+    def info(self, msg: str, *, buttons: dict[str, Any] | None = None) -> None:
+        self._send("info", msg, buttons=buttons)
 
-    def warning(self, msg: str) -> None:
-        self._send("warning", msg)
+    def warning(self, msg: str, *, buttons: dict[str, Any] | None = None) -> None:
+        self._send("warning", msg, buttons=buttons)
 
     def error(self, msg: str) -> None:
         self._send("error", msg)
@@ -61,17 +62,19 @@ class TelegramAlerts:
         the runner alerted on without mocking ``urllib``."""
         return list(self._sent)
 
-    def _send(self, level: Level, msg: str) -> None:
+    def _send(self, level: Level, msg: str, *, buttons: dict[str, Any] | None = None) -> None:
         self._sent.append((level, msg))
         if not self.enabled:
             return
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        data = urllib.parse.urlencode(
-            {
-                "chat_id": str(self.chat_id),
-                "text": msg,
-            }
-        ).encode("utf-8")
+        fields: dict[str, str] = {
+            "chat_id": str(self.chat_id),
+            "text": msg,
+        }
+        if buttons is not None:
+            # Form-encoded endpoint: reply_markup must be a JSON *string*.
+            fields["reply_markup"] = json.dumps(buttons)
+        data = urllib.parse.urlencode(fields).encode("utf-8")
         try:
             req = urllib.request.Request(url, data=data, method="POST")
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:

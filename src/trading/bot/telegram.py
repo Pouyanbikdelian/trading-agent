@@ -45,6 +45,7 @@ from typing import Any
 import httpx
 import pandas as pd
 
+from trading.bot import registry
 from trading.core.config import settings
 from trading.core.logging import logger
 
@@ -133,6 +134,22 @@ def _split_for_telegram(text: str, limit: int = 3800, max_chunks: int = 4) -> li
     return chunks
 
 
+class ButtonReply(str):
+    """A reply that carries an inline keyboard.
+
+    str subclass for the same reason as PlainReply: every existing caller
+    and test that treats a reply as text keeps working, and only the send
+    path needs to know about the extra attribute.
+    """
+
+    markup: dict[str, Any]
+
+    def __new__(cls, text: str, markup: dict[str, Any]) -> ButtonReply:
+        obj = super().__new__(cls, text)
+        obj.markup = markup
+        return obj
+
+
 class PlainReply(str):
     """A reply that must be sent WITHOUT Telegram markdown parsing.
 
@@ -145,7 +162,13 @@ class PlainReply(str):
 
 
 async def _send(
-    client: httpx.AsyncClient, token: str, chat_id: str, text: str, *, plain: bool = False
+    client: httpx.AsyncClient,
+    token: str,
+    chat_id: str,
+    text: str,
+    *,
+    plain: bool = False,
+    reply_markup: dict[str, Any] | None = None,
 ) -> None:
     """POST sendMessage. Never raises — bot loop must keep running.
 
@@ -154,13 +177,19 @@ async def _send(
     backticks). On any 400 we retry once as plain text so the operator
     *always* sees the message; aesthetics lose to deliverability.
     ``plain=True`` skips markdown entirely (see PlainReply).
+
+    ``reply_markup`` attaches an inline keyboard. It survives the plain-text
+    retry: losing the buttons would leave the operator staring at an
+    approval prompt with no way to answer it except typing.
     """
     url = f"{BOT_API_BASE}/bot{token}/sendMessage"
-    base = {
+    base: dict[str, Any] = {
         "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": True,
     }
+    if reply_markup is not None:
+        base["reply_markup"] = reply_markup
     try:
         if plain:
             r = await client.post(url, json=base, timeout=10.0)
@@ -177,6 +206,42 @@ async def _send(
             logger.warning(f"telegram send failed: {r.status_code} {r.text[:200]}")
     except Exception as e:
         logger.warning(f"telegram send error: {e}")
+
+
+async def _answer_callback(
+    client: httpx.AsyncClient, token: str, callback_id: str, text: str = ""
+) -> None:
+    """Acknowledge a button tap so Telegram stops showing the spinner.
+
+    Unanswered callbacks leave the button spinning for ~30s, which reads
+    as "the bot is dead". Answered first, acted on second — the ack is
+    cosmetic and must never be blocked by the work."""
+    try:
+        await client.post(
+            f"{BOT_API_BASE}/bot{token}/answerCallbackQuery",
+            json={"callback_query_id": callback_id, "text": text[:200]},
+            timeout=10.0,
+        )
+    except Exception as e:
+        logger.warning(f"telegram answerCallbackQuery error: {e}")
+
+
+async def _strip_keyboard(
+    client: httpx.AsyncClient, token: str, chat_id: str, message_id: int
+) -> None:
+    """Remove the inline keyboard from a message that has been acted on.
+
+    Idempotency by removal: once the buttons are gone the same prompt
+    cannot be tapped twice, which matters when the two taps would be
+    ``Approve`` and then ``Approve`` again on a re-run cycle."""
+    try:
+        await client.post(
+            f"{BOT_API_BASE}/bot{token}/editMessageReplyMarkup",
+            json={"chat_id": chat_id, "message_id": message_id, "reply_markup": {}},
+            timeout=10.0,
+        )
+    except Exception as e:
+        logger.warning(f"telegram editMessageReplyMarkup error: {e}")
 
 
 async def _get_updates(client: httpx.AsyncClient, token: str, offset: int) -> list[dict[str, Any]]:
@@ -247,7 +312,7 @@ def _cmd_hold(args: list[str]) -> str:
     from trading.runner.holds import load_holds, save_holds
 
     if not args:
-        return "usage: `/hold NVDA` — freeze a position out of the rebalance cycle"
+        return registry.usage_for("/hold") + " — freeze a position out of the rebalance cycle"
     sym = args[0].upper()
     holds = load_holds(settings.state_dir)
     if sym in holds:
@@ -255,18 +320,48 @@ def _cmd_hold(args: list[str]) -> str:
     holds.add(sym)
     save_holds(settings.state_dir, holds)
     logger.bind(symbol=sym).info("telegram hold added")
-    return (
+    msg = (
         f"\U0001f4cc `{sym}` pinned — the cycle will not touch it (no sells, no adds).\n"
         f"_Manual `/sell {sym} ...` and `/flatten` still work. "
         f"`/unhold {sym}` to release._"
     )
+    # Ghost pins were one of the six defects found in the July 2026 audit:
+    # a pin on a symbol we don't own still reserves a basket slot, so the
+    # cycle quietly buys one name fewer. Flag it at the moment it's made,
+    # when the operator can still say "that wasn't what I meant".
+    if not _holds_position(sym):
+        msg += (
+            f"\n\n⚠️ `{sym}` isn't in the current book. The pin still reserves "
+            "a basket slot, so the cycle will hold one position fewer. "
+            f"`/unhold {sym}` if that wasn't intended."
+        )
+    return msg
+
+
+def _holds_position(symbol: str) -> bool:
+    """True if the latest snapshot shows a non-zero position in ``symbol``.
+
+    Best-effort: an unreadable snapshot returns True so we stay quiet
+    rather than warn wrongly."""
+    try:
+        from trading.runner.state import RunnerStore
+
+        snap = RunnerStore(settings.state_dir / "runner.db").latest_snapshot()
+        if snap is None or not snap.positions:
+            return False
+        return any(
+            p.instrument.symbol.upper() == symbol.upper() and p.quantity
+            for p in snap.positions.values()
+        )
+    except Exception:
+        return True
 
 
 def _cmd_unhold(args: list[str]) -> str:
     from trading.runner.holds import load_holds, save_holds
 
     if not args:
-        return "usage: `/unhold NVDA`"
+        return registry.usage_for("/unhold")
     sym = args[0].upper()
     holds = load_holds(settings.state_dir)
     if sym not in holds:
@@ -415,7 +510,8 @@ def _cmd_pm(args: list[str]) -> str:
             return f"could not request PM run: `{e}`"
         return "🧪 Agent PM convening — rebalance lands here in ~1 minute."
 
-    from trading.agents.pm import performance
+    from trading.agents.pm import _marks_age_note, _money, format_holdings, performance
+    from trading.core.text import clip as _clip
 
     pm_dir = settings.state_dir / "agent_pm"
     try:
@@ -423,9 +519,12 @@ def _cmd_pm(args: list[str]) -> str:
     except Exception:
         return "_no agent-PM book yet — it trades Mondays 14:30 UTC, or `/pm run` to convene now._"
     perf = performance(settings.state_dir)
+    # Name the book and the currency on every figure: this sim is USD,
+    # the real account reports CHF, and they land in the same chat.
     lines = [
-        f"🧪 *Agent PM (simulated)* — equity ${perf.get('equity', 0.0):,.0f} "
-        f"({perf.get('return_pct', 0.0):+.2f}% since inception)"
+        "🧪 *Agent PM — simulated book* (USD, not the trading account)",
+        f"equity {_money(float(perf.get('equity', 0.0)))} "
+        f"({perf.get('return_pct', 0.0):+.2f}% since inception)",
     ]
     if "spy_return_pct" in perf:
         alpha = perf["return_pct"] - perf["spy_return_pct"]
@@ -433,19 +532,49 @@ def _cmd_pm(args: list[str]) -> str:
             f"vs SPY {perf['spy_return_pct']:+.2f}% same window (alpha {alpha:+.2f}pp) "
             f"· max DD {perf['max_drawdown_pct']:.1f}% · {perf['points']} marks"
         )
-    lines.append(f"cash ${float(book.get('cash', 0.0)):,.0f}")
-    for sym, qty in sorted(book.get("holdings", {}).items()):
-        lines.append(f"  {sym}: {qty:g}")
+    lines.append("")
+    lines.append(f"*Holdings*{_marks_age_note(book)}")
+    lines.extend(format_holdings(book))
     try:
         last = _json.loads((pm_dir / "last_run.json").read_text())
-        lines.append(f"_Last rationale: {str(last.get('rationale', ''))[:300]}_")
+        lines.append("")
+        lines.append(f"_Last rationale: {_clip(last.get('rationale', ''), 400)}_")
     except Exception:
         pass
     return "\n".join(lines)
 
 
+def _halt_state() -> tuple[bool, str]:
+    """(halted, reason) from halt.json; (False, "") when absent/unreadable."""
+    halt_path = settings.state_dir / "halt.json"
+    if not halt_path.exists():
+        return False, ""
+    try:
+        payload = json.loads(halt_path.read_text())
+        return bool(payload.get("halted", False)), str(payload.get("reason", ""))
+    except Exception:
+        return False, ""
+
+
 def _cmd_resume() -> str:
     from trading.core.file_lock import file_lock
+
+    # Report the state rather than acting on a no-op. "✅ RESUMED" when
+    # nothing was halted reads as confirmation that a halt was lifted,
+    # which is exactly the wrong thing to believe on a phone.
+    halted, _reason = _halt_state()
+    counter_path = settings.state_dir / "consecutive_errors.json"
+    if not halted:
+        stale = 0
+        try:
+            if counter_path.exists():
+                stale = int(json.loads(counter_path.read_text()).get("count", 0))
+        except Exception:
+            pass
+        if not stale:
+            return "not halted — nothing to resume. `/status` for the current state."
+        # A live failure counter is still worth clearing even unhalted:
+        # it is what would trip the next auto-halt.
 
     halt_path = settings.state_dir / "halt.json"
     with file_lock(halt_path):
@@ -464,7 +593,6 @@ def _cmd_resume() -> str:
     # subsequent failure (counter still at N, next failure → N+1 ≥
     # threshold → auto-halt). The runner reloads this file at cycle
     # start so the zero takes effect on the next cycle.
-    counter_path = settings.state_dir / "consecutive_errors.json"
     counter_was = None
     try:
         if counter_path.exists():
@@ -475,7 +603,7 @@ def _cmd_resume() -> str:
         logger.bind(component="bot").exception("could not reset consecutive_errors")
 
     logger.info("telegram resume")
-    msg = "✅ *RESUMED* — halt cleared."
+    msg = "✅ *RESUMED* — halt cleared." if halted else "✅ Was not halted; state re-armed."
     if counter_was and counter_was > 0:
         msg += f"\n   Failure counter reset (was {counter_was})."
     return msg
@@ -518,7 +646,13 @@ def _cmd_status() -> str:
             "\n_cycle approval required for every cycle (REQUIRE\\_CYCLE\\_APPROVAL=true)._"
         )
 
-    return "\n".join(lines)
+    # The three things an operator almost always checks straight after
+    # /status. All read-only.
+    from trading.bot.keyboards import read_only_keyboard
+
+    markup = read_only_keyboard("/positions", "/orders", "/health")
+    text = "\n".join(lines)
+    return ButtonReply(text, markup) if markup else text
 
 
 def _heartbeat_age() -> float | None:
@@ -685,11 +819,14 @@ def _cmd_mode(args: list[str]) -> str:
     _, pending_path, _ = _mode_paths()
     write_pending(pending_path, pending)
 
-    return (
+    from trading.bot.keyboards import mode_keyboard
+
+    return ButtonReply(
         f"📋 *Mode change preview — `{target.value.upper()}`*\n"
         f"current: `{cur.mode.value}` → proposed: `{target.value}`\n\n"
         f"{preview_lines}\n\n"
-        "Reply *CONFIRM* (or /confirm) within 10 min, or /cancel."
+        "Tap to decide, or reply /confirm · /cancel within 10 min.",
+        mode_keyboard(target.value),
     )
 
 
@@ -704,7 +841,13 @@ def _cmd_confirm() -> str:
     mode_path, pending_path, trigger_path = _mode_paths()
     pending = read_pending(pending_path)
     if pending is None:
-        return "no pending mode change. Send `/mode <name>` first."
+        from trading.runtime.mode import read_mode
+
+        cur = read_mode(mode_path)
+        return (
+            f"nothing staged to confirm — mode is still `{cur.mode.value}`.\n"
+            "Preview a change first: `/mode bull|neutral|defense|bear|flatten`."
+        )
     if pending.is_expired():
         clear_pending(pending_path)
         return "⏱️ pending mode change expired. Re-send `/mode <name>`."
@@ -731,7 +874,11 @@ def _cmd_cancel() -> str:
     _, pending_path, _ = _mode_paths()
     pending = read_pending(pending_path)
     if pending is None:
-        return "nothing to cancel."
+        return (
+            "nothing to cancel — no mode change is staged.\n"
+            "_(`/cancel` discards a `/mode` preview. To stop a working order "
+            "use `/cancel_order`; to stop a pending cycle use `/reject`.)_"
+        )
     clear_pending(pending_path)
     return f"❌ pending `{pending.new_mode.value}` change cancelled."
 
@@ -948,7 +1095,7 @@ def _cmd_sell(args: list[str]) -> str:
 def _cmd_close(args: list[str]) -> str:
     r"""``/close SYM`` — flatten a specific position (alias for ``/sell SYM all``)."""
     if len(args) < 1:
-        return "usage: `/close SYMBOL` — e.g. `/close AAPL`"
+        return registry.usage_for("/close")
     return _queue_command("close", {"symbol": args[0].upper()})
 
 
@@ -957,11 +1104,54 @@ def _cmd_flatten() -> str:
     return _queue_command("flatten", {})
 
 
+def _in_flight_order_ids() -> list[str] | None:
+    """Client order ids currently PENDING/SUBMITTED, or None if unreadable."""
+    try:
+        from datetime import timedelta
+
+        from trading.core.types import OrderStatus
+        from trading.execution.store import OrderStore
+
+        store = OrderStore(settings.state_dir / "orders.db")
+        recent = store.load_orders(since=datetime.now(tz=timezone.utc) - timedelta(days=2))
+    except Exception:
+        return None
+    live = {OrderStatus.PENDING, OrderStatus.SUBMITTED}
+    return [o.client_order_id for (o, st, _bid) in recent if st in live]
+
+
 def _cmd_cancel_order(args: list[str]) -> str:
-    r"""``/cancel_order CLIENT_ORDER_ID`` — cancel a specific pending order."""
+    r"""``/cancel_order CLIENT_ORDER_ID`` — cancel a specific pending order.
+
+    Checks the id against the local store before queueing. A typo'd id
+    used to be accepted and silently do nothing; the operator, watching
+    from a phone, would believe an order had been pulled when it was
+    still working.
+    """
     if not args:
-        return "usage: `/cancel_order CLIENT_ORDER_ID`"
-    return _queue_command("cancel_order", {"client_order_id": args[0]})
+        return f"{registry.usage_for('/cancel_order')}\n`/pending` lists what's in flight."
+
+    wanted = args[0]
+    ids = _in_flight_order_ids()
+    if ids is None:
+        # Store unreadable — queue it anyway rather than block a cancel,
+        # but say the check did not happen. _queue_command returns None on
+        # success (the runner posts the real outcome), so an error string
+        # from it wins; otherwise we speak up about the skipped check.
+        err = _queue_command("cancel_order", {"client_order_id": wanted})
+        return err or "_couldn't verify against the local order store — queued anyway._"
+    if not ids:
+        return "no orders in flight — nothing to cancel. `/orders` for recent history."
+
+    # Accept a unique prefix: /pending prints ids truncated to 14 chars.
+    matches = [i for i in ids if i == wanted] or [i for i in ids if i.startswith(wanted)]
+    if not matches:
+        listed = "\n".join(f"  `{i[:14]}`" for i in ids[:8])
+        return f"no in-flight order matching `{wanted}`. Currently working:\n{listed}"
+    if len(matches) > 1:
+        listed = "\n".join(f"  `{i[:14]}`" for i in matches[:8])
+        return f"`{wanted}` matches {len(matches)} orders — be more specific:\n{listed}"
+    return _queue_command("cancel_order", {"client_order_id": matches[0]})
 
 
 def _cmd_orders() -> str:
@@ -1102,7 +1292,7 @@ def _cmd_fx_rate(args: list[str]) -> str:
     Argument parsing: either two args (``USD CHF``) or one pair (``USDCHF``).
     """
     if not args:
-        return "usage: `/fx-rate USD CHF` — show reference rate"
+        return registry.usage_for("/fx-rate")
     if len(args) == 1 and len(args[0]) >= 6:
         base, quote = args[0][:3].upper(), args[0][3:6].upper()
     else:
@@ -1467,6 +1657,34 @@ def _write_cycle_decision(action: str, **extra: Any) -> bool:
     return True
 
 
+def _no_pending_cycle_reply(cmd: str) -> str:
+    """Why there is nothing to approve, and what to do instead.
+
+    An approval command arriving out of order is the commonest 'wrong
+    order' case: the operator saw a basket, got distracted, and replied
+    after the window closed. Saying only "no cycle awaiting approval"
+    leaves them guessing whether they missed it, whether it executed, or
+    whether the runner is even alive — so report the state we can see.
+    """
+    lines = [f"nothing awaiting approval, so `{cmd}` has no cycle to act on."]
+
+    age = _heartbeat_age()
+    if age is None:
+        lines.append("The runner hasn't completed a cycle yet — check `/health`.")
+    elif age > 3600:
+        lines.append(f"Last cycle finished {age / 3600:.0f}h ago. `/health` for the full picture.")
+    else:
+        lines.append(f"Last cycle finished {age / 60:.0f} min ago — `/orders` shows what it did.")
+
+    if not getattr(settings, "require_cycle_approval", False):
+        lines.append(
+            "_Approval isn't enabled (REQUIRE\\_CYCLE\\_APPROVAL=false), "
+            "so cycles submit without asking._"
+        )
+    lines.append("Run `/cycle` to start one now.")
+    return "\n".join(lines)
+
+
 def _cmd_approve(args: list[str]) -> str:
     r"""``/approve [N|flat]`` — approve the currently-pending cycle.
 
@@ -1476,7 +1694,7 @@ def _cmd_approve(args: list[str]) -> str:
     """
     pending = _read_cycle_pending()
     if pending is None:
-        return "_no cycle awaiting approval._ Run `/cycle` to trigger one."
+        return _no_pending_cycle_reply("/approve")
 
     short_id = str(pending.get("id", ""))[:8]
     if not args:
@@ -1509,7 +1727,7 @@ def _cmd_reject() -> str:
     r"""``/reject`` — refuse the currently-pending cycle; no orders go out."""
     pending = _read_cycle_pending()
     if pending is None:
-        return "_no cycle awaiting approval._"
+        return _no_pending_cycle_reply("/reject")
     short_id = str(pending.get("id", ""))[:8]
     if not _write_cycle_decision("reject"):
         return "_pending cycle expired._"
@@ -1527,7 +1745,7 @@ def _cmd_pick(args: list[str]) -> str:
     """
     pending = _read_cycle_pending()
     if pending is None:
-        return "_no cycle awaiting approval._"
+        return _no_pending_cycle_reply("/pick")
 
     if not pending.get("can_pick", False):
         return (
@@ -1574,7 +1792,9 @@ def _cmd_pick(args: list[str]) -> str:
     )
 
 
-async def _cmd_copilot(question: str, symbol: str | None = None) -> str:
+async def _cmd_copilot(
+    question: str, symbol: str | None = None, *, replied_to: str | None = None
+) -> str:
     """Read-only Investment Committee Copilot (docs/COPILOT.md).
 
     Runs in a worker thread: the engine does SQLite + one HTTP call and
@@ -1591,6 +1811,7 @@ async def _cmd_copilot(question: str, symbol: str | None = None) -> str:
             state_dir=settings.state_dir,
             data_dir=settings.data_dir,
             symbol=symbol,
+            replied_to=replied_to,
         )
         # LLM output is not markdown-safe — send verbatim (PlainReply).
         return PlainReply(text)
@@ -1599,8 +1820,12 @@ async def _cmd_copilot(question: str, symbol: str | None = None) -> str:
         return f"copilot error: {type(e).__name__}: {e}"
 
 
-async def _dispatch(text: str) -> str | None:
-    """Parse a command and return a reply, or None to stay silent."""
+async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
+    """Parse a command and return a reply, or None to stay silent.
+
+    ``replied_to`` is the text of the message the operator replied to —
+    an alert, usually. It lets "why this alert?" mean something.
+    """
     if not text:
         return None
     if not text.startswith("/"):
@@ -1608,13 +1833,16 @@ async def _dispatch(text: str) -> str | None:
         # assistant now, no /ask prefix needed. Guard rails: very short
         # fragments ("ok", "👍") get a hint instead of an LLM call, and
         # the copilot's own 15s rate limit bounds a chatty evening.
-        # NOTE Phase-1 limit: each message stands alone — the copilot
-        # has no conversation memory yet, so pack context into one
-        # message ("is the MU thesis still valid?" not "and MU?").
         stripped = text.strip()
         if len(stripped) < 8 or not any(c.isalpha() for c in stripped):
             return "Ask me a full question — e.g. `why did we buy MU?` — or /help for commands."
-        return await _cmd_copilot(stripped)
+        # A forward-looking instruction ("high conviction on GS, look at
+        # it next round") is stored for the next run rather than answered.
+        # Captured BEFORE the copilot so it costs no LLM call.
+        mandate_reply = _maybe_capture_mandate(stripped)
+        if mandate_reply is not None:
+            return mandate_reply
+        return await _cmd_copilot(stripped, replied_to=replied_to)
     parts = shlex.split(text)
     cmd = parts[0].lower().split("@")[0]  # strip "@botname" suffix
     args = parts[1:]
@@ -1655,11 +1883,11 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_committee()
     if cmd == "/ask":
         if not args:
-            return "usage: /ask <question>  — e.g. /ask why are we so heavy in semis?"
+            return registry.usage_for("/ask")
         return await _cmd_copilot(" ".join(args))
     if cmd == "/why":
         if not args:
-            return "usage: /why <SYMBOL>"
+            return registry.usage_for("/why")
         return await _cmd_copilot(
             f"Why did we buy, sell, or hold {args[0].upper()}? What was the thesis, "
             "the votes and dissent, did the trade execute, and what happened after?",
@@ -1667,7 +1895,7 @@ async def _dispatch(text: str) -> str | None:
         )
     if cmd == "/thesis":
         if not args:
-            return "usage: /thesis <SYMBOL>"
+            return registry.usage_for("/thesis")
         return await _cmd_copilot(
             f"What was the committee's most recent thesis for {args[0].upper()}, what were "
             "its invalidation conditions, and is it still valid given current data?",
@@ -1727,7 +1955,226 @@ async def _dispatch(text: str) -> str | None:
         return _cmd_refresh()
     if cmd == "/reconnect":
         return _cmd_reconnect()
-    return f"unknown command `{cmd}` — try /help"
+    if cmd in ("/forget", "/newtopic"):
+        return _cmd_forget()
+    if cmd in ("/mandates", "/notes"):
+        return _cmd_mandates(args)
+    if cmd == "/soften":
+        return _cmd_restrength(args, "soft")
+    if cmd == "/harden":
+        return _cmd_restrength(args, "strong")
+    return await _cmd_unknown(cmd, text)
+
+
+_STRENGTH_ICON = {"strong": "🔴", "medium": "🟠", "soft": "🟡"}
+
+
+def _maybe_capture_mandate(text: str) -> str | None:
+    """Store a forward-looking instruction, or return None to pass through.
+
+    The reply always states the strength that was read and how to change
+    it. Tone parsing is deterministic but not infallible, and the moment
+    to catch a misreading is now — while the operator is still looking at
+    the screen — not after a run has acted on it.
+    """
+    from trading.copilot.mandates import MandateStore, looks_like_mandate
+
+    if not looks_like_mandate(text):
+        return None
+    try:
+        from trading.copilot.engine import _known_symbols
+        from trading.copilot.thread import extract_symbols
+
+        known = _known_symbols(settings.state_dir)
+    except Exception:
+        known = set()
+    try:
+        # Universe membership, not just held names: the point of a mandate
+        # is often a name we do NOT hold yet.
+        from trading.agents.pm import UNIVERSE, _stock_universe
+
+        known = set(known) | set(UNIVERSE) | set(_stock_universe())
+    except Exception:
+        logger.bind(component="bot").warning("mandate: universe unavailable for symbol match")
+
+    try:
+        symbols = extract_symbols(text, known)
+        m = MandateStore(settings.state_dir).add(text, symbols=symbols)
+    except Exception as e:
+        logger.exception("mandate capture failed")
+        return f"couldn't save that instruction: `{type(e).__name__}: {e}`"
+
+    syms = f"\nnames: {', '.join(f'`{s}`' for s in m.symbols)}" if m.symbols else ""
+    nudge = {
+        "strong": "The desk will act on it unless there's a concrete reason not to.",
+        "medium": "The desk will weigh it seriously and tell you if it declines.",
+        "soft": "The desk will consider it and may drop it.",
+    }[m.strength]
+    return (
+        f"📌 Noted for the next run — read as {_STRENGTH_ICON[m.strength]} *{m.strength}*.\n"
+        f"_{m.text}_{syms}\n\n"
+        f"{nudge}\n"
+        f"_Wrong reading? `/harden {m.id}` or `/soften {m.id}`. "
+        f"`/mandates` to review, `/mandates drop {m.id}` to remove._\n"
+        "_Risk caps still apply — a mandate can't lift a position or cluster limit._"
+    )
+
+
+def _format_mandate(m: Any) -> str:
+    icon = _STRENGTH_ICON.get(m.strength, "•")
+    syms = f" [{', '.join(m.symbols)}]" if m.symbols else ""
+    return f"{icon} `{m.id}` *{m.strength}*{syms}\n   _{m.text}_"
+
+
+def _cmd_mandates(args: list[str]) -> str:
+    """``/mandates`` — list standing instructions; ``/mandates clear`` wipes;
+    ``/mandates drop M123`` cancels one."""
+    from trading.copilot.mandates import MandateStore
+
+    store = MandateStore(settings.state_dir)
+    if args and args[0].lower() in ("clear", "reset"):
+        n = store.clear()
+        return f"🧹 cleared {n} standing instruction(s)."
+    if args and args[0].lower() in ("drop", "cancel", "remove"):
+        if len(args) < 2:
+            return "usage: `/mandates drop M123` — id from `/mandates`"
+        return (
+            f"❌ dropped `{args[1]}`."
+            if store.cancel(args[1])
+            else f"no active mandate `{args[1]}`."
+        )
+    active = store.active()
+    if not active:
+        return (
+            "_no standing instructions._\n"
+            "Just tell me one — e.g. `high conviction on GS, look at it next round`."
+        )
+    lines = ["📌 *Standing instructions for the next run*"]
+    lines.extend(_format_mandate(m) for m in active)
+    lines.append("\n_`/soften ID` · `/harden ID` · `/mandates drop ID`_")
+    return "\n".join(lines)
+
+
+def _cmd_restrength(args: list[str], strength: str) -> str:
+    """Re-grade a mandate whose tone the parser read wrongly.
+
+    The echo-back on capture exists so a misread is visible; this is how
+    it gets corrected, without retyping the instruction."""
+    from trading.copilot.mandates import MandateStore
+
+    if not args:
+        return f"usage: `/{'soften' if strength == 'soft' else 'harden'} M123`"
+    m = MandateStore(settings.state_dir).set_strength(args[0], strength)
+    if m is None:
+        return f"no active mandate `{args[0]}`. `/mandates` to list."
+    return f"✅ `{m.id}` is now *{strength}*.\n   _{m.text}_"
+
+
+def _cmd_forget() -> str:
+    """``/forget`` — drop the conversation thread and start clean.
+
+    The thread expires on its own after 45 minutes, but an operator who
+    has just changed subject shouldn't have to wait or work around a
+    carried-over symbol. Journaled exchanges are untouched — this clears
+    what the copilot *carries forward*, not what it recorded."""
+    from trading.copilot.thread import Thread
+
+    Thread(settings.state_dir).clear()
+    return "🧹 conversation reset — next question starts fresh.\n_(journaled exchanges are kept)_"
+
+
+async def _cmd_unknown(cmd: str, text: str) -> str:
+    """Handle a leading-slash token that matched no command.
+
+    Two outcomes, both better than the old "unknown command — try /help":
+
+    * a near miss (``/postions``) gets the command it almost spelled,
+      matched locally with no LLM call;
+    * anything else is treated as a question. ``/whats up with INTC`` is
+      an operator talking, not a malformed command, and the copilot can
+      answer it. Being wrong here is cheap — the copilot is read-only and
+      has no order path.
+    """
+    from trading.bot.registry import suggest
+
+    # Trailing words point at a sentence ("/hows the book") rather than a
+    # mistyped command ("/postions"), so demand a stronger match before
+    # offering one.
+    has_trailing_words = len(text.strip().split()) > 1
+    hits = suggest(cmd, strict=has_trailing_words)
+    if hits:
+        options = " or ".join(f"`{h}`" for h in hits)
+        return f"no command `{cmd}` — did you mean {options}?"
+
+    # Not close to anything: read it as a sentence. Strip the slash so the
+    # copilot sees plain prose.
+    question = text.strip().lstrip("/").strip()
+    if len(question) < 8 or not any(c.isalpha() for c in question):
+        return f"no command `{cmd}` — `/help` for the list, or just ask me a question."
+    return await _cmd_copilot(question)
+
+
+async def _handle_callback(data: str) -> str:
+    """Turn a button tap into the same work the typed command would do.
+
+    Every state-changing action re-validates its binding token against
+    what is pending *now*. The button in the chat history is a request to
+    act on one specific cycle or mode; if that thing is gone, the tap is
+    refused with an explanation rather than silently redirected onto
+    whatever is current. This is the whole reason callback data carries a
+    token at all — see ``bot.keyboards``.
+    """
+    from trading.bot import keyboards
+
+    parsed = keyboards.decode(data)
+    if parsed is None:
+        return "that button is from an older version of the bot — use `/help` for current commands."
+    action, tokentail = parsed
+
+    if action == keyboards.ACT_RUN:
+        # Read-only commands only, checked against the allowlist rather
+        # than trusting the callback payload.
+        if tokentail not in keyboards.SAFE_COMMANDS:
+            logger.warning(f"callback requested non-allowlisted command: {tokentail!r}")
+            return f"`{tokentail}` can't be run from a button."
+        reply = await _dispatch(tokentail)
+        return reply if reply is not None else "done."
+
+    if action in (keyboards.ACT_APPROVE, keyboards.ACT_APPROVE_SCALED, keyboards.ACT_REJECT):
+        cid, _, scale = tokentail.partition(":")
+        pending = _read_cycle_pending()
+        if pending is None:
+            return _no_pending_cycle_reply("that button")
+        current = str(pending.get("id", ""))[:8]
+        if cid and current and cid != current:
+            # The dangerous case: an old approval prompt still sitting in
+            # the chat history. Approving it would submit a basket the
+            # operator never looked at.
+            return (
+                f"that button belongs to cycle `{cid}`, but the pending cycle is "
+                f"`{current}`. Scroll to the newest prompt — it shows the basket "
+                "you'd actually be approving."
+            )
+        if action == keyboards.ACT_REJECT:
+            return _cmd_reject()
+        return _cmd_approve([scale] if scale else [])
+
+    if action in (keyboards.ACT_MODE_CONFIRM, keyboards.ACT_MODE_CANCEL):
+        from trading.runtime.mode import read_pending
+
+        _, pending_path, _ = _mode_paths()
+        staged = read_pending(pending_path)
+        if staged is None:
+            return "nothing staged any more — that preview was already applied or cancelled."
+        staged_mode = getattr(staged.new_mode, "value", str(staged.new_mode))
+        if tokentail and tokentail != staged_mode:
+            return (
+                f"that button was for `{tokentail}`, but `{staged_mode}` is staged now. "
+                "Use the newest preview."
+            )
+        return _cmd_confirm() if action == keyboards.ACT_MODE_CONFIRM else _cmd_cancel()
+
+    return "unrecognised button."
 
 
 _OFFSET_FILE = "telegram_offset.json"
@@ -1767,6 +2214,61 @@ def _save_offset(offset: int) -> None:
         logger.exception("failed to persist telegram offset")
 
 
+async def _send_reply(client: httpx.AsyncClient, token: str, chat_id: str, reply: str) -> None:
+    """Send a dispatch result, honouring PlainReply and ButtonReply.
+
+    A long reply is chunked; the keyboard rides on the LAST chunk so the
+    buttons sit directly above the compose box where the operator's thumb
+    already is, rather than scrolled off above three screens of text.
+    """
+    plain = isinstance(reply, PlainReply)
+    markup = getattr(reply, "markup", None) if isinstance(reply, ButtonReply) else None
+    chunks = _split_for_telegram(reply)
+    for i, chunk in enumerate(chunks):
+        last = i == len(chunks) - 1
+        await _send(
+            client,
+            token,
+            chat_id,
+            chunk,
+            plain=plain,
+            reply_markup=markup if last else None,
+        )
+
+
+async def _process_callback(
+    client: httpx.AsyncClient, token: str, chat_id: str, cb: dict[str, Any]
+) -> None:
+    """Authorize, acknowledge, disarm, then act — in that order.
+
+    Disarming (stripping the keyboard) happens *before* the action runs.
+    The alternative — act, then strip — leaves a live Approve button for
+    the duration of the work, and the runner takes seconds to pick up a
+    decision. Two impatient taps in that window is exactly the double
+    submission this ordering prevents.
+    """
+    cb_id = str(cb.get("id", ""))
+    cb_chat = str((cb.get("message") or {}).get("chat", {}).get("id"))
+    if cb_chat != str(chat_id):
+        logger.warning(f"telegram unauthorized callback from chat {cb_chat}")
+        await _answer_callback(client, token, cb_id, "not authorized")
+        return
+
+    await _answer_callback(client, token, cb_id)
+    message_id = (cb.get("message") or {}).get("message_id")
+    if message_id is not None:
+        await _strip_keyboard(client, token, chat_id, int(message_id))
+
+    try:
+        reply = await _handle_callback(str(cb.get("data", "")))
+    except Exception as e:
+        # One bad button must not take the poll loop down with it.
+        logger.exception("callback handler failed")
+        reply = f"button failed: {type(e).__name__}: {e}"
+
+    await _send_reply(client, token, chat_id, reply)
+
+
 async def run_bot() -> None:
     """Run the long-poll loop. Blocks until cancelled.
 
@@ -1796,6 +2298,12 @@ async def run_bot() -> None:
                 # (operator re-sends) beats re-executing one.
                 offset = max(offset, upd["update_id"] + 1)
                 _save_offset(offset)
+
+                cb = upd.get("callback_query")
+                if cb:
+                    await _process_callback(client, token, chat_id, cb)
+                    continue
+
                 msg = upd.get("message") or upd.get("edited_message")
                 if not msg:
                     continue
@@ -1805,8 +2313,10 @@ async def run_bot() -> None:
                     logger.warning(f"telegram unauthorized chat {msg_chat}")
                     continue
                 text = msg.get("text", "")
-                reply = await _dispatch(text)
+                # Telegram hands us the full original when the operator
+                # replies to a message. That is how "why this alert?"
+                # becomes answerable — otherwise "this" has no referent.
+                replied_to = (msg.get("reply_to_message") or {}).get("text")
+                reply = await _dispatch(text, replied_to=replied_to)
                 if reply is not None:
-                    plain = isinstance(reply, PlainReply)
-                    for chunk in _split_for_telegram(reply):
-                        await _send(client, token, chat_id, chunk, plain=plain)
+                    await _send_reply(client, token, chat_id, reply)

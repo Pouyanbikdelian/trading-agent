@@ -121,6 +121,26 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     # --- operator state
     ctx["holds"] = sorted(load_holds(state_dir))
     ctx["k_override"] = load_k_override(state_dir)
+    # What the operator has argued recently, in his own words. A /hold is
+    # an instruction the code enforces; an objection is a VIEW the
+    # committee should weigh and may reasonably disagree with. Without
+    # this the operator's reasoning dies in the chat scrollback while the
+    # same debate repeats a week later.
+    try:
+        from trading.copilot.thread import recent_objections
+
+        ctx["operator_objections"] = recent_objections(state_dir, limit=5)
+    except Exception as e:
+        logger.bind(component="agents").warning(f"context: objections unavailable ({e})")
+    # Standing instructions left for this run ("high conviction on GS,
+    # look at it next round"). Graded by the tone he used — see
+    # copilot.mandates. Advisory: the risk caps still bind afterwards.
+    try:
+        from trading.copilot.mandates import for_context as _mandates_for_context
+
+        ctx["operator_mandates"] = _mandates_for_context(state_dir)
+    except Exception as e:
+        logger.bind(component="agents").warning(f"context: mandates unavailable ({e})")
 
     # --- monitors (already-computed state files; no recomputation)
     ctx["macro_dial"] = _read_json(state_dir / "macro_monitor.json").get("readings", {})
