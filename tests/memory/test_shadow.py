@@ -202,6 +202,37 @@ class TestWhySlices:
         assert mem.edge_by_rank(leg_days=21) == []
 
 
+class TestWhichNamesCountAsTaken:
+    """Regression, 2026-07-30 first live run: the ledger logged "recorded
+    30 candidate(s), 501 taken". Membership in ``target_weights`` was read
+    as "bought", but the signal carries a key for every instrument in the
+    universe — so every ranked name was labelled taken, the ledger held no
+    passed rows, and /edge would have reported no measurable spread
+    forever while looking like it was working."""
+
+    def test_only_non_zero_weights_count(self) -> None:
+        from trading.runner.cycle import bought_symbols
+
+        weights = {"EQUITY:AAPL": 0.10, "EQUITY:MSFT": 0.0, "EQUITY:GS": 0.0}
+        assert bought_symbols(weights) == {"AAPL"}
+
+    def test_a_universe_of_zeros_buys_nothing(self) -> None:
+        from trading.runner.cycle import bought_symbols
+
+        assert bought_symbols({f"EQUITY:S{i}": 0.0 for i in range(501)}) == set()
+
+    def test_shorts_count_as_held(self) -> None:
+        from trading.runner.cycle import bought_symbols
+
+        assert bought_symbols({"EQUITY:SPY": -0.15}) == {"SPY"}
+
+    def test_empty_and_none_are_safe(self) -> None:
+        from trading.runner.cycle import bought_symbols
+
+        assert bought_symbols({}) == set()
+        assert bought_symbols(None) == set()
+
+
 class TestEdgeCommandPresentation:
     def test_a_thin_sample_is_flagged_rather_than_stated_as_fact(self) -> None:
         """Nine names is a story. The report must say so on its face —

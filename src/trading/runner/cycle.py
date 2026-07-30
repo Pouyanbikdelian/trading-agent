@@ -74,6 +74,29 @@ class CycleReport(BaseModel):
     duration_ms: float = 0.0
 
 
+def bought_symbols(target_weights: dict[str, float] | None) -> set[str]:
+    """The names a signal actually wants held, as bare symbols.
+
+    ``_weights_to_signal`` emits a key for EVERY instrument in the
+    universe, the overwhelming majority of them at 0.0. Membership in
+    ``target_weights`` therefore means "was considered", not "was
+    bought" — a distinction with no consequence anywhere else in the
+    cycle, because the risk manager sizes off the weight rather than the
+    key set.
+
+    It matters exactly once: labelling shadow rows. Read as membership,
+    the first live run marked all 501 universe names ``taken``, leaving
+    the counterfactual ledger with no ``passed`` rows and no ability to
+    answer the only question it exists for. Hence a named function with
+    a test rather than a set comprehension inline.
+    """
+    return {
+        key.split(":")[-1].upper()
+        for key, weight in (target_weights or {}).items()
+        if abs(float(weight)) > 1e-9
+    }
+
+
 class Cycle:
     """All-in-one bound cycle. Construct once at startup; call ``run_cycle()``
     every bar."""
@@ -1412,7 +1435,7 @@ class Cycle:
             ranked = self._compute_top_candidates(prices, cfg=cfg, top_n=30)
             if not ranked:
                 return
-            chosen = {k.split(":")[-1].upper() for k in (signal.target_weights or {})}
+            chosen = bought_symbols(signal.target_weights)
             px_by_symbol = {k.split(":")[-1].upper(): v for k, v in (last_prices or {}).items()}
             conditions = self._regime_fingerprint(prices)
             pctiles = self._entry_percentiles(prices)
@@ -1420,13 +1443,16 @@ class Cycle:
             from trading.memory.store import default_store
 
             mem = default_store()
+            taken = 0
             try:
                 for i, (raw_symbol, score) in enumerate(ranked, start=1):
                     sym = str(raw_symbol).split(":")[-1].upper()
+                    is_taken = sym in chosen
+                    taken += is_taken
                     mem.add_shadow(
                         symbol=sym,
                         origin="ladder",
-                        disposition="taken" if sym in chosen else "passed",
+                        disposition="taken" if is_taken else "passed",
                         rank=i,
                         score=float(score),
                         why=f"rank {i} of {len(ranked)}",
@@ -1436,8 +1462,13 @@ class Cycle:
                     )
             finally:
                 mem.close()
+            # Count the rows actually written, not the size of ``chosen``.
+            # The two differ (a held name can sit outside the top 30), and
+            # logging the latter is what hid the all-taken bug behind a
+            # number too large to be a basket.
             logger.bind(component="cycle").info(
-                f"shadow ledger: recorded {len(ranked)} candidate(s), {len(chosen)} taken"
+                f"shadow ledger: recorded {len(ranked)} candidate(s), "
+                f"{taken} taken / {len(ranked) - taken} passed"
             )
         except Exception:
             logger.bind(component="cycle").exception("shadow ladder write failed")
