@@ -22,6 +22,7 @@ writes serialized by the runner. Markdown writes are atomic
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -105,6 +106,41 @@ CREATE TABLE IF NOT EXISTS source_trust (
     last_seen   REAL NOT NULL,
     kind        TEXT NOT NULL DEFAULT 'unknown'   -- wire|outlet|social|gossip|...
 );
+
+-- The counterfactual ledger: what the desk considered and did NOT do.
+--
+-- Every other table here records outcomes of actions taken, which makes
+-- the whole memory blind to the only comparison that establishes whether
+-- selection has edge: did the names we picked beat the names we passed
+-- on? The ranked candidate ladder is computed every cycle and currently
+-- discarded within minutes. This is where it goes instead.
+--
+-- Forward returns are stored alongside the benchmark over the identical
+-- window, because in a rising market a ledger of passed names looks
+-- excellent on absolute return alone and the comparison is meaningless.
+CREATE TABLE IF NOT EXISTS shadow (
+    id           TEXT PRIMARY KEY,       -- sh-<uuid8>
+    ts           REAL NOT NULL,
+    symbol       TEXT NOT NULL,
+    origin       TEXT NOT NULL,          -- ladder|committee|mandate|risk|operator
+    disposition  TEXT NOT NULL,          -- taken|passed|cut_by_risk|cut_by_cap
+    rank         INTEGER,                -- position in the ranked ladder, if any
+    score        REAL,                   -- the ranking score at the time
+    why          TEXT NOT NULL DEFAULT '',
+    conditions   TEXT NOT NULL DEFAULT '{}',  -- JSON regime fingerprint
+    px_at        REAL,                   -- close on the day of the decision
+    pctile_52w   REAL,                   -- 0=52w low, 1=52w high, at decision time
+    r5           REAL,
+    r21          REAL,
+    r63          REAL,
+    bench5       REAL,
+    bench21      REAL,
+    bench63      REAL,
+    graded_ts    REAL                    -- set once the 63d leg lands
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_ts ON shadow(ts);
+CREATE INDEX IF NOT EXISTS idx_shadow_symbol ON shadow(symbol);
+CREATE INDEX IF NOT EXISTS idx_shadow_open ON shadow(graded_ts);
 """
 
 
@@ -145,7 +181,25 @@ class MemoryStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate(self._conn)
         return self._conn
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Additive column migrations.
+
+        ``CREATE TABLE IF NOT EXISTS`` silently does nothing when the
+        table already exists, so a column added to ``_SCHEMA`` never
+        reaches a database created before the change. Each entry here is
+        an ``ADD COLUMN`` that is safe to attempt repeatedly — a
+        duplicate-column error means the migration already ran.
+
+        Additive only. Nothing in this module drops or rewrites a column;
+        the memory spine is append-only by design.
+        """
+        for table, column, decl in (("shadow", "pctile_52w", "REAL"),):
+            with contextlib.suppress(sqlite3.OperationalError):  # already present
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -169,16 +223,57 @@ class MemoryStore:
             args = (kind,)
         q += " ORDER BY id DESC LIMIT ?"
         rows = self.conn.execute(q, (*args, n)).fetchall()
-        return [
-            {
-                "id": r["id"],
-                "ts": datetime.fromtimestamp(r["ts"], tz=timezone.utc),
-                "kind": r["kind"],
-                "actor": r["actor"],
-                "payload": json.loads(r["payload"]),
-            }
-            for r in rows
-        ]
+        return [self._journal_row(r) for r in rows]
+
+    def journal_window(
+        self,
+        days: float,
+        *,
+        kinds: list[str] | None = None,
+        per_kind_limit: int = 40,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Journal rows from the last ``days``, bucketed by kind.
+
+        ``journal_tail(n)`` takes the newest N rows of anything, which is
+        not a time window at all: one committee run alone writes ten rows
+        (eight takes, a debate, a ruling), so "the last 80 rows" can be
+        three days in a busy week and a fortnight in a quiet one. Any
+        caller reasoning about "this week" was reasoning about the wrong
+        set of rows.
+
+        Bucketing by kind then matters for the same reason. Graded
+        outcomes are the only rows carrying measured truth, and in a flat
+        list they compete for prompt space with daily heartbeats that
+        carry none — so a busy week could push every outcome out of view.
+        A per-kind budget guarantees each kind survives.
+        """
+        cutoff = _now() - days * 86400.0
+        q = "SELECT * FROM journal WHERE ts >= ?"
+        args: list[Any] = [cutoff]
+        if kinds:
+            q += f" AND kind IN ({','.join('?' * len(kinds))})"
+            args.extend(kinds)
+        q += " ORDER BY id DESC"
+
+        out: dict[str, list[dict[str, Any]]] = {}
+        for r in self.conn.execute(q, tuple(args)):
+            bucket = out.setdefault(r["kind"], [])
+            if len(bucket) < per_kind_limit:
+                bucket.append(self._journal_row(r))
+        # Oldest-first within each kind reads as a narrative of the week.
+        for bucket in out.values():
+            bucket.reverse()
+        return out
+
+    @staticmethod
+    def _journal_row(r: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": r["id"],
+            "ts": datetime.fromtimestamp(r["ts"], tz=timezone.utc),
+            "kind": r["kind"],
+            "actor": r["actor"],
+            "payload": json.loads(r["payload"]),
+        }
 
     # ----------------------------------------------------------- episodes
 
@@ -420,6 +515,273 @@ class MemoryStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    # ------------------------------------------------------------- shadow
+
+    def add_shadow(
+        self,
+        *,
+        symbol: str,
+        origin: str,
+        disposition: str,
+        rank: int | None = None,
+        score: float | None = None,
+        why: str = "",
+        conditions: dict[str, Any] | None = None,
+        px_at: float | None = None,
+        pctile_52w: float | None = None,
+        ts: float | None = None,
+    ) -> str:
+        """Record one considered-and-decided name. Never raises on a dup."""
+        sid = _short("sh")
+        self.conn.execute(
+            """INSERT INTO shadow
+               (id, ts, symbol, origin, disposition, rank, score, why,
+                conditions, px_at, pctile_52w)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                sid,
+                ts if ts is not None else _now(),
+                symbol.upper(),
+                origin,
+                disposition,
+                rank,
+                score,
+                why[:300],
+                json.dumps(conditions or {}, default=str),
+                px_at,
+                pctile_52w,
+            ),
+        )
+        return sid
+
+    # The legs a shadow row is graded at, and the column pair each fills.
+    SHADOW_LEGS: tuple[tuple[int, str, str], ...] = (
+        (5, "r5", "bench5"),
+        (21, "r21", "bench21"),
+        (63, "r63", "bench63"),
+    )
+
+    def ungraded_shadow(self, leg_days: int, asof: datetime | None = None) -> list[sqlite3.Row]:
+        """Rows old enough for ``leg_days`` whose leg is still empty.
+
+        Legs are filled independently rather than all-at-once at 63d: a
+        5-day read available next week is worth more than a complete row
+        available in a quarter, and the 5d column is what makes a bad
+        selection process visible early."""
+        col = {d: c for d, c, _b in self.SHADOW_LEGS}[leg_days]
+        cutoff = (asof or datetime.now(tz=timezone.utc)).timestamp() - leg_days * 86400.0
+        return self.conn.execute(
+            f"SELECT * FROM shadow WHERE {col} IS NULL AND ts <= ? ORDER BY ts",
+            (cutoff,),
+        ).fetchall()
+
+    def grade_shadow_leg(
+        self, shadow_id: str, leg_days: int, *, ret: float, bench: float | None = None
+    ) -> None:
+        """Fill one forward-return leg. ``bench`` is the benchmark over the
+        identical window — a return without it is not a result."""
+        col, bcol = {d: (c, b) for d, c, b in self.SHADOW_LEGS}[leg_days]
+        graded = ", graded_ts = ?" if leg_days == self.SHADOW_LEGS[-1][0] else ""
+        params: list[Any] = [ret, bench]
+        if graded:
+            params.append(_now())
+        params.append(shadow_id)
+        self.conn.execute(
+            f"UPDATE shadow SET {col} = ?, {bcol} = ?{graded} WHERE id = ?",
+            tuple(params),
+        )
+
+    def edge_report(self, leg_days: int = 21, since_days: int = 365) -> list[dict[str, Any]]:
+        """Picks vs passes, net of the benchmark, grouped by origin.
+
+        The headline number is ``spread`` — mean excess return of taken
+        names minus mean excess return of passed names. Positive means the
+        selection step added something; negative means the desk would have
+        done better with the names it rejected, which is the finding this
+        whole table exists to be able to report.
+
+        ``n`` is returned alongside every figure and is not decoration: a
+        spread computed on nine names is an anecdote.
+        """
+        return self._edge_split(
+            "origin", leg_days=leg_days, since_days=since_days, label_key="origin"
+        )
+
+    # --- the "why" slices -------------------------------------------------
+    #
+    # /edge answers whether the selection step added value. These answer
+    # where the answer comes from. All three are plain SQL over columns
+    # already stored at decision time: no model is asked to speculate
+    # about causes, because a fluent invented explanation is worse than
+    # no explanation — it gets remembered.
+
+    def edge_by_rank(
+        self,
+        leg_days: int = 21,
+        since_days: int = 365,
+        buckets: tuple[tuple[str, int, int], ...] = (
+            ("1-5", 1, 5),
+            ("6-15", 6, 15),
+            ("16-30", 16, 30),
+        ),
+    ) -> list[dict[str, Any]]:
+        """Mean excess return by position on the ranked ladder.
+
+        The discrimination test, and the most important of the three. If
+        the top bucket beats the bottom, the score works and only the cut
+        is misplaced — a tuning problem. If the buckets are flat, the
+        score is not ranking anything and the desk is drawing at random
+        from a shortlist, which no amount of cut-tuning fixes.
+
+        Reported over all rows regardless of disposition: within a rank
+        bucket the taken/passed split is mostly an artefact of where the
+        cut fell, so splitting it here would answer a different question.
+        """
+        case = " ".join(
+            f"WHEN rank BETWEEN {lo} AND {hi} THEN '{label}'" for label, lo, hi in buckets
+        )
+        return self._edge_grouped(
+            f"CASE {case} ELSE 'other' END",
+            leg_days=leg_days,
+            since_days=since_days,
+            label_key="rank_bucket",
+            where="rank IS NOT NULL",
+            order=[label for label, _lo, _hi in buckets],
+        )
+
+    def edge_by_condition(
+        self, key: str = "vol_bucket", leg_days: int = 21, since_days: int = 365
+    ) -> list[dict[str, Any]]:
+        """Picks vs passes, split by what the market was doing that day.
+
+        This is the slice that turns a flat verdict into a usable rule.
+        "Our picks underperform" is not tradeable; "our picks beat passes
+        in high dispersion and lose in low dispersion" is a condition the
+        desk can check before sizing.
+
+        ``key`` names a field inside the stored regime fingerprint.
+        """
+        if not key.replace("_", "").isalnum():
+            raise ValueError(f"unsafe condition key: {key!r}")
+        return self._edge_split(
+            f"json_extract(conditions, '$.{key}')",
+            leg_days=leg_days,
+            since_days=since_days,
+            label_key="condition",
+            where=f"json_extract(conditions, '$.{key}') IS NOT NULL",
+        )
+
+    def edge_by_entry(
+        self,
+        leg_days: int = 21,
+        since_days: int = 365,
+        edges: tuple[float, ...] = (0.5, 0.8, 0.95),
+    ) -> list[dict[str, Any]]:
+        """Mean excess return by where in the 52-week range the name sat.
+
+        Tests a rule the Quant charter already asserts — that a name at
+        the very top of its range is maximally far from any trend stop —
+        against what actually happened, rather than leaving it as a
+        plausible-sounding instruction in a prompt.
+        """
+        lo, mid, hi = edges
+        case = (
+            f"CASE WHEN pctile_52w < {lo} THEN 'below {lo:g}' "
+            f"WHEN pctile_52w < {mid} THEN '{lo:g}-{mid:g}' "
+            f"WHEN pctile_52w < {hi} THEN '{mid:g}-{hi:g}' "
+            f"ELSE 'above {hi:g}' END"
+        )
+        return self._edge_grouped(
+            case,
+            leg_days=leg_days,
+            since_days=since_days,
+            label_key="entry_bucket",
+            where="pctile_52w IS NOT NULL",
+            order=[f"below {lo:g}", f"{lo:g}-{mid:g}", f"{mid:g}-{hi:g}", f"above {hi:g}"],
+        )
+
+    # --- shared machinery -------------------------------------------------
+
+    def _leg_cols(self, leg_days: int) -> tuple[str, str]:
+        return {d: (c, b) for d, c, b in self.SHADOW_LEGS}[leg_days]
+
+    def _edge_grouped(
+        self,
+        group_sql: str,
+        *,
+        leg_days: int,
+        since_days: int,
+        label_key: str,
+        where: str = "1=1",
+        order: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """One row per group: n and mean excess return, no taken/passed split."""
+        col, bcol = self._leg_cols(leg_days)
+        rows = self.conn.execute(
+            f"""SELECT {group_sql} AS grp, COUNT(*) AS n,
+                       AVG({col} - COALESCE({bcol}, 0.0)) AS excess
+                FROM shadow
+                WHERE {col} IS NOT NULL AND ts >= ? AND {where}
+                GROUP BY grp""",
+            (_now() - since_days * 86400.0,),
+        ).fetchall()
+        out = [
+            {label_key: r["grp"], "n": r["n"], "excess": r["excess"], "leg_days": leg_days}
+            for r in rows
+        ]
+        if order:
+            rank = {label: i for i, label in enumerate(order)}
+            out.sort(key=lambda s: rank.get(str(s[label_key]), len(rank)))
+        else:
+            out.sort(key=lambda s: -s["n"])
+        return out
+
+    def _edge_split(
+        self,
+        group_sql: str,
+        *,
+        leg_days: int,
+        since_days: int,
+        label_key: str,
+        where: str = "1=1",
+    ) -> list[dict[str, Any]]:
+        """One row per group, split into taken vs passed with the spread."""
+        col, bcol = self._leg_cols(leg_days)
+        rows = self.conn.execute(
+            f"""SELECT {group_sql} AS grp,
+                       CASE WHEN disposition = 'taken' THEN 'taken' ELSE 'passed' END AS side,
+                       COUNT(*) AS n,
+                       AVG({col}) AS ret,
+                       AVG({col} - COALESCE({bcol}, 0.0)) AS excess
+                FROM shadow
+                WHERE {col} IS NOT NULL AND ts >= ? AND {where}
+                GROUP BY grp, side""",
+            (_now() - since_days * 86400.0,),
+        ).fetchall()
+
+        by_group: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            slot = by_group.setdefault(r["grp"], {label_key: r["grp"], "leg_days": leg_days})
+            slot[f"n_{r['side']}"] = r["n"]
+            slot[f"{r['side']}_ret"] = r["ret"]
+            slot[f"{r['side']}_excess"] = r["excess"]
+
+        out: list[dict[str, Any]] = []
+        for slot in by_group.values():
+            taken = slot.get("taken_excess")
+            passed = slot.get("passed_excess")
+            # A spread needs both sides. A group that only ever produces
+            # 'taken' rows (a mandate the desk always honours) has no
+            # counterfactual and must report None rather than zero.
+            slot["spread"] = (
+                None if taken is None or passed is None else float(taken) - float(passed)
+            )
+            slot.setdefault("n_taken", 0)
+            slot.setdefault("n_passed", 0)
+            out.append(slot)
+        out.sort(key=lambda s: -(s["n_taken"] + s["n_passed"]))
+        return out
+
     # -------------------------------------------------------------- trust
 
     def bump_trust(self, source: str, *, hit: bool, kind: str | None = None) -> None:
@@ -471,6 +833,7 @@ class MemoryStore:
             "lessons": c.execute("SELECT COUNT(*) FROM lessons").fetchone()[0],
             "predictions": c.execute("SELECT COUNT(*) FROM predictions").fetchone()[0],
             "sources": c.execute("SELECT COUNT(*) FROM source_trust").fetchone()[0],
+            "shadow": c.execute("SELECT COUNT(*) FROM shadow").fetchone()[0],
             "dossiers": len(self.dossiers()),
         }
 

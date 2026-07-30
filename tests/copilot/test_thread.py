@@ -325,11 +325,19 @@ class TestAccuracyDiscipline:
 
         assert "say plainly which piece you cannot access" in CHARTER.lower()
 
-    def test_charter_handles_ambiguity_by_stating_the_reading(self) -> None:
+    def test_charter_handles_ambiguity_without_announcing_it(self) -> None:
+        """Rewritten 2026-07-30. The rule used to say "say what you took it
+        to mean in your first clause", and the model complied on every
+        reply — "I'm taking your message to mean..." opened every message,
+        unambiguous ones included. Showing the assumed reading inside the
+        answer conveys the same thing without the tic; a clarifying
+        question stays the fallback when a question truly cannot be
+        answered."""
         from trading.copilot.engine import CHARTER
 
         c = CHARTER.lower()
-        assert "ambiguous" in c
+        assert "pick the most likely reading" in c
+        assert "never open with a formula" in c
         assert "one short clarifying question" in c
 
     def test_charter_treats_a_replied_to_alert_as_the_subject(self) -> None:

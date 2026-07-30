@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 import signal
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1209,6 +1209,7 @@ class Runner:
                 realized = float(s.iloc[-1]) / base - 1.0
                 mem.grade_prediction(row["id"], realized)
                 graded += 1
+            shadow_legs = self._grade_shadow(mem)
             snap = self.cycle.runner_store.latest_snapshot()
             mem.journal(
                 "daily",
@@ -1216,12 +1217,66 @@ class Runner:
                     "equity": getattr(snap, "equity", None) if snap else None,
                     "positions": len(getattr(snap, "positions", {}) or {}) if snap else 0,
                     "graded_today": graded,
+                    "shadow_legs_graded": shadow_legs,
                 },
             )
             if graded:
                 logger.bind(component="memory").info(f"graded {graded} due prediction(s)")
         except Exception:
             logger.bind(component="memory").exception("memory grader failed")
+
+    def _grade_shadow(self, mem: Any) -> int:
+        """Fill matured forward-return legs on the counterfactual ledger.
+
+        Each leg carries the benchmark over the identical window. A shadow
+        return without its benchmark is not a result — in a rising market
+        every passed name looks like a missed opportunity — so a row whose
+        benchmark cannot be computed is left ungraded rather than graded
+        against nothing, and picked up on a later pass.
+        """
+        from trading.runtime.portfolio_stats import _read_close
+
+        bench_symbol = "SPY"
+        bench = _read_close(settings.data_dir, bench_symbol)
+        if bench is None or len(bench) < 5:
+            logger.bind(component="memory").warning(
+                f"shadow grading skipped: no cached closes for {bench_symbol}"
+            )
+            return 0
+
+        def forward_return(series: Any, ts0: datetime, leg_days: int) -> float | None:
+            """Return over ``leg_days`` calendar days from the decision date."""
+            try:
+                start = ts0.replace(tzinfo=None)
+                past = series[series.index <= start]
+                fwd = series[series.index >= start + timedelta(days=leg_days)]
+                if past.empty or fwd.empty:
+                    return None
+                base = float(past.iloc[-1])
+                return (float(fwd.iloc[0]) / base - 1.0) if base else None
+            except Exception:
+                return None
+
+        filled = 0
+        closes: dict[str, Any] = {}
+        for leg_days, _col, _bcol in mem.SHADOW_LEGS:
+            for row in mem.ungraded_shadow(leg_days):
+                sym = row["symbol"]
+                if sym not in closes:
+                    closes[sym] = _read_close(settings.data_dir, sym)
+                series = closes[sym]
+                if series is None or len(series) < 5:
+                    continue
+                ts0 = datetime.fromtimestamp(row["ts"], tz=timezone.utc)
+                ret = forward_return(series, ts0, leg_days)
+                bret = forward_return(bench, ts0, leg_days)
+                if ret is None or bret is None:
+                    continue
+                mem.grade_shadow_leg(row["id"], leg_days, ret=ret, bench=bret)
+                filled += 1
+        if filled:
+            logger.bind(component="memory").info(f"shadow ledger: filled {filled} leg(s)")
+        return filled
 
     async def _run_daily_summary_async(self) -> None:
         """Daily after the US close: one-glance equity P&L note.

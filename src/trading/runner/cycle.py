@@ -332,6 +332,13 @@ class Cycle:
         signal = self._weights_to_signal(weights, instruments, ts_start, cfg=cfg)
         last_prices = self._last_prices(prices, instruments)
         instruments_by_key = {ins.key: ins for ins in instruments if ins.key in last_prices}
+
+        # 7b. Counterfactual ledger. The ranked ladder exists here whether
+        # or not approval mode is on; before this it was computed only for
+        # the approval prompt and discarded minutes later. Recording the
+        # names below the cut is the only way to ever answer whether the
+        # ranking step adds anything — see docs/LEARNING_ARCHITECTURE.md.
+        self._record_shadow_ladder(prices, signal, last_prices, cfg=cfg)
         # Sector tags for the risk manager's sector cap. cfg.sector_map wins;
         # otherwise derive key -> sector from the fundamentals cache so the cap
         # actually binds instead of silently no-op'ing on an empty map.
@@ -1382,6 +1389,126 @@ class Cycle:
                     f"top_candidates failed for strategy {name!r}"
                 )
         return None
+
+    def _record_shadow_ladder(
+        self,
+        prices: pd.DataFrame,
+        signal: Any,
+        last_prices: dict[str, float],
+        *,
+        cfg: RunnerConfig | None = None,
+    ) -> None:
+        """Write every ranked candidate to the counterfactual ledger.
+
+        Both sides of the cut, deliberately. The names above it are what
+        the desk did; the names below it are the control group, and
+        without a control group a track record is just a return series in
+        whatever market happened to occur.
+
+        Swallows everything. This is instrumentation — a failure here must
+        never cost a cycle.
+        """
+        try:
+            ranked = self._compute_top_candidates(prices, cfg=cfg, top_n=30)
+            if not ranked:
+                return
+            chosen = {k.split(":")[-1].upper() for k in (signal.target_weights or {})}
+            px_by_symbol = {k.split(":")[-1].upper(): v for k, v in (last_prices or {}).items()}
+            conditions = self._regime_fingerprint(prices)
+            pctiles = self._entry_percentiles(prices)
+
+            from trading.memory.store import default_store
+
+            mem = default_store()
+            try:
+                for i, (raw_symbol, score) in enumerate(ranked, start=1):
+                    sym = str(raw_symbol).split(":")[-1].upper()
+                    mem.add_shadow(
+                        symbol=sym,
+                        origin="ladder",
+                        disposition="taken" if sym in chosen else "passed",
+                        rank=i,
+                        score=float(score),
+                        why=f"rank {i} of {len(ranked)}",
+                        conditions=conditions,
+                        px_at=px_by_symbol.get(sym),
+                        pctile_52w=pctiles.get(sym),
+                    )
+            finally:
+                mem.close()
+            logger.bind(component="cycle").info(
+                f"shadow ledger: recorded {len(ranked)} candidate(s), {len(chosen)} taken"
+            )
+        except Exception:
+            logger.bind(component="cycle").exception("shadow ladder write failed")
+
+    def _entry_percentiles(self, prices: pd.DataFrame, window: int = 252) -> dict[str, float]:
+        """Where each name sits in its 52-week range today, 0=low, 1=high.
+
+        Stored on the shadow row so the ledger can later test whether
+        buying near the top of the range actually worked. The Quant
+        charter already asserts it does not; this is what would let that
+        assertion be checked rather than believed.
+        """
+        try:
+            closes = prices["close"] if "close" in getattr(prices, "columns", []) else prices
+            recent = closes.iloc[-window:]
+            lo, hi, last = recent.min(), recent.max(), closes.iloc[-1]
+            span = hi - lo
+            out: dict[str, float] = {}
+            for sym in getattr(closes, "columns", []):
+                s = float(span.get(sym, 0.0) or 0.0)
+                if s <= 0:  # flat or single-price history tells us nothing
+                    continue
+                out[str(sym).split(":")[-1].upper()] = float(
+                    min(1.0, max(0.0, (last[sym] - lo[sym]) / s))
+                )
+            return out
+        except Exception:
+            return {}
+
+    def _regime_fingerprint(self, prices: pd.DataFrame) -> dict[str, Any]:
+        """A coarse description of what the market looked like today.
+
+        Stamped on every shadow row so the ledger can later be sliced by
+        conditions — "our passes beat our picks, but only in high
+        dispersion" is a usable finding; "our passes beat our picks" on
+        its own is not actionable. Kept deliberately cheap and derived
+        only from the price frame already in hand: a fingerprint that
+        needs a network call would get skipped on exactly the days worth
+        recording.
+        """
+        try:
+            import numpy as np
+
+            closes = prices["close"] if "close" in getattr(prices, "columns", []) else prices
+            rets = closes.pct_change().dropna(how="all")
+            if rets.empty:
+                return {}
+            recent = rets.iloc[-21:]
+            vol = float(np.nanstd(recent.to_numpy()) * np.sqrt(252))
+            dispersion = float(np.nanmean(np.nanstd(recent.to_numpy(), axis=1)))
+            above_200 = None
+            if len(closes) >= 200:
+                ma = closes.rolling(200).mean().iloc[-1]
+                last = closes.iloc[-1]
+                above_200 = float((last > ma).mean())
+            return {
+                "vol_ann": round(vol, 4),
+                "vol_bucket": (
+                    "low"
+                    if vol < 0.12
+                    else "normal"
+                    if vol < 0.20
+                    else "elevated"
+                    if vol < 0.30
+                    else "stress"
+                ),
+                "dispersion": round(dispersion, 4),
+                "breadth_above_200d": None if above_200 is None else round(above_200, 3),
+            }
+        except Exception:
+            return {}
 
     def _build_cycle_id(self, account: Any) -> str:
         """Stable-ish id for this approval round. Uses the snapshot ts

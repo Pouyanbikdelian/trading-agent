@@ -70,6 +70,12 @@ REGISTRY: tuple[Spec, ...] = (
     Spec("/report", "weekly report"),
     Spec("/correlation", "12m correlation matrix of holdings", aliases=("/corr",)),
     Spec("/memory", "calibration, trust, lessons"),
+    Spec(
+        "/edge",
+        "did our picks beat the names we passed on?",
+        usage="/edge [why] [5|21|63]",
+        example="/edge why 21",
+    ),
     # --- cycle approval
     Spec(
         "/approve",

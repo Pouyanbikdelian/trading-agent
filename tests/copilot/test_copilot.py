@@ -295,3 +295,30 @@ def test_charter_pins_two_books_and_no_arithmetic() -> None:
     assert "NO ARITHMETIC" in CHARTER
     assert "never write underscores" in CHARTER
     assert "share quantities, not weights" in CHARTER.lower()
+
+
+def test_charter_bans_the_restatement_opener() -> None:
+    """Observed 2026-07-30: every reply opened with 'I'm taking your
+    message to mean', which reads as a machine echoing its input."""
+    from trading.copilot.engine import CHARTER
+
+    c = CHARTER.lower()
+    assert "taking your message to mean" in c  # named as forbidden
+    assert "never open with a formula" in c
+
+
+def test_charter_handles_questions_about_its_own_capabilities() -> None:
+    """'Can you consider my conviction on a stock?' asks about the desk's
+    process, not for a fact — answering it with 'I cannot see the source
+    code' is the failure this rule exists to prevent."""
+    from trading.copilot.engine import CHARTER
+
+    c = CHARTER.lower()
+    assert "questions about you and the desk's process" in c
+    assert "cannot see the source code" in c
+
+
+def test_charter_requires_a_closing_so_what() -> None:
+    from trading.copilot.engine import CHARTER
+
+    assert "close with the so-what" in CHARTER.lower()

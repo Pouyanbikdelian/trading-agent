@@ -108,6 +108,79 @@ _INSTRUCTION_RE = re.compile(
 # objection (see thread.py); "should we buy GS?" is a question.
 _QUESTION_RE = re.compile(r"^\s*(what|why|who|when|where|how|is|are|do|does|did|can|could)\b", re.I)
 
+# Capability questions — "are you able to consider my conviction on a
+# stock?" — are the worst false positive this module can make. They
+# contain every marker a mandate has (an instruction verb, a strength
+# word) while asking whether the desk *could* do a thing, not telling it
+# to. Capturing one makes the bot appear to accept an instruction the
+# operator never gave, and the operator only finds out when a run acts on
+# it. Matched anywhere in the clause, not just at the start.
+_CAPABILITY_RE = re.compile(
+    r"\b(?:are|can|could|will|would|do|does|did)\s+(?:you|we|it|they|i)\b"
+    r"|\b(?:you|we)\s+able\s+to\b"
+    r"|\bable\s+to\b"
+    r"|\bis\s+it\s+possible\b"
+    r"|\bcapable\s+of\b"
+    r"|\bwhat\s+(?:if|happens)\b",
+    re.IGNORECASE,
+)
+
+# Hypothetical framing. "If I tell you I want GS..." is the operator
+# describing a scenario, not opening one.
+_HYPOTHETICAL_RE = re.compile(r"^\s*(?:if|suppose|imagine|say)\b", re.IGNORECASE)
+
+# Sentence/clause split. Telegram messages are often several thoughts in
+# one bubble ("I want GS next round. Can you do that?") and grading the
+# whole blob loses the distinction between the instruction and the
+# question wrapped around it.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _clauses(text: str) -> list[str]:
+    return [c.strip() for c in _SENTENCE_SPLIT_RE.split(text or "") if c.strip()]
+
+
+def _is_question(clause: str) -> bool:
+    """True when this clause asks rather than instructs.
+
+    A trailing '?' is decisive. The operator can always drop it, and a
+    rule they can state in one sentence beats a cleverer one they
+    cannot predict."""
+    c = clause.strip()
+    if c.endswith("?"):
+        return True
+    if _CAPABILITY_RE.search(c):
+        return True
+    return bool(_QUESTION_RE.match(c)) and not _FORWARD_RE.search(c)
+
+
+def _clause_is_mandate(clause: str) -> bool:
+    """The old whole-message test, applied to one clause."""
+    t = clause.strip()
+    if len(t) < 6:
+        return False
+    if _is_question(t) or _HYPOTHETICAL_RE.match(t):
+        return False
+    if _FORWARD_RE.search(t):
+        return True
+    if not _INSTRUCTION_RE.search(t):
+        return False
+    # An instruction verb alone ("add cash") is ambiguous; pair it with a
+    # recognised strength phrase to avoid capturing idle talk.
+    return any(re.search(p, t.lower()) for _s, p in _STRENGTH_PATTERNS)
+
+
+def mandate_span(text: str) -> str | None:
+    """The clause that is actually an instruction, or None.
+
+    Returning the span rather than a bool means the stored mandate — and
+    the echo the operator reads back — quotes the instruction itself
+    instead of the whole rambling bubble it arrived in."""
+    for clause in _clauses(text):
+        if _clause_is_mandate(clause):
+            return clause
+    return None
+
 
 @dataclass(frozen=True)
 class Mandate:
@@ -143,22 +216,11 @@ def grade_strength(text: str) -> str:
 
 
 def looks_like_mandate(text: str) -> bool:
-    """True when the message is an instruction for a future run.
+    """True when the message contains an instruction for a future run.
 
     Requires a forward-looking marker OR (an instruction verb AND a
-    strength marker) — and never fires on a plain question."""
-    t = (text or "").strip()
-    if len(t) < 6:
-        return False
-    if _QUESTION_RE.match(t) and not _FORWARD_RE.search(t):
-        return False
-    if _FORWARD_RE.search(t):
-        return bool(_INSTRUCTION_RE.search(t)) or True
-    if not _INSTRUCTION_RE.search(t):
-        return False
-    # An instruction verb alone ("add cash") is ambiguous; pair it with a
-    # recognised strength phrase to avoid capturing idle talk.
-    return any(re.search(p, t.lower()) for _s, p in _STRENGTH_PATTERNS)
+    strength marker) in some non-interrogative clause."""
+    return mandate_span(text) is not None
 
 
 def _atomic_write(path: Path, payload: Any) -> None:

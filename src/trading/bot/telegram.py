@@ -88,6 +88,8 @@ HELP_TEXT = (
     "/k N | /k clear — override the strategy top-K at runtime\n"
     "/correlation — 12m correlation matrix of current holdings\n"
     "/memory — permanent-memory vitals: calibration, trust, lessons\n"
+    "/edge [5|21|63] — did our picks beat the names we passed on?\n"
+    "/edge why — the breakdown: rank, market conditions, entry level\n"
     "/detail — full transcript of the latest committee debate\n"
     "/committee — convene the agents for a fresh debate right now\n"
     "/pm — simulated agent-PM book · /pm run — rebalance it now\n"
@@ -463,6 +465,155 @@ def _cmd_memory() -> str:
         lines.append("")
         lines.append(f"*Top lesson:* {est[0]['statement'][:140]}")
     return "\n".join(lines)
+
+
+# Below this many graded names on a side, a spread is an anecdote and
+# gets shown with a warning rather than as a result.
+_EDGE_MIN_N = 20
+
+
+def _cmd_edge(args: list[str]) -> str:
+    """``/edge [5|21|63]`` — did our picks beat the names we passed on?
+    ``/edge why [5|21|63]`` — where that answer comes from.
+
+    The one report the desk had no way to produce before the shadow
+    ledger existed. Everything is quoted net of SPY over the identical
+    window, because absolute forward returns on a list of passed names
+    look wonderful in any rising market.
+    """
+    from trading.memory.store import default_store
+
+    args = list(args)
+    want_why = bool(args) and args[0].lower() in ("why", "detail", "breakdown")
+    if want_why:
+        args = args[1:]
+
+    leg = 21
+    if args:
+        try:
+            leg = int(args[0])
+        except ValueError:
+            return "usage: `/edge [why] [5|21|63]` — the forward window in days"
+    if leg not in (5, 21, 63):
+        return "usage: `/edge [why] [5|21|63]` — the forward window in days"
+
+    if want_why:
+        return _cmd_edge_why(leg)
+
+    try:
+        mem = default_store()
+        report = mem.edge_report(leg_days=leg)
+    except Exception as e:
+        return f"could not read the shadow ledger: `{e}`"
+
+    if not report:
+        return (
+            f"📊 *Selection edge, {leg}d* — nothing graded yet.\n"
+            f"_The ledger records every ranked candidate each cycle and needs "
+            f"{leg} days to mature. Check back._"
+        )
+
+    lines = [f"📊 *Selection edge, {leg}d forward, net of SPY*", ""]
+    thin = False
+    for r in report:
+        taken, passed, spread = r.get("taken_excess"), r.get("passed_excess"), r.get("spread")
+        n_t, n_p = r.get("n_taken", 0), r.get("n_passed", 0)
+        head = f"*{r['origin']}*  picks n={n_t} · passes n={n_p}"
+        if spread is None:
+            lines.append(f"{head}\n  _no counterfactual on this origin yet_")
+            continue
+        mark = "✅" if spread > 0 else "❌"
+        if min(n_t, n_p) < _EDGE_MIN_N:
+            mark, thin = "⚠️", True
+        lines.append(
+            f"{head}\n  picks {taken:+.2%} · passes {passed:+.2%} · spread {spread:+.2%} {mark}"
+        )
+    lines.append("")
+    if thin:
+        lines.append("⚠️ _= fewer than 20 names on a side. Not yet a result._")
+    lines.append(
+        "_Positive spread means the ranking step added something. "
+        "Negative means the names we rejected did better._"
+    )
+    lines.append("_`/edge why` for the breakdown._")
+    return "\n".join(lines)
+
+
+def _cmd_edge_why(leg: int) -> str:
+    """``/edge why`` — the three slices behind the headline number.
+
+    All three are SQL over columns recorded at decision time. Nothing
+    here asks a model to explain a result: a fluent invented cause is
+    worse than an admitted gap, because it gets remembered and repeated.
+    """
+    from trading.memory.store import default_store
+
+    try:
+        mem = default_store()
+        by_rank = mem.edge_by_rank(leg_days=leg)
+        by_vol = mem.edge_by_condition("vol_bucket", leg_days=leg)
+        by_entry = mem.edge_by_entry(leg_days=leg)
+    except Exception as e:
+        return f"could not read the shadow ledger: `{e}`"
+
+    if not (by_rank or by_vol or by_entry):
+        return (
+            f"📊 *Why, {leg}d* — nothing graded yet.\n"
+            f"_Needs {leg} days of matured rows. `/edge` for the headline._"
+        )
+
+    def thin(n: int) -> str:
+        return " ⚠️" if n < _EDGE_MIN_N else ""
+
+    lines = [f"🔍 *Why — {leg}d forward, net of SPY*", ""]
+
+    if by_rank:
+        lines.append("*1. Does the score rank anything?*")
+        for r in by_rank:
+            lines.append(
+                f"  rank `{r['rank_bucket']:<6}` {r['excess']:+.2%}  n={r['n']}{thin(r['n'])}"
+            )
+        spread = _rank_discrimination(by_rank)
+        if spread is not None:
+            verdict = (
+                "top of the ladder beats the bottom — the score works, the cut may be misplaced"
+                if spread > 0.005
+                else "flat across the ladder — the score is not discriminating"
+            )
+            lines.append(f"  _{verdict}_")
+        lines.append("")
+
+    if by_vol:
+        lines.append("*2. When does the edge exist?*")
+        for r in by_vol:
+            sp = r.get("spread")
+            n_min = min(r.get("n_taken", 0), r.get("n_passed", 0))
+            if sp is None:
+                lines.append(f"  `{r['condition']:<9}` no counterfactual yet")
+                continue
+            lines.append(
+                f"  `{r['condition']:<9}` spread {sp:+.2%}  "
+                f"n={r.get('n_taken', 0)}/{r.get('n_passed', 0)}{thin(n_min)}"
+            )
+        lines.append("")
+
+    if by_entry:
+        lines.append("*3. Does buying near the highs work?*")
+        for r in by_entry:
+            lines.append(f"  `{r['entry_bucket']:<9}` {r['excess']:+.2%}  n={r['n']}{thin(r['n'])}")
+        lines.append("")
+
+    lines.append("⚠️ _= fewer than 20 names. Read it as a hint, not a result._")
+    return "\n".join(lines)
+
+
+def _rank_discrimination(by_rank: list[dict[str, Any]]) -> float | None:
+    """Best bucket minus worst, or None when there isn't enough to compare.
+
+    The single number that says whether the ranking is doing any work.
+    """
+    vals = [r["excess"] for r in by_rank if r.get("excess") is not None and r["n"] > 0]
+    return (max(vals) - min(vals)) if len(vals) >= 2 else None
 
 
 def _cmd_detail() -> str:
@@ -1869,6 +2020,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_correlation()
     if cmd == "/memory":
         return _cmd_memory()
+    if cmd == "/edge":
+        return _cmd_edge(args)
     if cmd == "/detail":
         return _cmd_detail()
     if cmd == "/committee":
@@ -1977,9 +2130,13 @@ def _maybe_capture_mandate(text: str) -> str | None:
     to catch a misreading is now — while the operator is still looking at
     the screen — not after a run has acted on it.
     """
-    from trading.copilot.mandates import MandateStore, looks_like_mandate
+    from trading.copilot.mandates import MandateStore, mandate_span
 
-    if not looks_like_mandate(text):
+    # The span is the instruction clause, not the whole bubble. A message
+    # can be one thought wrapped in three others; storing the wrapper made
+    # the echo unreadable and the stored mandate vague.
+    span = mandate_span(text)
+    if span is None:
         return None
     try:
         from trading.copilot.engine import _known_symbols
@@ -1998,8 +2155,8 @@ def _maybe_capture_mandate(text: str) -> str | None:
         logger.bind(component="bot").warning("mandate: universe unavailable for symbol match")
 
     try:
-        symbols = extract_symbols(text, known)
-        m = MandateStore(settings.state_dir).add(text, symbols=symbols)
+        symbols = extract_symbols(span, known)
+        m = MandateStore(settings.state_dir).add(span, symbols=symbols)
     except Exception as e:
         logger.exception("mandate capture failed")
         return f"couldn't save that instruction: `{type(e).__name__}: {e}`"

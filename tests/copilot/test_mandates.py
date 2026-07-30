@@ -19,6 +19,7 @@ from trading.copilot.mandates import (
     MandateStore,
     grade_strength,
     looks_like_mandate,
+    mandate_span,
 )
 
 
@@ -98,6 +99,34 @@ class TestMandateDetection:
         """A question routes to the copilot; capturing it as an
         instruction would put words in the operator's mouth."""
         assert not looks_like_mandate(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Both observed live on 2026-07-30 — captured as mandates and
+            # echoed back as accepted instructions. The operator was asking
+            # what the desk is capable of; nothing was being instructed.
+            "If I tell you I would like to have a stock to buy within the next "
+            "rebalancing in the PM agent simulation are you able to do that?",
+            "No, I ask you about. Are you able to consider my convictions on a "
+            "stock if I recommend you?",
+            "can you consider my conviction on a name",
+            "is it possible to add GS next round",
+            "what happens if I want to buy GS next round",
+            "suppose I wanted GS in the book next round",
+        ],
+    )
+    def test_capability_questions_are_never_mandates(self, text: str) -> None:
+        assert not looks_like_mandate(text)
+
+    def test_span_is_the_instruction_clause_not_the_whole_bubble(self) -> None:
+        """A real instruction wrapped in chatter still lands, and what gets
+        stored is the instruction — not the paragraph around it."""
+        span = mandate_span(
+            "Been reading about banks all morning. I want GS in the book next "
+            "round. Does that make sense to you?"
+        )
+        assert span == "I want GS in the book next round."
 
 
 class TestStoreLifecycle:

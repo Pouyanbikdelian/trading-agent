@@ -25,6 +25,7 @@ Advisory infrastructure: journal + lesson cards + Telegram. No order path.
 from __future__ import annotations
 
 import json
+import random
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -58,22 +59,165 @@ HISTORIAN_CHARTER = (
     "or behaviorally.\n"
     "    4. The concrete action it implies for the desk "
     "(when to act, what size, what to watch for as confirmation).\n\n"
-    "Separately, vote on EXISTING lessons: did this week's evidence support "
-    "or contradict them? Only vote where the week actually bears on the "
-    "lesson. Respond ONLY with JSON:\n"
+    "The evidence block may contain a 'measured_edge' section: forward "
+    "returns of names the desk PICKED versus names it PASSED on, net of "
+    "SPY, sliced by ladder rank, market conditions and entry level. That "
+    "section is measurement, not opinion — it outranks anything in the "
+    "prose. Every figure carries an 'n'. Do not build a lesson on a slice "
+    "with n below 20; say the sample is too thin instead. If the measured "
+    "edge contradicts the week's narrative, the measurement wins.\n\n"
+    "You may also propose retiring an ESTABLISHED lesson the evidence has "
+    "turned against. Respond ONLY with JSON:\n"
     '{"new_lessons": [{"title": "<5-8 word label>", '
     '"body": "<4-sentence elaboration>", '
     '"tags": "<comma,separated>", "evidence": "<what this week showed>"}], '
-    '"votes": [{"lesson_id": "<id>", "supports": true|false, '
-    '"why": "<1 sentence>"}], '
     '"retire": [{"lesson_id": "<id>", "why": "<1 sentence>"}]}'
 )
+
+# Voting is a separate call with a separate charter, and it never sees
+# which lessons this desk's own historian authored. Asked in one breath to
+# propose lessons and to judge them, a model leans towards confirming its
+# own — and the +3-net-support promotion mechanic is only a chaos filter
+# if the votes are something closer to independent evidence.
+VOTER_CHARTER = (
+    "You are an independent reviewer at a systematic trading desk. You "
+    "will see a week of desk evidence and a numbered list of claims about "
+    "how markets behave. You did not write these claims and you have no "
+    "stake in them. For each claim, decide whether THIS WEEK's evidence "
+    "supports it, contradicts it, or does not bear on it at all.\n\n"
+    "'Does not bear on it' is the correct answer most of the time and you "
+    "should use it freely: a week is a small sample and most weeks are "
+    "silent on most claims. Vote only where the evidence in front of you "
+    "speaks directly to the claim. A vote you cannot justify in one "
+    "concrete sentence — naming a number, a ticker or a dated event from "
+    "the evidence — is a vote you should not cast.\n\n"
+    "Where a 'measured_edge' section is present it is measurement rather "
+    "than narrative and outranks the prose. Ignore any slice whose n is "
+    "below 20.\n\n"
+    "Respond ONLY with JSON. Omit claims you are not voting on:\n"
+    '{"votes": [{"lesson_id": "<id>", "supports": true|false, '
+    '"why": "<1 concrete sentence citing the evidence>"}]}'
+)
+
+# Journal kinds worth distilling, with a per-kind budget so the rows that
+# carry measured outcomes cannot be crowded out by heartbeats.
+HISTORIAN_KINDS: dict[str, int] = {
+    "prediction_graded": 60,  # the only rows carrying measured truth
+    "committee": 10,
+    "debate": 10,
+    "agent_pm": 10,
+    "episode": 20,
+    "operator_objection": 10,
+    "operator_mandate": 10,
+    "cycle": 10,
+    "take": 15,
+}
+HISTORIAN_WINDOW_DAYS = 7.0
 
 
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:
     from trading.agents.llm import complete_json
 
     return complete_json(system, prompt)
+
+
+def build_week_evidence(mem: MemoryStore, days: float = HISTORIAN_WINDOW_DAYS) -> dict[str, Any]:
+    """What the week actually contained — a real time window, by kind.
+
+    Two things this fixes. The window is days rather than a row count, so
+    "this week" means this week regardless of how busy the desk was. And
+    the rows arrive bucketed with a per-kind budget, so graded outcomes
+    survive a noisy week instead of being pushed out by heartbeats.
+
+    ``measured_edge`` is the part with actual numbers in it: forward
+    returns of picks versus passes, net of SPY, sliced three ways. Before
+    this the historian could only infer whether decisions worked by
+    reading prose about them.
+    """
+    journal = mem.journal_window(
+        days, kinds=list(HISTORIAN_KINDS), per_kind_limit=max(HISTORIAN_KINDS.values())
+    )
+    for kind, budget in HISTORIAN_KINDS.items():
+        if kind in journal:
+            journal[kind] = journal[kind][-budget:]
+
+    measured: dict[str, Any] = {}
+    try:
+        # 21d is the horizon the desk actually reasons on; 5d is noise and
+        # 63d takes a quarter to say anything.
+        measured = {
+            "note": (
+                "Forward returns net of SPY over the same window. "
+                "n is the number of names; ignore any slice with n < 20."
+            ),
+            "by_origin": mem.edge_report(leg_days=21),
+            "by_rank": mem.edge_by_rank(leg_days=21),
+            "by_condition": mem.edge_by_condition("vol_bucket", leg_days=21),
+            "by_entry_level": mem.edge_by_entry(leg_days=21),
+        }
+    except Exception:
+        logger.bind(component="historian").warning("measured edge unavailable this week")
+
+    return {"window_days": days, "week_journal": journal, "measured_edge": measured}
+
+
+def run_lesson_vote(
+    mem: MemoryStore,
+    lesson_book: list[dict[str, Any]],
+    evidence: dict[str, Any],
+    *,
+    week_tag: str,
+    llm: LlmFn | None = None,
+) -> int:
+    """Score existing lessons against the week, in a separate call.
+
+    The reviewer sees the claims stripped of authorship and status — no
+    ids it recognises, no support counters hinting which way the desk
+    already leans, no marker saying "your historian wrote this one". It
+    votes on numbered claims and the numbers are mapped back here.
+
+    Returns the number of votes recorded. Never raises: a failed vote
+    leaves the lesson book untouched, which is the safe direction.
+    """
+    if not lesson_book:
+        return 0
+    llm = llm or _default_llm
+
+    # Numbered, shuffled, and stripped. Order carries information too —
+    # a book listed oldest-first invites the reviewer to treat the top of
+    # the list as the settled ones.
+    claims = [{"n": i, "claim": le["statement"]} for i, le in enumerate(lesson_book, start=1)]
+    random.shuffle(claims)
+    by_number = {i: le["id"] for i, le in enumerate(lesson_book, start=1)}
+
+    prompt = json.dumps(
+        {
+            "week_journal": evidence.get("week_journal", {}),
+            "measured_edge": evidence.get("measured_edge", {}),
+            "claims": claims,
+        },
+        default=str,
+    )[:24000]
+
+    try:
+        out = llm(VOTER_CHARTER, prompt)
+    except Exception as e:
+        logger.bind(component="historian").warning(f"lesson vote failed: {e}")
+        return 0
+
+    voted = 0
+    for vote in list(out.get("votes", []))[:10]:
+        raw = vote.get("lesson_id")
+        try:
+            lid = by_number.get(int(raw))
+        except (TypeError, ValueError):
+            # Tolerate a reviewer that echoes the real id anyway.
+            lid = str(raw) if any(le["id"] == str(raw) for le in lesson_book) else None
+        if not lid:
+            continue
+        mem.add_evidence(lid, week_tag, supports=bool(vote.get("supports")))
+        voted += 1
+    return voted
 
 
 def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, Any]:
@@ -92,13 +236,8 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
         for r in mem.lessons()
         if r["status"] in ("candidate", "established")
     ]
-    prompt = json.dumps(
-        {
-            "week_journal": mem.journal_tail(80),
-            "lesson_book": lesson_book,
-        },
-        default=str,
-    )[:24000]
+    evidence = build_week_evidence(mem)
+    prompt = json.dumps({**evidence, "lesson_book": lesson_book}, default=str)[:24000]
 
     try:
         out = llm(HISTORIAN_CHARTER, prompt)
@@ -106,7 +245,6 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
         logger.bind(component="historian").warning(f"historian call failed: {e}")
         return {"ok": False, "reason": f"historian call failed: {e}"}
 
-    known = {r["id"] for r in lesson_book}
     created: list[str] = []
     lesson_bodies: dict[str, str] = {}
     for lesson in list(out.get("new_lessons", []))[:MAX_NEW_LESSONS]:
@@ -132,12 +270,17 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
         if body:
             lesson_bodies[lid] = body
 
-    voted = 0
-    for vote in list(out.get("votes", []))[:10]:
-        lid = str(vote.get("lesson_id", ""))
-        if lid in known:
-            mem.add_evidence(lid, week_tag, supports=bool(vote.get("supports")))
-            voted += 1
+    # Voting is its own call. The lessons just created are excluded: a
+    # candidate proposed ten seconds ago has no week of evidence behind
+    # it, and letting it collect support on the day it was written would
+    # start it a third of the way to promotion for free.
+    voted = run_lesson_vote(
+        mem,
+        [le for le in lesson_book if le["id"] not in {c.split(":")[0] for c in created}],
+        evidence,
+        week_tag=week_tag,
+        llm=llm,
+    )
 
     retired = 0
     established = {r["id"] for r in lesson_book if r["status"] == "established"}

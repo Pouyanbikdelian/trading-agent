@@ -200,6 +200,44 @@ Order of operations:
       Fix: journal the ladder (kind `candidates`) so the copilot can cite
       it. Small; high explainability value. Note this is a momentum-book
       gap only — committee/PM picks come with prose rationale already.
+      DONE 2026-07-30, and scoped up: rather than a journal row, the
+      ladder now writes to the new `shadow` table (both sides of the cut,
+      with a regime fingerprint), graded at 5/21/63d against SPY. So it
+      answers "why X and not Y" *and* the bigger question — did the names
+      we picked beat the names we passed on? See `/edge` and
+      `docs/LEARNING_ARCHITECTURE.md`.
+
+## Phase 13 — continuous learning (added 2026-07-30)
+
+Full argument in **docs/LEARNING_ARCHITECTURE.md**. Advisory only.
+Item 1 is built; the rest are specced and independently abandonable.
+
+- [x] **Shadow book / counterfactual ledger.** `shadow` table, ladder
+      write point in `cycle.py`, nightly leg grading in `runner.py`,
+      `/edge [5|21|63]` in Telegram. Remaining write points not yet
+      wired: committee passes, risk/cap cuts, operator mandates.
+- [ ] **Regime fingerprint, promoted out of `cycle.py`.** A first cut
+      lives in `Cycle._regime_fingerprint` (vol bucket, dispersion,
+      breadth) purely so shadow rows are sliceable from day one. Move it
+      to its own module and add the HMM state, VIX term structure and
+      the macro dial, then stamp it on episodes and lessons too.
+- [ ] **Calibration-weighted manager synthesis.** `mem.calibration()` is
+      shown to the manager and does nothing mechanical. Weight takes by
+      shrunk Brier (prior weight below ~20 graded predictions). Do this
+      BEFORE adding any new committee voice — an unweighted committee
+      turns extra voices into noise.
+- [ ] **Reflections at 5d/21d** on every decision, three separate
+      verdicts (thesis / timing / sizing), cheap model tier. Feeds the
+      historian structured input instead of raw journal rows.
+- [ ] **Conditioned lessons + analogue retrieval.** `lessons.conditions`
+      column; retrieval by fingerprint distance from today rather than
+      recency. Unlocks "the closest historical windows to today".
+- [ ] **Pre-mortem voice** at decision time. Cheap, and only gradeable
+      once reflections exist.
+- [ ] **Cheap model tier** (`AGENTS_MODEL_CHEAP`) for map-stage fan-out
+      only — universe screening, news triage, reflection drafts. Never a
+      voting voice in the committee. Needs a daily token budget with a
+      hard stop on day one.
 
 - [ ] **Grade operator objections and mandates** (surfaced 2026-07-29).
       Both are journaled with symbols and timestamps, so the existing
