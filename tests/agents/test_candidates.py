@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from trading.agents.candidates import MIN_BARS, build_candidate_ladder
+from trading.agents.candidates import MIN_BARS, STALE_LADDER_DAYS, build_candidate_ladder
 from trading.core.types import AssetClass, Instrument
 from trading.data.cache import ParquetCache
 
@@ -120,6 +120,18 @@ def test_lowercase_freq_filename_is_still_found(desk: Path) -> None:
     ladder = build_candidate_ladder(desk, top_n=3)
     assert ladder is not None
     assert "BBB" in [r["symbol"] for r in ladder["ranked"]]
+
+
+def test_stale_ladder_is_disclosed_not_implied(desk: Path) -> None:
+    """Nothing on the box refreshes the parquet cache on a schedule — it
+    updates as a side effect of the trading cycle, whose refresh loop
+    silently falls back to disk on timeout. A ladder ranking week-old
+    momentum looks identical to a fresh one unless it says otherwise."""
+    ladder = build_candidate_ladder(desk, top_n=3)
+    assert ladder is not None
+    # The fixture's last bar is 2023-era, so this is emphatically stale.
+    assert ladder["age_days"] > STALE_LADDER_DAYS
+    assert "stale" in ladder["staleness_warning"] or "old" in ladder["staleness_warning"]
 
 
 def test_short_history_symbols_are_excluded(tmp_path: Path, desk: Path) -> None:

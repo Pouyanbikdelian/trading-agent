@@ -11,12 +11,14 @@ import pytest
 
 from trading.agents.pm import (
     MAX_ETF_POSITIONS,
+    OPERATOR_ACCOUNT_KEYS,
     PM_CHARTER,
     PROMPT_BUDGET,
     START_EQUITY,
     UNIVERSE,
     _budgeted_prompt,
     _clamp_weights,
+    _relabel_operator_account,
     format_pm_digest,
     run_agent_pm,
 )
@@ -195,6 +197,51 @@ class TestAntiFixation:
         res = run_agent_pm({"candidate_ladder": ladder}, mem, tmp_path, llm=llm, prices=PRICES)
         assert json.loads(seen["prompt"])["today_context"]["candidate_ladder"] == ladder
         assert res["candidate_ladder_seen"] is True
+
+    def test_live_account_never_reaches_the_pm_as_its_own_book(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        """Observed on the first cycle after the ladder shipped: the PM's
+        book was JPM/V/XLV/LMT/GLD/PM/IBB, and its rationale announced it
+        had 'cut the entire semi/storage sleeve to zero' — a cluster it did
+        not hold. The semis were the operator's live account, arriving as
+        ``today_context.positions``, a bare key sitting next to
+        ``holdings``. It spent the whole anti-inertia obligation on someone
+        else's portfolio and left its own untouched.
+        """
+        live = {
+            "positions": [{"symbol": "AMD", "qty": 100}, {"symbol": "WDC", "qty": 50}],
+            "account": {"equity": 88000, "base_currency": "CHF"},
+            "book_concentration": {"n": 8, "effective_bets": 2.3},
+        }
+        seen: dict[str, str] = {}
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            seen["prompt"] = prompt
+            return {"target_weights": {"XLE": 0.2}, "rationale": "r", "watch": "w"}
+
+        run_agent_pm(dict(live), mem, tmp_path, llm=llm, prices=PRICES)
+        ctx = json.loads(seen["prompt"])["today_context"]
+
+        for original in live:
+            assert original not in ctx, f"{original!r} still reads as the PM's own book"
+        for renamed in OPERATOR_ACCOUNT_KEYS.values():
+            assert renamed in ctx
+        # The data itself must survive the rename — it is still context.
+        assert ctx["operator_live_account_positions_NOT_YOUR_BOOK"] == live["positions"]
+
+    def test_relabelling_does_not_mutate_the_shared_context(self) -> None:
+        """The committee shares this object and must keep the original key
+        names — for the committee the live account IS the book."""
+        ctx = {"positions": [{"symbol": "AMD"}], "macro_dial": {"vix": 17.2}}
+        out = _relabel_operator_account(ctx)
+        assert "positions" in ctx  # caller's dict untouched
+        assert "positions" not in out
+        assert out["macro_dial"] is ctx["macro_dial"]  # unrelated keys pass through
+
+    def test_charter_scopes_the_book_to_the_sim_sleeve(self) -> None:
+        assert "sim_portfolio.holdings and nothing else" in PM_CHARTER
+        assert "_NOT_YOUR_BOOK" in PM_CHARTER
 
     def test_charter_names_no_example_tickers(self) -> None:
         """Exemplar tickers in the instructions became the candidate list:

@@ -164,16 +164,29 @@ PM_CHARTER = (
     "max 0.10 per single stock, max 0.50 combined in any one correlated "
     "cluster (semis + mega-cap tech = ONE cluster; excess cut to cash by code).\n"
     "\n"
+    "WHOSE BOOK (read this before anything else): YOUR book is "
+    "sim_portfolio.holdings and nothing else. Any key ending "
+    "_NOT_YOUR_BOOK describes the operator's live brokerage account — a "
+    "different portfolio, managed by other machinery, which you neither "
+    "trade nor get credit for de-risking. It is context for reading the "
+    "market, never a position of yours. Exiting a cluster you do not hold "
+    "is not a decision; if you describe cutting something, it must appear "
+    "in sim_portfolio.holdings.\n"
+    "\n"
     "ANTI-INERTIA (mandatory — state this explicitly in your rationale): "
-    "The current book is NOT your starting point. Ask: starting from scratch "
+    "Apply this to sim_portfolio.holdings, name by name. The current book "
+    "is NOT your starting point. Ask: starting from scratch "
     "today, would I build this portfolio? Holdings the committee is bearish "
     "on need an affirmative reason to keep — past gains are not a reason. "
     "If a majority of the agent takes in agent_takes are bearish on a held "
     "cluster, that is a cluster EXIT signal: cut that cluster by at least "
     "half, not just trim one or two names. Do not rotate freed weight into a "
     "different sector just to stay invested — cash is a valid position. "
-    "Your rationale MUST name at least one held position you re-underwrote "
-    "and say what would have made you drop it.\n"
+    "Your rationale MUST name at least one symbol from "
+    "sim_portfolio.holdings that you re-underwrote and say what would have "
+    "made you drop it, and MUST account for every name you opened or "
+    "closed this cycle. A rationale that discusses only names you do not "
+    "hold has not done the work.\n"
     "\n"
     "CANDIDATE LADDER (your idea source): today_context.candidate_ladder is "
     "the live strategy's own ranked scoreboard over the trading universe — "
@@ -263,6 +276,43 @@ TAKES_SEEN = 16
 
 # Characters of serialized JSON the PM prompt may occupy.
 PROMPT_BUDGET = 24_000
+
+
+# Keys in the shared agent context that describe the OPERATOR'S LIVE
+# BROKERAGE ACCOUNT, not the PM's simulated sleeve — renamed on the way
+# into the PM prompt.
+#
+# Why (observed 2026-08-05, first cycle after the candidate ladder
+# shipped): the PM's book was JPM/V/XLV/LMT/GLD/PM/IBB, and its rationale
+# opened "the sim book — it is effectively 100% semi/storage (AMD, INTC,
+# STX, WDC, SNDK, DELL, CIEN, LITE) ... so I cut the entire semi/storage
+# sleeve to zero". It cut a cluster it did not hold. Those semis are the
+# live account, arriving as ``today_context.positions`` — and a bare key
+# called "positions", sitting next to "holdings", reads as "your
+# positions". So the model spent its whole ANTI-INERTIA obligation
+# re-underwriting a portfolio it does not manage, considered the rule
+# discharged, and left its own book untouched. That is the fixation
+# surviving the fix that was supposed to end it.
+#
+# The names are deliberately shouty. This is a prompt, not an API: the
+# key IS the documentation, and the failure mode was ambiguity.
+OPERATOR_ACCOUNT_KEYS: dict[str, str] = {
+    "positions": "operator_live_account_positions_NOT_YOUR_BOOK",
+    "account": "operator_live_account_equity_NOT_YOUR_BOOK",
+    "book_concentration": "operator_live_account_concentration_NOT_YOUR_BOOK",
+}
+
+
+def _relabel_operator_account(context: dict[str, Any]) -> dict[str, Any]:
+    """Rename the live-account keys so they cannot be read as the sleeve.
+
+    Shallow copy: the committee shares this context object and must keep
+    seeing the original key names, since for the committee the live
+    account IS the book under discussion.
+    """
+    if not isinstance(context, dict):
+        return context
+    return {OPERATOR_ACCOUNT_KEYS.get(k, k): v for k, v in context.items()}
 
 
 def _recent_takes(mem: MemoryStore) -> list[dict[str, Any]]:
@@ -641,7 +691,7 @@ def run_agent_pm(
         "agent_takes": takes,
         "agent_calibration": mem.calibration(),
         "sentinel_alert": sentinel_state or None,
-        "today_context": context,
+        "today_context": _relabel_operator_account(context),
         "recent_committee_rulings": rulings,
     }
     prompt = _budgeted_prompt(payload)
@@ -731,6 +781,12 @@ def run_agent_pm(
         # disclosed rather than quietly folded into the equity number.
         "stale_marks": stale_marks,
         "candidate_ladder_seen": bool((context or {}).get("candidate_ladder")),
+        # The ladder's own as-of date, so a decision can be read back
+        # against the tape it was actually made on.
+        "candidate_ladder_as_of": ((context or {}).get("candidate_ladder") or {}).get("as_of"),
+        "candidate_ladder_stale": bool(
+            ((context or {}).get("candidate_ladder") or {}).get("staleness_warning")
+        ),
     }
     _save(pm_dir, "last_run.json", result)
     mem.journal("agent_pm", {k: result[k] for k in ("equity", "weights", "rationale")}, actor="pm")
@@ -837,6 +893,8 @@ def format_pm_digest(result: dict[str, Any], book: dict[str, Any] | None = None)
         lines.append(f"⚠️ *same names for {stale} cycles* — book is not evolving")
     if result.get("candidate_ladder_seen") is False:
         lines.append("⚠️ _no candidate ladder this cycle — the PM had no new-name feed_")
+    elif result.get("candidate_ladder_stale"):
+        lines.append(f"⚠️ _ladder ranks stale bars (as of {result.get('candidate_ladder_as_of')})_")
     if result.get("stale_marks"):
         lines.append(f"_(marked from stored closes: {', '.join(result['stale_marks'])})_")
 

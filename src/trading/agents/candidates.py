@@ -38,6 +38,11 @@ DEFAULT_TOP_N = 25
 # Below this many bars a momentum score is noise dressed as a ranking.
 MIN_BARS = 120
 
+# Calendar days of staleness before the ladder says so in the prompt.
+# Four covers a normal weekend plus a public holiday; beyond that, bars
+# are genuinely missing rather than merely un-traded.
+STALE_LADDER_DAYS = 4
+
 
 def _pctile_52w(series: Any) -> float | None:
     """Where price sits in its own 52-week range, 0=low 1=high.
@@ -143,8 +148,18 @@ def build_candidate_ladder(
             row["pctile_52w"] = pct
         rows.append(row)
 
+    # Staleness, stated rather than implied. Nothing on the box refreshes
+    # the parquet cache on a schedule: it updates as a side effect of the
+    # trading cycle, whose refresh loop logs a warning and falls back to
+    # disk whenever a fetch times out. So a ladder can rank week-old
+    # momentum and look exactly like a fresh one. Say the age out loud and
+    # let the PM discount it.
     last_bar = prices.index[-1]
-    return {
+    age_days: int | None = None
+    with contextlib.suppress(Exception):
+        age_days = (pd.Timestamp.now(tz="UTC").normalize() - last_bar.normalize()).days
+
+    out: dict[str, Any] = {
         "strategy": strategy,
         "universe": universe,
         "as_of": str(getattr(last_bar, "date", lambda: last_bar)()),
@@ -155,3 +170,14 @@ def build_candidate_ladder(
         ),
         "ranked": rows,
     }
+    if age_days is not None:
+        out["age_days"] = age_days
+        if age_days > STALE_LADDER_DAYS:
+            out["staleness_warning"] = (
+                f"last bar is {age_days} days old — these ranks may not "
+                "reflect the current tape; weight them accordingly"
+            )
+            logger.bind(component="agents").warning(
+                f"candidate ladder is {age_days}d stale (last bar {out['as_of']})"
+            )
+    return out
