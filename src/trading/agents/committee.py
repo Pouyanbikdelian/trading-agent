@@ -197,6 +197,7 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
     "quant": (
         "account",
         "positions",
+        "candidate_ladder",
         "macro_dial",
         "vol_surface",
         "style_leader",
@@ -211,7 +212,13 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
         "headlines",
         "economy",
     ),
-    "street": ("positions", "style_leader", "sector_momentum_vs_spy_pct", "headlines"),
+    "street": (
+        "positions",
+        "candidate_ladder",
+        "style_leader",
+        "sector_momentum_vs_spy_pct",
+        "headlines",
+    ),
     "position_coach": (
         "account",
         "positions",
@@ -234,16 +241,27 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
     ),
     "trader": (
         "positions",
+        "candidate_ladder",
         "vol_surface",
         "spy_vix_triggers",
         "sector_momentum_vs_spy_pct",
         "headlines",
     ),
-    "scout": ("sector_momentum_vs_spy_pct", "headlines", "source_trust", "established_lessons"),
+    "scout": (
+        "candidate_ladder",
+        "sector_momentum_vs_spy_pct",
+        "headlines",
+        "source_trust",
+        "established_lessons",
+    ),
     # Creative sees market structure + trust table but NOT the book —
     # position-blindness is the whole point; the trust table is needed
-    # so it can weigh named social sources correctly.
+    # so it can weigh named social sources correctly. The candidate ladder
+    # is universe-wide and names no holding, so it does not break that
+    # blindness — it just gives the creative agent real tickers to be
+    # creative ABOUT instead of whatever it can recall unprompted.
     "creative": (
+        "candidate_ladder",
         "sector_momentum_vs_spy_pct",
         "headlines",
         "economy",

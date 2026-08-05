@@ -168,6 +168,19 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     except Exception as e:
         logger.bind(component="agents").warning(f"context: memory unavailable ({e})")
 
+    # --- the ranked candidate ladder: the ONLY channel through which a
+    # name the desk doesn't already own can reach an agent. Without it the
+    # context named nothing but current holdings, and every allocator
+    # downstream re-picked the book it was shown (see agents/candidates.py).
+    try:
+        from trading.agents.candidates import build_candidate_ladder
+
+        ladder = build_candidate_ladder(data_dir)
+        if ladder:
+            ctx["candidate_ladder"] = ladder
+    except Exception as e:
+        logger.bind(component="agents").warning(f"context: candidate ladder unavailable ({e})")
+
     # --- slow macro (FRED): CPI, claims, HY spreads etc. Compact latest
     # readings only — the dashboard owns the full history.
     try:
