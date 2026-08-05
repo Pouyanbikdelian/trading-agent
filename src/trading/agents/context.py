@@ -160,6 +160,16 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
             }
             for r in mem.lessons(status="established")[:6]
         ]
+        # Operator-authored lessons that have NOT been hardened. Only
+        # established lessons used to reach the context, so a lesson Yan
+        # phrased tentatively influenced precisely nothing — it sat in the
+        # database waiting for graded episodes it would never accumulate,
+        # because nothing trades on a lesson no agent can see. Surfaced
+        # separately, and labelled unproven, so the desk weighs it as a
+        # view from the operator rather than as settled desk knowledge.
+        ctx["operator_lessons_under_consideration"] = [
+            {"id": r["id"], "lesson": r["statement"]} for r in mem.operator_lessons("candidate")[:6]
+        ]
         ctx["dossiers"] = mem.dossiers()
         ctx["source_trust"] = mem.trust_table(min_graded=2)[:10]
         ctx["recent_memory"] = [

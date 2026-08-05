@@ -334,6 +334,33 @@ def _momentum_sleeve(state_dir: Path, fx: dict[str, float], label: str) -> dict[
     fees = round(sum(v["fees"] for v in per_symbol.values()), 2)
     unrealized = round(sum(p.unrealized_pnl for p in (snap.positions if snap else {}).values()), 2)
     bars = daily_pnl_bars(points_usd)
+
+    # These three come from CHF snapshots and a CHF fill ledger, but were
+    # published under ``*_usd`` keys and rendered by a formatter that
+    # prefixes "$". Same for the attribution rows. The equity curve WAS
+    # converted, so a CHF book showed a USD headline sitting next to CHF
+    # components that could not add up to it — the numbers were right and
+    # the labels were lying. Convert at the same rate the curve uses.
+    rate = sorted(fx.items())[-1][1] if fx else None
+    to_usd = (lambda v: round(v / rate, 2)) if (rate and base_ccy == "CHF") else (lambda v: v)
+
+    attribution = attribution_today(runner_db, fills)
+    for row in attribution:
+        row["pnl"] = to_usd(row["pnl"])
+        row["fees"] = to_usd(row["fees"])
+
+    # Per-symbol PnL cannot reconcile to the USD day change on a CHF book:
+    # the missing piece is translation of the whole book at a moved rate,
+    # which belongs to no single position. State it rather than leaving a
+    # silent gap for the reader to mistake for an arithmetic error.
+    day_pnl = bars[-1]["v"] if bars else None
+    attributed = round(sum(r["pnl"] for r in attribution), 2) if attribution else None
+    fx_translation = (
+        round(day_pnl - attributed, 2)
+        if (day_pnl is not None and attributed is not None and base_ccy != "USD")
+        else None
+    )
+
     return {
         "label": label,
         "currency": base_ccy,
@@ -342,11 +369,13 @@ def _momentum_sleeve(state_dir: Path, fx: dict[str, float], label: str) -> dict[
         "return_pct": flow_adjusted_return_pct(points_usd),
         "curve_usd": points_usd,
         "daily_pnl_usd": bars,
-        "day_pnl_usd": bars[-1]["v"] if bars else None,
-        "realized_usd": realized,
-        "unrealized_usd": unrealized,
-        "fees_usd": fees,
-        "attribution_today": attribution_today(runner_db, fills),
+        "day_pnl_usd": day_pnl,
+        "realized_usd": to_usd(realized),
+        "unrealized_usd": to_usd(unrealized),
+        "fees_usd": to_usd(fees),
+        "attribution_today": attribution,
+        "attributed_usd": attributed,
+        "fx_translation_usd": fx_translation,
     }
 
 

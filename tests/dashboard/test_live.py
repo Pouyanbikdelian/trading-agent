@@ -167,6 +167,28 @@ def test_flow_adjusted_return_skips_injections() -> None:
     assert flow_adjusted_return_pct([{"t": "d1", "v": 1.0}]) is None
 
 
+def test_flow_adjusted_is_what_the_portfolio_tab_must_use() -> None:
+    """Regression for the dashboard reading +979.92%.
+
+    ``drawEq`` took a raw last/first ratio while the Live tab used
+    ``flow_adjusted_return_pct`` — the same paper book therefore showed
+    +979.92% on one tab and +5.1% on the other, because the curve spans a
+    funding event and a deposit is not a return. The JS now mirrors this
+    function; this pins the arithmetic it must agree with.
+    """
+    from trading.dashboard.live import flow_adjusted_return_pct
+
+    pts = [
+        {"t": "d1", "v": 123_400.0},
+        {"t": "d2", "v": 1_300_000.0},  # the funding event
+        {"t": "d3", "v": 1_332_632.0},
+    ]
+    naive = (pts[-1]["v"] / pts[0]["v"] - 1) * 100
+    honest = flow_adjusted_return_pct(pts)
+    assert naive > 900  # what the bug reported
+    assert honest is not None and honest < 5  # what actually happened
+
+
 # ------------------------------------------------------------ attribution
 
 

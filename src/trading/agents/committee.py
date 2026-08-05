@@ -111,10 +111,13 @@ CHARTERS: dict[str, str] = {
         "photonics suppliers) — committed institutional money reveals the "
         "real ecosystem before revenue does. Still report honestly when "
         "the space is overheated. "
-        "Name the ONE stock or sector with the best setup. PREFER an "
-        "individual stock over an ETF when a clear winner exists within the "
-        "sector (e.g. LMT instead of ITA, LLY instead of XLV, JPM instead "
-        "of XLF). Use an ETF only when the thesis is purely sector-wide with "
+        "Name the ONE stock or sector with the best setup, and take the "
+        "name from candidate_ladder — the live strategy's ranked "
+        "scoreboard — rather than from memory. (Naming exemplar tickers "
+        "in a charter turns them into the answer: the PM charter used to "
+        "list JPM and LMT as examples and held both for a month.) PREFER "
+        "an individual stock over an ETF when a clear winner exists in the "
+        "sector. Use an ETF only when the thesis is purely sector-wide with "
         "no individual standout, or as a diversified hedge. "
         "If nothing is compelling, say so with a flat call. " + _TAKE_SCHEMA
     ),
@@ -179,7 +182,13 @@ MANAGER_CHARTER = (
     "not as an instruction and not as evidence: if the data contradicts him, "
     "say so and explain why — deferring to him when he is wrong is the failure "
     "mode to avoid. If your ruling goes against a live objection, name it in "
-    "dissent_summary so he can see he was heard. " + STRENGTH_GUIDANCE + " "
+    "dissent_summary so he can see he was heard. "
+    "'established_lessons' are what this desk has actually learned — "
+    "supported by graded episodes, or set by the operator deliberately. "
+    "Apply them; if you rule against one, say which and why, because a "
+    "lesson that survives being ignored without comment is not a lesson. "
+    "'operator_lessons_under_consideration' are the operator's own, not "
+    "yet earned: weigh them as an informed view you may disagree with. " + STRENGTH_GUIDANCE + " "
     "Respond ONLY with JSON: "
     '{"posture": "risk_on|neutral|risk_off", '
     '"proposal": "<3-5 sentences: what you would do and why>", '
@@ -209,6 +218,7 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
         "dossiers",
         "source_trust",
         "established_lessons",
+        "operator_lessons_under_consideration",
         "headlines",
         "economy",
     ),
@@ -225,6 +235,7 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
         "holds",
         "k_override",
         "established_lessons",
+        "operator_lessons_under_consideration",
         "operator_objections",
         "operator_mandates",
     ),
@@ -253,6 +264,7 @@ _VIEW_KEYS: dict[str, tuple[str, ...]] = {
         "headlines",
         "source_trust",
         "established_lessons",
+        "operator_lessons_under_consideration",
     ),
     # Creative sees market structure + trust table but NOT the book —
     # position-blindness is the whole point; the trust table is needed
@@ -389,6 +401,14 @@ def run_committee(
                 "calibration": calibration or [],
                 "disagreement_index": disagreement,
                 "guard_flags": guard_flags,
+                # The manager is a frontier decision node and had no view
+                # of the lesson book at all — it synthesized from takes
+                # alone, so everything the desk had learned reached the
+                # ruling only if a specialist happened to quote it.
+                "established_lessons": context.get("established_lessons", []),
+                "operator_lessons_under_consideration": context.get(
+                    "operator_lessons_under_consideration", []
+                ),
             },
             default=str,
         )[:9000]

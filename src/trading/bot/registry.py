@@ -71,6 +71,18 @@ REGISTRY: tuple[Spec, ...] = (
     Spec("/correlation", "12m correlation matrix of holdings", aliases=("/corr",)),
     Spec("/memory", "calibration, trust, lessons"),
     Spec(
+        "/lesson",
+        "teach the desk something durable — a firm tone makes it binding",
+        usage="/lesson <what the desk should remember, and when it applies>",
+        example="/lesson I want you to add this lesson: never average into a falling knife",
+    ),
+    Spec(
+        "/lessons",
+        "review what we've learned; harden or soften one",
+        usage="/lessons [harden|soften <lesson-id>]",
+        example="/lessons harden ls-3f2a91c4",
+    ),
+    Spec(
         "/edge",
         "did our picks beat the names we passed on?",
         usage="/edge [why] [5|21|63]",

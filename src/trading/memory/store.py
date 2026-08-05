@@ -327,13 +327,31 @@ class MemoryStore:
     # ------------------------------------------------------------ lessons
 
     def add_lesson(
-        self, statement: str, *, origin_episodes: list[str] | None = None, tags: str = ""
+        self,
+        statement: str,
+        *,
+        origin_episodes: list[str] | None = None,
+        tags: str = "",
+        status: str = "candidate",
     ) -> str:
+        """Record a lesson. ``candidate`` by default — the historian's
+        proposals must earn ``established`` through +3 net supporting
+        episodes (see ``add_evidence``).
+
+        ``status='established'`` exists for ONE caller: the operator
+        stating a lesson in a hard tone from Telegram. He has standing the
+        historian does not — it is his desk, and an instruction phrased as
+        an instruction should not have to wait a month of episodes to be
+        heard. Tone grading lives in ``copilot.mandates.grade_strength``;
+        everything softer than that still arrives as a candidate.
+        """
+        if status not in ("candidate", "established"):
+            raise ValueError(f"lesson status must be candidate|established, got {status!r}")
         lid = _short("ls")
         ts = _now()
         self.conn.execute(
-            "INSERT INTO lessons (id, created_ts, statement, tags) VALUES (?, ?, ?, ?)",
-            (lid, ts, statement, tags),
+            "INSERT INTO lessons (id, created_ts, statement, tags, status) VALUES (?, ?, ?, ?, ?)",
+            (lid, ts, statement, tags, status),
         )
         for eid in origin_episodes or []:
             self.conn.execute(
@@ -341,8 +359,35 @@ class MemoryStore:
                 (lid, eid, ts),
             )
         self._write_lesson_card(lid)
-        self.journal("lesson_created", {"id": lid, "statement": statement})
+        self.journal("lesson_created", {"id": lid, "statement": statement, "status": status})
         return lid
+
+    def set_lesson_status(self, lesson_id: str, status: str) -> bool:
+        """Promote or demote a lesson by hand. Append-only in spirit: the
+        card and the journal keep every transition, so a lesson the
+        operator hardened and later softened reads as a change of mind
+        rather than as though it had always been tentative."""
+        if status not in ("candidate", "established"):
+            raise ValueError(f"lesson status must be candidate|established, got {status!r}")
+        cur = self.conn.execute(
+            "UPDATE lessons SET status = ? WHERE id = ? AND status != 'retired'",
+            (status, lesson_id),
+        )
+        if not cur.rowcount:
+            return False
+        self._write_lesson_card(lesson_id)
+        self.journal("lesson_status_changed", {"id": lesson_id, "status": status})
+        return True
+
+    def operator_lessons(self, status: str = "candidate") -> list[sqlite3.Row]:
+        """Operator-authored lessons at ``status``. Tagged rather than kept
+        in a separate table so they age through the same lifecycle as the
+        historian's."""
+        return self.conn.execute(
+            "SELECT * FROM lessons WHERE status = ? AND tags LIKE '%operator%' "
+            "ORDER BY created_ts DESC",
+            (status,),
+        ).fetchall()
 
     def add_evidence(self, lesson_id: str, episode_id: str, *, supports: bool) -> None:
         rel = "supports" if supports else "contradicts"
@@ -715,10 +760,11 @@ class MemoryStore:
         where: str = "1=1",
         order: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """One row per group: n and mean excess return, no taken/passed split."""
+        """One row per group: n, distinct names, and mean excess return."""
         col, bcol = self._leg_cols(leg_days)
         rows = self.conn.execute(
             f"""SELECT {group_sql} AS grp, COUNT(*) AS n,
+                       COUNT(DISTINCT symbol) AS n_symbols,
                        AVG({col} - COALESCE({bcol}, 0.0)) AS excess
                 FROM shadow
                 WHERE {col} IS NOT NULL AND ts >= ? AND {where}
@@ -726,7 +772,13 @@ class MemoryStore:
             (_now() - since_days * 86400.0,),
         ).fetchall()
         out = [
-            {label_key: r["grp"], "n": r["n"], "excess": r["excess"], "leg_days": leg_days}
+            {
+                label_key: r["grp"],
+                "n": r["n"],
+                "n_symbols": r["n_symbols"],
+                "excess": r["excess"],
+                "leg_days": leg_days,
+            }
             for r in rows
         ]
         if order:
@@ -745,12 +797,22 @@ class MemoryStore:
         label_key: str,
         where: str = "1=1",
     ) -> list[dict[str, Any]]:
-        """One row per group, split into taken vs passed with the spread."""
+        """One row per group, split into taken vs passed with the spread.
+
+        Both a row count and a distinct-symbol count come back. The ladder
+        re-ranks the same names every day, so rows accumulate at ~30/day
+        over a universe that turns over slowly, and each row's forward
+        return overlaps its neighbour's by all but one day. A raw n of
+        1200 can be forty independent observations wearing a convincing
+        costume — so callers gate their thin-sample warnings on
+        ``n_*_symbols`` and show ``n_*`` only as context.
+        """
         col, bcol = self._leg_cols(leg_days)
         rows = self.conn.execute(
             f"""SELECT {group_sql} AS grp,
                        CASE WHEN disposition = 'taken' THEN 'taken' ELSE 'passed' END AS side,
                        COUNT(*) AS n,
+                       COUNT(DISTINCT symbol) AS n_symbols,
                        AVG({col}) AS ret,
                        AVG({col} - COALESCE({bcol}, 0.0)) AS excess
                 FROM shadow
@@ -763,6 +825,7 @@ class MemoryStore:
         for r in rows:
             slot = by_group.setdefault(r["grp"], {label_key: r["grp"], "leg_days": leg_days})
             slot[f"n_{r['side']}"] = r["n"]
+            slot[f"n_{r['side']}_symbols"] = r["n_symbols"]
             slot[f"{r['side']}_ret"] = r["ret"]
             slot[f"{r['side']}_excess"] = r["excess"]
 
@@ -776,8 +839,8 @@ class MemoryStore:
             slot["spread"] = (
                 None if taken is None or passed is None else float(taken) - float(passed)
             )
-            slot.setdefault("n_taken", 0)
-            slot.setdefault("n_passed", 0)
+            for key in ("n_taken", "n_passed", "n_taken_symbols", "n_passed_symbols"):
+                slot.setdefault(key, 0)
             out.append(slot)
         out.sort(key=lambda s: -(s["n_taken"] + s["n_passed"]))
         return out

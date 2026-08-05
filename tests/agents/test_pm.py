@@ -239,6 +239,56 @@ class TestAntiFixation:
         assert "positions" not in out
         assert out["macro_dial"] is ctx["macro_dial"]  # unrelated keys pass through
 
+    def test_off_ladder_opens_are_recorded_not_just_forbidden(
+        self, mem: MemoryStore, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Charter compliance nothing measures is compliance nobody has.
+        The PM opened NVDA while a ranked feed sat unused in the prompt."""
+        monkeypatch.setattr("trading.agents.pm._stock_universe", lambda: ("JPM",))
+        ctx = {"candidate_ladder": {"ranked": [{"rank": 1, "symbol": "AMAT"}]}}
+        res = run_agent_pm(
+            ctx, mem, tmp_path, llm=_pm_llm({"JPM": 0.1}), prices=dict(PRICES, JPM=200.0)
+        )
+        assert res["opened"] == ["JPM"]
+        assert res["opened_off_ladder"] == ["JPM"]
+        assert "opened off-ladder" in format_pm_digest(res)
+
+    def test_etf_opens_are_exempt_from_the_ladder_check(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        """The ladder ranks single stocks; ETFs come from the ETF
+        whitelist by design, so flagging them would be noise."""
+        ctx = {"candidate_ladder": {"ranked": [{"rank": 1, "symbol": "AMAT"}]}}
+        res = run_agent_pm(ctx, mem, tmp_path, llm=_pm_llm({"SMH": 0.2}), prices=PRICES)
+        assert res["opened"] == ["SMH"] and res["opened_off_ladder"] == []
+
+    def test_on_ladder_opens_are_not_flagged(
+        self, mem: MemoryStore, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("trading.agents.pm._stock_universe", lambda: ("JPM",))
+        ctx = {"candidate_ladder": {"ranked": [{"rank": 1, "symbol": "JPM"}]}}
+        res = run_agent_pm(
+            ctx, mem, tmp_path, llm=_pm_llm({"JPM": 0.1}), prices=dict(PRICES, JPM=200.0)
+        )
+        assert res["opened_off_ladder"] == []
+        assert "off-ladder" not in format_pm_digest(res)
+
+    def test_rationale_is_stored_in_full_and_clipped_only_for_telegram(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        """The stored record is the only durable one. Clipping it at 900
+        destroyed the justification for a cycle's only new position."""
+        long_text = "The re-underwrite of JPM. " * 80  # ~2000 chars
+        llm = _pm_llm({"XLE": 0.2})
+
+        def verbose(system: str, prompt: str) -> dict[str, Any]:
+            out = llm(system, prompt)
+            return {**out, "rationale": long_text, "watch": long_text}
+
+        res = run_agent_pm({}, mem, tmp_path, llm=verbose, prices=PRICES)
+        assert res["rationale"] == long_text  # archive keeps everything
+        assert len(format_pm_digest(res)) < 2500  # the wire does not
+
     def test_charter_scopes_the_book_to_the_sim_sleeve(self) -> None:
         assert "sim_portfolio.holdings and nothing else" in PM_CHARTER
         assert "_NOT_YOUR_BOOK" in PM_CHARTER

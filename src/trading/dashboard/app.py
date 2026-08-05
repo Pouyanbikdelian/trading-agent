@@ -389,9 +389,13 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
   <span class="muted" style="text-transform:none;letter-spacing:0">— click legend entries to toggle series</span></h2>
   <div id="raceEmpty" class="muted" style="display:none;padding:18px 0"></div>
   <canvas id="race" height="84"></canvas></div>
- <div class="card"><h2>Account</h2><div id="account"></div><h2 style="margin-top:12px">Positions</h2><div id="positions"></div></div>
- <div class="card"><h2>Agent PM · holdings</h2><div id="pmholds"></div></div>
- <div class="card"><h2>Committee (latest)</h2><div id="committee"></div>
+ <!-- Three adjacent cards describing TWO different books. The PM once
+      read its neighbour's positions as its own and "exited" a cluster it
+      never held (see agents/pm.py OPERATOR_ACCOUNT_KEYS); a human reading
+      these side by side has exactly the same problem. Name the book. -->
+ <div class="card"><h2>Account <span class="muted" style="text-transform:none;letter-spacing:0">— traded book (paper)</span></h2><div id="account"></div><h2 style="margin-top:12px">Positions</h2><div id="positions"></div></div>
+ <div class="card"><h2>Agent PM · holdings <span class="muted" style="text-transform:none;letter-spacing:0">— separate sim sleeve, not the traded book</span></h2><div id="pmholds"></div></div>
+ <div class="card"><h2>Committee (latest) <span class="muted" style="text-transform:none;letter-spacing:0">— debates the traded book</span></h2><div id="committee"></div>
   <h2 style="margin-top:14px">Posture history <span class="muted" style="text-transform:none;letter-spacing:0">— dot color = posture, height = dissent</span></h2>
   <canvas id="postCh" height="56"></canvas></div>
  <div class="card"><h2>Sector momentum · 1M vs SPY</h2><div id="sectors"></div></div>
@@ -526,10 +530,20 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
 
   // Attribution table.
   const at=(mom||{}).attribution_today||[];
+  // Reconciliation rows: per-symbol PnL cannot sum to the USD day change
+  // on a CHF book, because translating the whole book at a moved rate
+  // belongs to no single position. Show the gap instead of leaving the
+  // reader to mistake it for an arithmetic error.
+  const fxt=(mom||{}).fx_translation_usd, attr=(mom||{}).attributed_usd;
+  const foot=at.length?
+   `<tr><td class="muted">positions</td><td class="muted">${signed(attr)}</td><td></td><td></td></tr>`+
+   (fxt!=null?`<tr><td class="muted">FX translation</td><td class="muted">${signed(fxt)}</td>
+     <td colspan="2" class="muted">CHF book → USD</td></tr>`:'')+
+   `<tr><th>day total</th><th class="${((mom||{}).day_pnl_usd||0)>=0?'pos':'neg'}">${signed((mom||{}).day_pnl_usd)}</th><th></th><th></th></tr>`:'';
   document.getElementById('lvAttr').innerHTML=at.length?
    `<table><tr><th>sym</th><th>pnl</th><th>fees</th><th>qty</th></tr>`+
    at.map(r=>`<tr><td>${r.symbol}</td><td class="${r.pnl>=0?'pos':'neg'}">${signed(r.pnl)}</td>
-    <td class="muted">${r.fees?money(r.fees,2):'–'}</td><td class="muted">${r.qty||'–'}</td></tr>`).join('')+'</table>':
+    <td class="muted">${r.fees?money(r.fees,2):'–'}</td><td class="muted">${r.qty||'–'}</td></tr>`).join('')+foot+'</table>':
    '<span class="muted">no snapshot pair for today yet — fills in after the first two sessions</span>';
 
   // Account & FX.
@@ -542,6 +556,20 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  })();
 
  const daily=d.equity_curve||[],today=d.equity_today||[];let eqChart=null,raceChart=null;
+ // Keep in step with FLOW_THRESHOLD in dashboard/live.py.
+ const FLOW_THRESHOLD=0.25;
+ function flowAdjusted(pts){
+  if(!pts||pts.length<2)return null;
+  let total=1;
+  for(let i=1;i<pts.length;i++){
+   const a=pts[i-1].v,b=pts[i].v;
+   if(!(a>0))continue;
+   const r=b/a-1;
+   if(Math.abs(r)>FLOW_THRESHOLD)continue;  // deposit/withdrawal, not a return
+   total*=1+r;
+  }
+  return total-1;
+ }
  const cutFor=(range)=>{
   const now=new Date();
   const days={'1w':7,'1m':31,'3m':92,'6m':183,'1y':365}[range];
@@ -585,7 +613,11 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    const cut=cutFor(range);
    pts=daily.filter(p=>!cut||new Date(p.t)>=cut).map(p=>({t:p.t,v:p.v}));
   }
-  const ret=pts.length>1?(pts[pts.length-1].v/pts[0].v-1):null;
+  // Flow-adjusted, mirroring live.flow_adjusted_return_pct. A raw
+  // last/first ratio read +979.92% here while the Live tab reported
+  // +5.1% for the SAME book: the curve spans a funding event, and a
+  // deposit is not a return. Compound daily moves and skip flow days.
+  const ret=flowAdjusted(pts);
   document.getElementById('eqret').innerHTML=ret==null?'':
    `<span class="${ret>=0?'pos':'neg'}">${pct(ret,2)}</span>`;
   if(eqChart)eqChart.destroy();

@@ -202,6 +202,49 @@ class TestWhySlices:
         assert mem.edge_by_rank(leg_days=21) == []
 
 
+class TestOverlappingObservations:
+    """Surfaced 2026-07-30, second live cycle: two runs seven minutes
+    apart each wrote 30 rows for the same 30 names. The ladder re-ranks
+    daily, so rows grow ~30/day over a universe that turns over slowly,
+    and consecutive rows' 21-day forward windows overlap by twenty days.
+    A raw n of 1200 can be forty independent observations in a convincing
+    costume — which is precisely the overconfidence the thin-sample
+    warning was built to prevent."""
+
+    def _same_names_many_days(self, mem: MemoryStore, *, days: int = 20) -> None:
+        for day in range(days):
+            for i, sym in enumerate(("AAPL", "MSFT", "GS"), start=1):
+                sid = mem.add_shadow(
+                    symbol=sym,
+                    origin="ladder",
+                    disposition="taken" if i == 1 else "passed",
+                    rank=i,
+                    pctile_52w=0.6,
+                    conditions={"vol_bucket": "normal"},
+                    ts=_ago(40 + day),
+                )
+                mem.grade_shadow_leg(sid, 21, ret=0.05, bench=0.02)
+
+    def test_distinct_names_are_reported_next_to_row_counts(self, mem: MemoryStore) -> None:
+        self._same_names_many_days(mem)
+        row = mem.edge_report(leg_days=21)[0]
+        assert row["n_taken"] == 20 and row["n_taken_symbols"] == 1
+        assert row["n_passed"] == 40 and row["n_passed_symbols"] == 2
+
+    def test_slices_report_distinct_names_too(self, mem: MemoryStore) -> None:
+        self._same_names_many_days(mem)
+        by_rank = mem.edge_by_rank(leg_days=21)
+        assert by_rank[0]["n"] == 60 and by_rank[0]["n_symbols"] == 3
+
+    def test_a_group_with_no_rows_still_reports_zero_symbols(self, mem: MemoryStore) -> None:
+        """A mandate origin with only taken rows must not KeyError when the
+        caller reaches for the passed side."""
+        sid = mem.add_shadow(symbol="GS", origin="mandate", disposition="taken", ts=_ago(40))
+        mem.grade_shadow_leg(sid, 21, ret=0.05, bench=0.02)
+        row = next(r for r in mem.edge_report(leg_days=21) if r["origin"] == "mandate")
+        assert row["n_passed_symbols"] == 0
+
+
 class TestWhichNamesCountAsTaken:
     """Regression, 2026-07-30 first live run: the ledger logged "recorded
     30 candidate(s), 501 taken". Membership in ``target_weights`` was read

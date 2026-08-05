@@ -736,6 +736,28 @@ def run_agent_pm(
     # alone never showed it because turnover was healthy the whole time.
     # Count CYCLES WITH NO NAME CHANGE, and make the number visible in the
     # digest and in the PM's own next prompt.
+    # Did the new names actually come from the ladder? The charter says to
+    # work from it; on the first cycle after the WHOSE BOOK fix the PM
+    # opened NVDA, which was nowhere in the top 25 — the most available
+    # semis ticker there is, chosen while a ranked feed sat unused in the
+    # prompt. Charter compliance that nothing measures is charter
+    # compliance nobody has. ETFs are exempt: they come from the ETF
+    # whitelist by design, and the ladder only ranks single stocks.
+    ladder_syms = {
+        str(r.get("symbol"))
+        for r in (((context or {}).get("candidate_ladder") or {}).get("ranked") or [])
+    }
+    opened_names = sorted(set(new_holdings) - set(prior_holdings))
+    off_ladder = (
+        sorted(s for s in opened_names if s not in ladder_syms and s not in UNIVERSE)
+        if ladder_syms
+        else []
+    )
+    if off_ladder:
+        logger.bind(component="agent_pm").warning(
+            f"opened off-ladder names {off_ladder} — not in the ranked candidates"
+        )
+
     names_changed = set(new_holdings) != set(prior_holdings)
     cycles_stale = 0 if names_changed else int(book.get("cycles_since_name_change", 0)) + 1
     if cycles_stale >= STALE_BOOK_CYCLES:
@@ -767,14 +789,23 @@ def run_agent_pm(
         "dropped": dropped,
         "turnover": round(turnover, 2),
         "costs": round(costs, 2),
-        # clip, not a raw slice: this text goes straight to Telegram and a
-        # mid-word cut through a Markdown pair can cost the whole message.
-        "rationale": clip(out.get("rationale", ""), 900),
-        "watch": clip(out.get("watch", ""), 400),
+        # Stored in FULL. These were clipped to 900/400 here, which meant
+        # the stored record — the only durable one — lost whatever ran
+        # past the limit. On 2026-08-05 the charter started demanding a
+        # name-by-name re-underwrite plus an account of every open and
+        # close; the reasoning promptly outgrew 900 characters and the
+        # justification for that cycle's only new position was truncated
+        # away for good. Telegram is the constrained medium, not the
+        # archive: format_pm_digest does the clipping, at the point where
+        # the constraint actually exists.
+        "rationale": out.get("rationale", ""),
+        "watch": out.get("watch", ""),
         # What actually changed, so the digest can lead with the delta
         # instead of restating the whole book.
-        "opened": sorted(set(new_holdings) - set(prior_holdings)),
+        "opened": opened_names,
         "closed": sorted(set(prior_holdings) - set(new_holdings)),
+        # Names opened that the ranked ladder never proposed.
+        "opened_off_ladder": off_ladder,
         "prior_holdings": prior_holdings,
         "cycles_since_name_change": cycles_stale,
         # Holdings marked from a stored close rather than a fresh fetch —
@@ -895,6 +926,12 @@ def format_pm_digest(result: dict[str, Any], book: dict[str, Any] | None = None)
         lines.append("⚠️ _no candidate ladder this cycle — the PM had no new-name feed_")
     elif result.get("candidate_ladder_stale"):
         lines.append(f"⚠️ _ladder ranks stale bars (as of {result.get('candidate_ladder_as_of')})_")
+    if result.get("opened_off_ladder"):
+        lines.append(
+            "⚠️ _opened off-ladder: "
+            + ", ".join(f"`{s}`" for s in result["opened_off_ladder"])
+            + " — not in the ranked candidates_"
+        )
     if result.get("stale_marks"):
         lines.append(f"_(marked from stored closes: {', '.join(result['stale_marks'])})_")
 

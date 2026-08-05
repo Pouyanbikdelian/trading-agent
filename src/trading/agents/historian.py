@@ -63,8 +63,10 @@ HISTORIAN_CHARTER = (
     "returns of names the desk PICKED versus names it PASSED on, net of "
     "SPY, sliced by ladder rank, market conditions and entry level. That "
     "section is measurement, not opinion — it outranks anything in the "
-    "prose. Every figure carries an 'n'. Do not build a lesson on a slice "
-    "with n below 20; say the sample is too thin instead. If the measured "
+    "prose. Read 'n_symbols' (distinct names), NOT 'n' (rows): the same "
+    "names are re-ranked every day, so rows overstate the sample many "
+    "times over. Do not build a lesson on a slice with fewer than 20 "
+    "distinct names; say the sample is too thin instead. If the measured "
     "edge contradicts the week's narrative, the measurement wins.\n\n"
     "You may also propose retiring an ESTABLISHED lesson the evidence has "
     "turned against. Respond ONLY with JSON:\n"
@@ -92,8 +94,9 @@ VOTER_CHARTER = (
     "concrete sentence — naming a number, a ticker or a dated event from "
     "the evidence — is a vote you should not cast.\n\n"
     "Where a 'measured_edge' section is present it is measurement rather "
-    "than narrative and outranks the prose. Ignore any slice whose n is "
-    "below 20.\n\n"
+    "than narrative and outranks the prose. Judge sample size by "
+    "'n_symbols' (distinct names), not 'n' (rows, which repeat the same "
+    "names daily), and ignore any slice under 20 distinct names.\n\n"
     "Respond ONLY with JSON. Omit claims you are not voting on:\n"
     '{"votes": [{"lesson_id": "<id>", "supports": true|false, '
     '"why": "<1 concrete sentence citing the evidence>"}]}'
@@ -148,7 +151,9 @@ def build_week_evidence(mem: MemoryStore, days: float = HISTORIAN_WINDOW_DAYS) -
         measured = {
             "note": (
                 "Forward returns net of SPY over the same window. "
-                "n is the number of names; ignore any slice with n < 20."
+                "'n_symbols' is distinct names and is the real sample size; "
+                "'n' counts rows, which repeat the same names every day and "
+                "overstate it. Ignore any slice under 20 distinct names."
             ),
             "by_origin": mem.edge_report(leg_days=21),
             "by_rank": mem.edge_by_rank(leg_days=21),

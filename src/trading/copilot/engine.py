@@ -359,6 +359,11 @@ def answer(
             "NOW_trading_account_orders": facts.orders_and_fills(state_dir, sym),
             "NOW_agent_pm_simulated_book": facts.pm_book(state_dir, data_dir),
             "NOW_risk_state": facts.risk_now(state_dir),
+            # What the desk believes it has learned. Without this the
+            # copilot cannot answer "what lessons do we have" at all — it
+            # deflected to "I'm read-only" when asked, which was true
+            # about orders and irrelevant to the question.
+            "NOW_lesson_book": facts.lessons_now(state_dir),
         }
         if sym:
             now["NOW_market"] = facts.last_close(data_dir, sym)

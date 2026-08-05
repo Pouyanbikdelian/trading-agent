@@ -88,6 +88,8 @@ HELP_TEXT = (
     "/k N | /k clear — override the strategy top-K at runtime\n"
     "/correlation — 12m correlation matrix of current holdings\n"
     "/memory — permanent-memory vitals: calibration, trust, lessons\n"
+    "/lesson <text> — teach the desk something; a firm tone makes it binding\n"
+    "/lessons [harden|soften <id>] — review or re-weight what we've learned\n"
     "/edge [5|21|63] — did our picks beat the names we passed on?\n"
     "/edge why — the breakdown: rank, market conditions, entry level\n"
     "/detail — full transcript of the latest committee debate\n"
@@ -431,6 +433,106 @@ def _cmd_correlation() -> str:
     return format_correlation(corr)
 
 
+def _cmd_lesson(args: list[str]) -> str:
+    """``/lesson <statement>`` — write a lesson into permanent memory.
+
+    Status follows the operator's TONE, the same grading the mandate path
+    uses: an instruction phrased as an instruction ("I want you to add
+    this lesson…") lands as ``established`` and reaches every agent from
+    the next cycle; anything softer lands as a ``candidate`` and is shown
+    to the desk as under consideration.
+
+    Why tone rather than a flag: the operator already writes to this
+    system in natural language and the mandate path already reads
+    firmness from phrasing. A second, different convention for lessons
+    would be a thing to remember rather than a thing to use.
+
+    Before this existed there was no way to write a lesson at all — the
+    copilot filed "we should buy quality after 4-5 down days" as a soft
+    MANDATE, which influences one run and then expires, when what was
+    wanted was a durable, gradeable belief.
+    """
+    from trading.copilot.mandates import STRONG, grade_strength
+    from trading.core.text import clip
+    from trading.memory.store import default_store
+
+    statement = " ".join(args).strip()
+    if not statement:
+        return (
+            "usage: `/lesson <what the desk should remember>`\n"
+            "Tone sets the weight — a firm instruction is added outright, "
+            "anything softer arrives as a candidate for the desk to weigh.\n"
+            "`/lessons` to review, `/lessons harden <id>` to promote."
+        )
+    if len(statement) < 15:
+        return "_that is too short to be a lesson — say what to do and when it applies._"
+
+    strength = grade_strength(statement)
+    status = "established" if strength == STRONG else "candidate"
+    try:
+        mem = default_store()
+        lid = mem.add_lesson(statement, tags=f"operator {strength}", status=status)
+    except Exception as e:
+        return f"could not write the lesson: `{e}`"
+
+    if status == "established":
+        head = "🧠 *Lesson added* — established, in front of every agent from the next cycle."
+        tail = f"Too strong? `/lessons soften {lid}`."
+    else:
+        head = "🧠 *Lesson recorded* — candidate, the desk will weigh it and may disagree."
+        tail = f"Want it binding? `/lessons harden {lid}`."
+    return f"{head}\n`{lid}` · {clip(statement, 300)}\n_{tail}_"
+
+
+def _cmd_lessons(args: list[str]) -> str:
+    """``/lessons [harden|soften <id>]`` — review or re-weight the book."""
+    from trading.core.text import clip
+    from trading.memory.store import default_store
+
+    try:
+        mem = default_store()
+    except Exception as e:
+        return f"could not open memory: `{e}`"
+
+    if args and args[0].lower() in ("harden", "soften"):
+        if len(args) < 2:
+            return f"usage: `/lessons {args[0].lower()} <lesson-id>`"
+        want = "established" if args[0].lower() == "harden" else "candidate"
+        lid = args[1].strip()
+        try:
+            ok = mem.set_lesson_status(lid, want)
+        except Exception as e:
+            return f"could not change `{lid}`: `{e}`"
+        if not ok:
+            return f"_no live lesson `{lid}` — `/lessons` to list them._"
+        return f"`{lid}` is now *{want}*."
+
+    est = mem.lessons(status="established")
+    cand = mem.lessons(status="candidate")
+    if not est and not cand:
+        return "_no lessons yet. `/lesson <statement>` writes the first one._"
+
+    def _rows(rows: list[Any], limit: int) -> list[str]:
+        out = []
+        for r in rows[:limit]:
+            who = "👤" if "operator" in (r["tags"] or "") else "📚"
+            score = (
+                f" ({r['support']}/{r['contradict']})" if r["support"] or r["contradict"] else ""
+            )
+            out.append(f"  {who} `{r['id']}`{score} {clip(r['statement'], 220)}")
+        return out
+
+    lines = ["🧠 *Lessons* — 👤 yours · 📚 the historian's"]
+    if est:
+        lines.append(f"\n*Established* ({len(est)}) — every agent sees these:")
+        lines.extend(_rows(est, 8))
+    if cand:
+        lines.append(f"\n*Candidates* ({len(cand)}) — proposed, not yet earned:")
+        lines.extend(_rows(cand, 8))
+    lines.append("\n_`/lessons harden <id>` promotes · `/lesson <text>` adds_")
+    return "\n".join(lines)
+
+
 def _cmd_memory() -> str:
     """``/memory`` — permanent-memory vitals: counts, calibration, trust."""
     from trading.memory.store import default_store
@@ -517,20 +619,32 @@ def _cmd_edge(args: list[str]) -> str:
     thin = False
     for r in report:
         taken, passed, spread = r.get("taken_excess"), r.get("passed_excess"), r.get("spread")
-        n_t, n_p = r.get("n_taken", 0), r.get("n_passed", 0)
-        head = f"*{r['origin']}*  picks n={n_t} · passes n={n_p}"
+        # Distinct names, not rows. The ladder re-ranks the same universe
+        # daily, so rows pile up while the real sample barely grows — and
+        # each row's forward window overlaps its neighbour's almost
+        # entirely. Quoting rows would make forty observations read as
+        # twelve hundred.
+        s_t, s_p = r.get("n_taken_symbols", 0), r.get("n_passed_symbols", 0)
+        head = f"*{r['origin']}*  picks {s_t} names · passes {s_p} names"
         if spread is None:
             lines.append(f"{head}\n  _no counterfactual on this origin yet_")
             continue
         mark = "✅" if spread > 0 else "❌"
-        if min(n_t, n_p) < _EDGE_MIN_N:
+        if min(s_t, s_p) < _EDGE_MIN_N:
             mark, thin = "⚠️", True
         lines.append(
             f"{head}\n  picks {taken:+.2%} · passes {passed:+.2%} · spread {spread:+.2%} {mark}"
         )
     lines.append("")
     if thin:
-        lines.append("⚠️ _= fewer than 20 names on a side. Not yet a result._")
+        lines.append("⚠️ _= fewer than 20 distinct names on a side. Not yet a result._")
+    obs = sum(r.get("n_taken", 0) + r.get("n_passed", 0) for r in report)
+    names = sum(r.get("n_taken_symbols", 0) + r.get("n_passed_symbols", 0) for r in report)
+    if obs > names:
+        lines.append(
+            f"_Counts are distinct names. {obs} observations underlie them — "
+            "the same names are re-ranked daily, so rows overstate the sample._"
+        )
     lines.append(
         "_Positive spread means the ranking step added something. "
         "Negative means the names we rejected did better._"
@@ -562,17 +676,18 @@ def _cmd_edge_why(leg: int) -> str:
             f"_Needs {leg} days of matured rows. `/edge` for the headline._"
         )
 
-    def thin(n: int) -> str:
-        return " ⚠️" if n < _EDGE_MIN_N else ""
+    # Distinct names throughout — see the note in _cmd_edge on why row
+    # counts flatter the sample here.
+    def thin(n_symbols: int) -> str:
+        return " ⚠️" if n_symbols < _EDGE_MIN_N else ""
 
     lines = [f"🔍 *Why — {leg}d forward, net of SPY*", ""]
 
     if by_rank:
         lines.append("*1. Does the score rank anything?*")
         for r in by_rank:
-            lines.append(
-                f"  rank `{r['rank_bucket']:<6}` {r['excess']:+.2%}  n={r['n']}{thin(r['n'])}"
-            )
+            s = r.get("n_symbols", 0)
+            lines.append(f"  rank `{r['rank_bucket']:<6}` {r['excess']:+.2%}  {s} names{thin(s)}")
         spread = _rank_discrimination(by_rank)
         if spread is not None:
             verdict = (
@@ -587,23 +702,23 @@ def _cmd_edge_why(leg: int) -> str:
         lines.append("*2. When does the edge exist?*")
         for r in by_vol:
             sp = r.get("spread")
-            n_min = min(r.get("n_taken", 0), r.get("n_passed", 0))
+            s_t, s_p = r.get("n_taken_symbols", 0), r.get("n_passed_symbols", 0)
             if sp is None:
                 lines.append(f"  `{r['condition']:<9}` no counterfactual yet")
                 continue
             lines.append(
-                f"  `{r['condition']:<9}` spread {sp:+.2%}  "
-                f"n={r.get('n_taken', 0)}/{r.get('n_passed', 0)}{thin(n_min)}"
+                f"  `{r['condition']:<9}` spread {sp:+.2%}  {s_t}/{s_p} names{thin(min(s_t, s_p))}"
             )
         lines.append("")
 
     if by_entry:
         lines.append("*3. Does buying near the highs work?*")
         for r in by_entry:
-            lines.append(f"  `{r['entry_bucket']:<9}` {r['excess']:+.2%}  n={r['n']}{thin(r['n'])}")
+            s = r.get("n_symbols", 0)
+            lines.append(f"  `{r['entry_bucket']:<9}` {r['excess']:+.2%}  {s} names{thin(s)}")
         lines.append("")
 
-    lines.append("⚠️ _= fewer than 20 names. Read it as a hint, not a result._")
+    lines.append("⚠️ _= fewer than 20 distinct names. Read it as a hint, not a result._")
     return "\n".join(lines)
 
 
@@ -2020,6 +2135,10 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_correlation()
     if cmd == "/memory":
         return _cmd_memory()
+    if cmd == "/lesson":
+        return _cmd_lesson(args)
+    if cmd == "/lessons":
+        return _cmd_lessons(args)
     if cmd == "/edge":
         return _cmd_edge(args)
     if cmd == "/detail":

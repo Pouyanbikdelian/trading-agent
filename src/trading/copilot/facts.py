@@ -185,6 +185,50 @@ def pm_book(state_dir: Path, data_dir: Path | None = None) -> dict[str, Any]:
     return out
 
 
+def lessons_now(state_dir: Path, limit: int = 24) -> dict[str, Any]:
+    """The lesson book: what the desk believes it has learned.
+
+    The copilot could read positions, orders, the PM book, risk and the
+    tape, but nothing about lessons — so when Yan asked it to write one on
+    2026-08-05 it answered that it was read-only and could not execute
+    trades, which was true and beside the point. It could not discuss
+    lessons because it had never been handed any.
+
+    Established and candidate are returned separately and labelled:
+    conflating "the desk has evidence for this" with "someone suggested
+    this last week" is the whole distinction the lifecycle exists to make.
+    """
+    out: dict[str, Any] = {
+        "established": [],
+        "candidates": [],
+        "note": (
+            "established = supported by >=3 net graded episodes, or set by the "
+            "operator in a hard tone; candidate = proposed, not yet earned"
+        ),
+    }
+    try:
+        from trading.memory.store import MemoryStore
+
+        mem = MemoryStore(Path(state_dir) / "memory")
+    except Exception:
+        return out
+    try:
+        for status, key in (("established", "established"), ("candidate", "candidates")):
+            for row in mem.lessons(status=status)[:limit]:
+                out[key].append(
+                    {
+                        "id": row["id"],
+                        "statement": row["statement"],
+                        "support_vs_contradict": f"{row['support']}/{row['contradict']}",
+                        "tags": row["tags"],
+                        "author": "operator" if "operator" in (row["tags"] or "") else "historian",
+                    }
+                )
+    except Exception:
+        pass
+    return out
+
+
 def risk_now(state_dir: Path) -> dict[str, Any]:
     """Halt state + the last cycle's outcome."""
     out: dict[str, Any] = {}
