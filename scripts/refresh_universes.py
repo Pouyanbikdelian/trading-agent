@@ -4,7 +4,8 @@ Wikipedia is the de-facto reference for these indices: crowd-maintained and
 typically updated within hours of an actual rebalance. The free alternative
 to a paid index-data feed.
 
-Output: writes ``config/universes.generated.yaml`` with two universes:
+Output: writes ``state/universes.generated.yaml`` (override with
+``UNIVERSES_GENERATED_PATH``) with two universes:
 
 * ``sp500``      — current S&P 500 constituents.
 * ``nasdaq100``  — current NASDAQ-100 constituents.
@@ -17,9 +18,10 @@ Run cadence
 -----------
 * Weekly is plenty. Indices rebalance quarterly, but ad-hoc adds/drops
   (acquisitions, bankruptcies, spin-offs) happen between rebalances.
-* Recommended: a cron / GitHub Actions schedule that runs this and opens
-  a PR with the changes — so any constituent shift is reviewable, not
-  silently applied to a live runner.
+* The runner schedules this itself (Sundays 03:00 UTC, job
+  ``universe_refresh``) and alerts with the membership delta, so a change
+  is visible rather than silent. Before that existed the file went two
+  months without a refresh and nothing noticed.
 
 Symbol formatting
 -----------------
@@ -39,6 +41,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import io
+import os
 import sys
 import urllib.request
 from pathlib import Path
@@ -56,7 +59,29 @@ _USER_AGENT = (
     "trading-agent/0.1 (universe-refresh script; https://github.com/your-user/trading-agent)"
 )
 
-_OUT = Path(__file__).resolve().parents[1] / "config" / "universes.generated.yaml"
+
+def _out_path() -> Path:
+    """Write to ``state/`` — a writable volume — not ``config/``.
+
+    ``config/`` is bind-mounted read-only in the container so the running
+    system cannot mutate operator YAML. That is right, and it also meant
+    this script could never run on the box: the index constituents sat
+    two months stale because the only place they could be written was a
+    directory the writer could not write to. Generated data belongs with
+    state. Override with UNIVERSES_GENERATED_PATH.
+    """
+    override = os.getenv("UNIVERSES_GENERATED_PATH")
+    if override:
+        return Path(override)
+    try:
+        from trading.core.config import settings
+
+        return Path(settings.state_dir) / "universes.generated.yaml"
+    except Exception:
+        return Path(__file__).resolve().parents[1] / "state" / "universes.generated.yaml"
+
+
+_OUT = _out_path()
 
 
 def _fetch_html(url: str, *, timeout: float = 15.0) -> str:

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import signal
+import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -453,15 +455,50 @@ class Runner:
                     replace_existing=True,
                     max_instances=1,
                 )
-                # Historian: Fridays 22:45 UTC, after the 22:30 grading
-                # pass — distills the week into <=2 candidate lessons and
-                # votes on existing ones. One LLM call/week.
-                self._scheduler.add_job(
-                    self._run_historian_async,
-                    CronTrigger(day_of_week="fri", hour=22, minute=45, timezone="UTC"),
-                    id="historian",
-                    replace_existing=True,
-                )
+            # Price cache refresh: weekdays 21:40 UTC, after the close and
+            # after the rebalance. Until now NOTHING refreshed the parquet
+            # cache on a schedule — it updated only as a side effect of the
+            # trading cycle, whose loader falls back to disk whenever a
+            # fetch times out. So the agents' candidate ladder, the
+            # prediction grader and the shadow ledger could all be reading
+            # week-old bars while looking perfectly healthy.
+            self._scheduler.add_job(
+                self._refresh_price_cache_async,
+                CronTrigger(day_of_week="mon-fri", hour=21, minute=40, timezone="UTC"),
+                id="price_cache_refresh",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            # Index constituents: Sundays 03:00 UTC. Two Wikipedia reads,
+            # written to state/. Nothing refreshed these before — the file
+            # lived in a read-only bind mount, so the S&P 500 / NDX / R1000
+            # membership the candidate ladder ranks over was two months
+            # out of date and silently drifting further.
+            self._scheduler.add_job(
+                self._refresh_universes_async,
+                CronTrigger(day_of_week="sun", hour=3, minute=0, timezone="UTC"),
+                id="universe_refresh",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            # Historian: Fridays 22:45 UTC, after the 22:30 grading pass —
+            # distills the week into <=2 candidate lessons and votes on
+            # existing ones. One LLM call/week.
+            #
+            # This was nested INSIDE `if _guards_enabled():` — an
+            # indentation accident that coupled the weekly learning loop to
+            # an unrelated stop-loss feature whose env flag defaults to
+            # FALSE. Any deployment that had not explicitly opted into
+            # position guards silently never distilled a single lesson, and
+            # nothing anywhere would have said so.
+            self._scheduler.add_job(
+                self._run_historian_async,
+                CronTrigger(day_of_week="fri", hour=22, minute=45, timezone="UTC"),
+                id="historian",
+                replace_existing=True,
+            )
             # Ops watchdog: hourly infra health (disk, memory, data
             # freshness, halt state). No LLM. Alerts to the ops Telegram
             # channel (OPS_TELEGRAM_*) or main channel; silent when healthy.
@@ -647,7 +684,12 @@ class Runner:
 
         snap_age = "(no prior snapshot)"
         if snap is not None:
-            age = (datetime.now() - snap.ts.replace(tzinfo=None)).total_seconds()
+            # Both sides in UTC. `datetime.now()` is naive LOCAL time, so
+            # stripping the tz off a UTC snapshot compared wall clocks in
+            # two zones — on a CEST machine this reported the snapshot as
+            # two hours off, in the one alert that asks a human to decide
+            # whether the broker and our state have diverged.
+            age = (datetime.now(tz=timezone.utc) - snap.ts).total_seconds()
             snap_age = f"(snapshot is {age / 60:.0f} min old)"
         body = "\n".join(f"  • {line}" for line in drifted)
         self.alerts.critical(
@@ -1192,24 +1234,29 @@ class Runner:
         a daily heartbeat into permanent memory. Failures are swallowed —
         memory must never break trading."""
         try:
+            from trading.memory.grading import grade_due_predictions
             from trading.memory.store import default_store
-            from trading.runtime.portfolio_stats import _read_close
 
             mem = default_store()
-            graded = 0
-            for row in mem.due_predictions():
-                s = _read_close(settings.data_dir, row["subject"])
-                if s is None or len(s) < 5:
-                    continue
-                ts0 = datetime.fromtimestamp(row["ts"], tz=timezone.utc)
-                hist = s[s.index <= ts0.replace(tzinfo=None)]
-                if hist.empty:
-                    continue
-                base = float(hist.iloc[-1])
-                realized = float(s.iloc[-1]) / base - 1.0
-                mem.grade_prediction(row["id"], realized)
-                graded += 1
+            # The loop lives in memory/grading.py so it can be tested
+            # without a Runner. It was untestable here, and that is where
+            # it was broken for as long as it existed.
+            counts = grade_due_predictions(mem, settings.data_dir)
+            graded, skipped = counts["graded"], counts["skipped"]
             shadow_legs = self._grade_shadow(mem)
+            # Closed round-trips into the episodes table. Until 2026-08-06
+            # nothing ever called add_episode, so lessons were promoted by
+            # the historian voting on its own book rather than by contact
+            # with realised P&L.
+            episodes_written = 0
+            try:
+                from trading.memory.episodes import record_closed_episodes
+
+                episodes_written = record_closed_episodes(
+                    mem, settings.state_dir, settings.data_dir
+                )
+            except Exception:
+                logger.bind(component="memory").exception("episode recording failed")
             snap = self.cycle.runner_store.latest_snapshot()
             mem.journal(
                 "daily",
@@ -1217,13 +1264,128 @@ class Runner:
                     "equity": getattr(snap, "equity", None) if snap else None,
                     "positions": len(getattr(snap, "positions", {}) or {}) if snap else 0,
                     "graded_today": graded,
+                    "ungraded_today": skipped,
                     "shadow_legs_graded": shadow_legs,
+                    "episodes_recorded": episodes_written,
                 },
             )
-            if graded:
-                logger.bind(component="memory").info(f"graded {graded} due prediction(s)")
         except Exception:
             logger.bind(component="memory").exception("memory grader failed")
+
+    async def _refresh_universes_async(self) -> None:
+        """Weekly index-constituent refresh. Reports the delta, not just
+        that it ran — a refresh that fetched an identical list every week
+        because the source changed shape would otherwise look healthy."""
+        try:
+            import asyncio as _asyncio
+
+            from trading.core.universes import available_universes, clear_cache, load_universe
+
+            before = {}
+            for name in ("sp500", "nasdaq100", "russell1000"):
+                with contextlib.suppress(Exception):
+                    before[name] = {i.symbol for i in load_universe(name)}
+
+            import subprocess
+
+            script = Path(__file__).resolve().parents[3] / "scripts" / "refresh_universes.py"
+            rc = await _asyncio.to_thread(
+                lambda: subprocess.run(
+                    [sys.executable, str(script)], capture_output=True, text=True, timeout=300
+                )
+            )
+            if rc.returncode != 0:
+                logger.bind(component="data").warning(
+                    f"universe refresh failed rc={rc.returncode}: {rc.stderr[-300:]}"
+                )
+                return
+            clear_cache()
+
+            lines = []
+            for name, old in before.items():
+                if name not in available_universes():
+                    continue
+                new = {i.symbol for i in load_universe(name)}
+                added, removed = new - old, old - new
+                if added or removed:
+                    lines.append(
+                        f"{name}: +{len(added)} / -{len(removed)}"
+                        + (f" (in: {', '.join(sorted(added)[:6])})" if added else "")
+                        + (f" (out: {', '.join(sorted(removed)[:6])})" if removed else "")
+                    )
+            logger.bind(component="data").info(
+                "universe refresh: " + ("; ".join(lines) if lines else "no membership changes")
+            )
+            if lines:
+                self.alerts.info(
+                    "🗂 *Index membership changed*\n" + "\n".join(f"• {ln}" for ln in lines)
+                )
+        except Exception:
+            logger.bind(component="data").exception("universe refresh failed")
+
+    async def _refresh_price_cache_async(self) -> None:
+        """Top up the parquet cache for the configured universe.
+
+        Read-through: only the missing suffix is fetched, so a normal day
+        is one small request per symbol. Bounded concurrency keeps a 1-vCPU
+        box usable; failures are per-symbol and never abort the pass.
+
+        Reports staleness rather than assuming success — a refresh that
+        quietly fetched nothing is the state this job exists to end.
+        """
+        try:
+            import asyncio as _asyncio
+            from datetime import timedelta as _td
+
+            import pandas as _pd
+
+            from trading.core.universes import load_universe
+
+            universe = os.getenv("UNIVERSE", "sp500")
+            symbols = [i.symbol for i in load_universe(universe)]
+            cache = ParquetCache(settings.data_dir)
+            end = datetime.now(tz=timezone.utc)
+            start = end - _td(days=30)
+            sem = _asyncio.Semaphore(4)
+            ok = failed = 0
+
+            def _one(sym: str) -> bool:
+                from trading.data.yfinance_source import YFinanceSource
+
+                ins = Instrument(symbol=sym, asset_class=AssetClass.EQUITY)
+                cache.get_bars(YFinanceSource(), ins, start, end, "1D")
+                return True
+
+            async def _guarded(sym: str) -> bool:
+                async with sem:
+                    try:
+                        return await _asyncio.to_thread(_one, sym)
+                    except Exception:
+                        return False
+
+            for res in await _asyncio.gather(*(_guarded(s) for s in symbols)):
+                if res:
+                    ok += 1
+                else:
+                    failed += 1
+
+            from trading.runtime.portfolio_stats import _read_close
+
+            bench = _read_close(settings.data_dir, "SPY")
+            last = str(bench.index.max())[:10] if bench is not None and len(bench) else "unknown"
+            age = None
+            if bench is not None and len(bench):
+                age = (_pd.Timestamp.now(tz="UTC").normalize() - bench.index.max().normalize()).days
+            logger.bind(component="data").info(
+                f"price cache refresh: {ok} ok, {failed} failed, last SPY bar {last}"
+            )
+            if age is not None and age > 4:
+                self.alerts.info(
+                    f"⚠️ price cache still stale after refresh — newest bar {last} "
+                    f"({age}d old). Ladders and grading are reading old data."
+                )
+        except Exception:
+            logger.bind(component="data").exception("price cache refresh failed")
 
     def _grade_shadow(self, mem: Any) -> int:
         """Fill matured forward-return legs on the counterfactual ledger.
@@ -1234,7 +1396,7 @@ class Runner:
         benchmark cannot be computed is left ungraded rather than graded
         against nothing, and picked up on a later pass.
         """
-        from trading.runtime.portfolio_stats import _read_close
+        from trading.runtime.portfolio_stats import _read_close, close_at, covers
 
         bench_symbol = "SPY"
         bench = _read_close(settings.data_dir, bench_symbol)
@@ -1245,16 +1407,28 @@ class Runner:
             return 0
 
         def forward_return(series: Any, ts0: datetime, leg_days: int) -> float | None:
-            """Return over ``leg_days`` calendar days from the decision date."""
+            """Return over ``leg_days`` calendar days from the decision date.
+
+            The tz-naive/aware mix that silently disabled prediction
+            grading disabled this too, and here it failed even quieter:
+            the comparison raised, the local ``except`` turned it into
+            ``None``, and ``None`` is indistinguishable from "not matured
+            yet". So the counterfactual ledger looked patiently unfilled
+            rather than broken, for every leg, since it was built.
+            """
             try:
-                start = ts0.replace(tzinfo=None)
-                past = series[series.index <= start]
-                fwd = series[series.index >= start + timedelta(days=leg_days)]
-                if past.empty or fwd.empty:
+                base = close_at(series, ts0)
+                end = close_at(series, ts0 + timedelta(days=leg_days))
+                if not base or end is None:
                     return None
-                base = float(past.iloc[-1])
-                return (float(fwd.iloc[0]) / base - 1.0) if base else None
+                # close_at returns the last bar AT OR BEFORE the date, so
+                # an immature leg would silently score ~0 rather than
+                # waiting. Require the window to have actually elapsed.
+                if not covers(series, ts0 + timedelta(days=leg_days)):
+                    return None
+                return end / base - 1.0
             except Exception:
+                logger.bind(component="memory").exception("shadow forward return failed")
                 return None
 
         filled = 0

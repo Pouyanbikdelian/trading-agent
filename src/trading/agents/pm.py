@@ -198,7 +198,9 @@ PM_CHARTER = (
     "the ladder is absent this cycle, say so in your rationale and prefer "
     "cash over re-picking the existing book by default.\n"
     "\n"
-    "SENTINEL RULE (mandatory when sentinel_alert is present): If the "
+    "SENTINEL RULE (mandatory when sentinel_alert.fired_within_24h is "
+    "true — that flag is computed for you, do not infer it from the "
+    "timestamp): If the "
     "sentinel fired CAUTION or ALARM in the last 24 hours, (a) cap total "
     "deployment at 70% — the 30% minimum goes to cash, not rotation; "
     "(b) do not open new sector positions to replace trimmed ones this cycle; "
@@ -647,6 +649,18 @@ def run_agent_pm(
                 "last_alert_ts": raw.get("last_alert_ts"),
                 "triggers": raw.get("triggers", []),
             }
+            # The SENTINEL RULE says "fired in the last 24 hours", and the
+            # prompt handed the model a bare ISO timestamp to compare
+            # against a today it has to infer. Date arithmetic is the
+            # thing LLMs are worst at, and the consequence here is a 30%
+            # cash floor applied or skipped on a misread. Compute it.
+            try:
+                alert_ts = datetime.fromisoformat(str(raw.get("last_alert_ts")))
+                hours = (datetime.now(tz=timezone.utc) - alert_ts).total_seconds() / 3600
+                sentinel_state["hours_since_alert"] = round(hours, 1)
+                sentinel_state["fired_within_24h"] = bool(hours <= 24)
+            except (TypeError, ValueError):
+                sentinel_state["fired_within_24h"] = False
     except Exception:
         pass
 

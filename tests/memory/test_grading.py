@@ -1,0 +1,131 @@
+"""The grading loop itself — the thing that had no test and no seam.
+
+`close_at` and `covers` are unit-tested elsewhere. That is not the same
+as testing that grading WORKS: the bug lived in the loop, and the loop
+was an async Runner method nobody could exercise. These tests drive the
+real `MemoryStore`, real parquet files and the real loop end to end, so
+"is calibration populated afterwards" is an assertion rather than a hope.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from trading.core.types import AssetClass, Instrument
+from trading.data.cache import ParquetCache
+from trading.memory.grading import grade_due_predictions
+from trading.memory.store import MemoryStore
+
+NOW = datetime.now(tz=timezone.utc)
+
+
+def _write_prices(data_dir: Path, symbol: str, *, bars: int = 400, drift: float = 0.001) -> None:
+    """Bars ending TODAY, tz-aware UTC — exactly the shape the live cache
+    has, which is what made the naive comparison raise in production."""
+    idx = pd.date_range(end=NOW.date(), periods=bars, freq="B", tz="UTC")
+    close = 100.0 * np.exp(np.arange(bars) * drift)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.001,
+            "low": close * 0.999,
+            "close": close,
+            "volume": np.full(bars, 1e6),
+            "adj_close": close,
+        },
+        index=idx,
+    )
+    df.index.name = "ts"
+    ParquetCache(data_dir).write(Instrument(symbol=symbol, asset_class=AssetClass.EQUITY), "1D", df)
+
+
+@pytest.fixture
+def desk(tmp_path: Path):
+    data = tmp_path / "parquet"
+    _write_prices(data, "AAPL")
+    return MemoryStore(tmp_path / "memory"), data
+
+
+def _predict(mem: MemoryStore, *, agent: str, horizon: int, days_ago: int, subject="AAPL") -> str:
+    pid = mem.add_prediction(
+        agent=agent,
+        subject=subject,
+        direction="up",
+        horizon_days=horizon,
+        confidence=0.7,
+        statement="test",
+    )
+    # Backdate so the prediction is genuinely due — add_prediction stamps
+    # "now", and a prediction made now is never due now.
+    made = (NOW - timedelta(days=days_ago)).timestamp()
+    mem.conn.execute(
+        "UPDATE predictions SET ts = ?, due_ts = ? WHERE id = ?",
+        (made, made + horizon * 86400, pid),
+    )
+    mem.conn.commit()
+    return pid
+
+
+class TestGradingActuallyGrades:
+    def test_a_matured_prediction_is_graded(self, desk) -> None:
+        """The assertion that would have caught the outage on day one."""
+        mem, data = desk
+        _predict(mem, agent="quant", horizon=14, days_ago=40)
+        assert grade_due_predictions(mem, data) == {"graded": 1, "skipped": 0}
+        assert mem.due_predictions() == []
+
+    def test_calibration_is_populated_afterwards(self, desk) -> None:
+        """Calibration being empty is the symptom the operator would see;
+        assert on the symptom, not just the mechanism."""
+        mem, data = desk
+        for i in range(4):
+            _predict(mem, agent="quant", horizon=7, days_ago=30 + i)
+        assert mem.calibration() == []  # nothing graded yet
+        grade_due_predictions(mem, data)
+        cal = mem.calibration()
+        assert len(cal) == 1 and cal[0]["agent"] == "quant" and cal[0]["n"] == 4
+
+    def test_an_unmatured_prediction_waits(self, desk) -> None:
+        """Not yet due in OUR data — must be retried, not scored early."""
+        mem, data = desk
+        _predict(mem, agent="scout", horizon=400, days_ago=1)
+        out = grade_due_predictions(mem, data)
+        assert out["graded"] == 0
+
+    def test_an_unpriceable_symbol_does_not_stop_the_batch(self, desk) -> None:
+        """One bad symbol used to kill every remaining prediction AND the
+        shadow grading below it."""
+        mem, data = desk
+        _predict(mem, agent="quant", horizon=14, days_ago=40, subject="NOSUCHTICKER")
+        _predict(mem, agent="scout", horizon=14, days_ago=40, subject="AAPL")
+        out = grade_due_predictions(mem, data)
+        assert out == {"graded": 1, "skipped": 1}
+        assert [c["agent"] for c in mem.calibration()] == ["scout"]
+
+    def test_horizon_is_respected_not_time_since(self, desk) -> None:
+        """A 7-day call graded 90 days late must still be scored over 7
+        days. The old code used the newest bar, scoring 90 days of drift
+        as though the agent had predicted it."""
+        mem, data = desk
+        pid = _predict(mem, agent="quant", horizon=7, days_ago=90)
+        grade_due_predictions(mem, data)
+        row = mem.conn.execute(
+            "SELECT realized_move FROM predictions WHERE id = ?", (pid,)
+        ).fetchone()
+        # ~5 business days of +0.1%/bar compounding, nowhere near 90 days'.
+        assert row["realized_move"] == pytest.approx(0.005, abs=0.004)
+
+    def test_grading_is_not_repeated(self, desk) -> None:
+        mem, data = desk
+        _predict(mem, agent="quant", horizon=14, days_ago=40)
+        grade_due_predictions(mem, data)
+        assert grade_due_predictions(mem, data) == {"graded": 0, "skipped": 0}
+
+    def test_empty_book_is_quiet(self, desk) -> None:
+        mem, data = desk
+        assert grade_due_predictions(mem, data) == {"graded": 0, "skipped": 0}

@@ -59,6 +59,26 @@ HISTORIAN_CHARTER = (
     "or behaviorally.\n"
     "    4. The concrete action it implies for the desk "
     "(when to act, what size, what to watch for as confirmation).\n\n"
+    "SCOPE THE CLAIM — this is what separates a lesson from a superstition. "
+    "An unconditioned regularity ('quality names rebound after drawdowns') "
+    "is almost always a description of the sample it was found in. A desk "
+    "study on 2026-08-05 found exactly that: a rule with a +5.8% edge "
+    "pooled over eight years, whose hit rate had been BELOW 50% every year "
+    "since 2023 — true on average, useless now, and it would have been "
+    "recorded as an established lesson. So state, for every lesson:\n"
+    "  applies_when: the conditions under which you claim it holds — "
+    "regime, vol, rate environment, sector, market cap, position in the "
+    "52-week range. Be specific enough that a reader can tell whether "
+    "TODAY qualifies.\n"
+    "  fails_when: the conditions under which you expect it to fail, or "
+    "where the evidence is silent. A lesson with no stated failure mode "
+    "has not been thought through and will be believed for too long.\n"
+    "  invalidated_if: the single observation that should retire this "
+    "lesson. Name a number or an event, not a feeling.\n"
+    "  sample: how many distinct names/weeks/episodes support it, and over "
+    "what period. If you cannot say, the lesson is not ready — omit it.\n"
+    "Prefer ONE well-conditioned lesson to two vague ones. A lesson whose "
+    "conditions you cannot state is a lesson you have not learned.\n\n"
     "The evidence block may contain a 'measured_edge' section: forward "
     "returns of names the desk PICKED versus names it PASSED on, net of "
     "SPY, sliced by ladder rank, market conditions and entry level. That "
@@ -72,6 +92,10 @@ HISTORIAN_CHARTER = (
     "turned against. Respond ONLY with JSON:\n"
     '{"new_lessons": [{"title": "<5-8 word label>", '
     '"body": "<4-sentence elaboration>", '
+    '"applies_when": "<conditions where it holds>", '
+    '"fails_when": "<conditions where it fails or evidence is silent>", '
+    '"invalidated_if": "<the observation that retires it>", '
+    '"sample": "<distinct names / weeks / episodes and over what period>", '
     '"tags": "<comma,separated>", "evidence": "<what this week showed>"}], '
     '"retire": [{"lesson_id": "<id>", "why": "<1 sentence>"}]}'
 )
@@ -118,10 +142,75 @@ HISTORIAN_KINDS: dict[str, int] = {
 HISTORIAN_WINDOW_DAYS = 7.0
 
 
+# The historian writes the desk's PERMANENT beliefs — the only artifact
+# here that outlives the week it was made in, and the one every agent
+# reads as settled truth once promoted. It ran on the mid-tier model with
+# the default 1,200-token ceiling, which is the cheapest configuration in
+# the system attached to its most durable output. Two calls a week on the
+# frontier model is a rounding error next to the per-cycle committee; a
+# badly-conditioned lesson costs for months.
+HISTORIAN_MAX_TOKENS = 4000
+
+
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:
     from trading.agents.llm import complete_json
 
-    return complete_json(system, prompt)
+    return complete_json(system, prompt, tier="frontier", max_tokens=HISTORIAN_MAX_TOKENS)
+
+
+PROMPT_BUDGET = 24_000
+
+# Journal buckets in the order they may be sacrificed when the evidence
+# does not fit. Chatter first; measured outcomes and the lesson book are
+# never dropped, because those are the only things that can make a lesson
+# better than a guess.
+_TRIM_ORDER: tuple[str, ...] = (
+    "take",
+    "debate",
+    "operator_mandate",
+    "cycle",
+    "operator_objection",
+    "committee",
+    "agent_pm",
+)
+
+
+def _budgeted_evidence(payload: dict[str, Any], budget: int = PROMPT_BUDGET) -> str:
+    """Serialize under ``budget`` by dropping whole buckets, never slicing.
+
+    Slicing produced invalid JSON ending mid-string, and destroyed
+    whichever key sorted last rather than whichever mattered least.
+    """
+    import copy
+
+    p = copy.deepcopy(payload)
+
+    def fitted() -> str | None:
+        s = json.dumps(p, default=str)
+        return s if len(s) <= budget else None
+
+    s = fitted()
+    if s is not None:
+        return s
+    journal = p.get("journal")
+    for kind in _TRIM_ORDER:
+        if isinstance(journal, dict) and kind in journal:
+            # Halve first, drop second — a thinned bucket still carries
+            # the week's shape.
+            journal[kind] = journal[kind][: max(1, len(journal[kind]) // 2)]
+            s = fitted()
+            if s is not None:
+                return s
+            journal.pop(kind, None)
+            s = fitted()
+            if s is not None:
+                return s
+    for key in ("journal", "lesson_book"):
+        p.pop(key, None)
+        s = fitted()
+        if s is not None:
+            return s
+    return json.dumps(p, default=str)
 
 
 def build_week_evidence(mem: MemoryStore, days: float = HISTORIAN_WINDOW_DAYS) -> dict[str, Any]:
@@ -242,7 +331,11 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
         if r["status"] in ("candidate", "established")
     ]
     evidence = build_week_evidence(mem)
-    prompt = json.dumps({**evidence, "lesson_book": lesson_book}, default=str)[:24000]
+    # Budgeted, not sliced. A raw [:24000] cut here would truncate
+    # whichever key happened to land last — and the keys that matter most
+    # (measured_edge, the lesson book) are not first. Same failure the PM
+    # prompt had; drop whole low-value buckets instead.
+    prompt = _budgeted_evidence({**evidence, "lesson_book": lesson_book})
 
     try:
         out = llm(HISTORIAN_CHARTER, prompt)
@@ -267,6 +360,21 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
             stmt = fallback
         if len(stmt) < 20:  # garbage guard
             continue
+        # Carry the scope into the stored statement. The conditions are
+        # the difference between a lesson and a superstition, and the
+        # statement is the ONLY field any agent ever reads — a condition
+        # that lives in the JSON but not in the text is a condition the
+        # desk will never see. Explicitly labelled so a reader can tell
+        # the claim from its boundaries.
+        for label, key in (
+            ("Applies when", "applies_when"),
+            ("Fails when", "fails_when"),
+            ("Retire if", "invalidated_if"),
+            ("Sample", "sample"),
+        ):
+            val = str(lesson.get(key, "")).strip()
+            if val:
+                stmt += f"\n{label}: {val[:300]}"
         lid = mem.add_lesson(
             stmt, origin_episodes=[week_tag], tags=str(lesson.get("tags", ""))[:120]
         )

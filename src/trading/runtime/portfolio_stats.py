@@ -9,11 +9,64 @@ rather than failing the whole report.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 _ASSET_DIRS = ("equity", "etf")
+
+
+def close_at(series: pd.Series | None, when: Any) -> float | None:
+    """Last close at or before ``when``, tolerant of tz-aware/naive mixing.
+
+    Exists because that mixing silently disabled the whole scorecard. The
+    nightly grader did::
+
+        hist = s[s.index <= ts0.replace(tzinfo=None)]
+
+    and the cache index is ``datetime64[ms, UTC]``, so pandas raised
+    ``TypeError: Invalid comparison between dtype=datetime64[ms, UTC] and
+    datetime`` on the FIRST prediction. The loop sat inside a broad
+    ``except Exception``, so every night it logged once and graded
+    nothing — for as long as the grader has existed. No prediction was
+    ever scored, ``calibration()`` always returned empty, and every
+    charter line about weighting agents by track record was reasoning
+    over a table with no rows in it.
+
+    Returns None when there is no bar at or before ``when`` — callers
+    must treat that as "cannot grade yet", never as zero.
+    """
+    if series is None or len(series) == 0:
+        return None
+    ts = pd.Timestamp(when)
+    tz = getattr(series.index, "tz", None)
+    if tz is not None:
+        ts = ts.tz_localize(tz) if ts.tzinfo is None else ts.tz_convert(tz)
+    elif ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
+    hist = series[series.index <= ts]
+    if len(hist) == 0:
+        return None
+    return float(hist.iloc[-1])
+
+
+def covers(series: pd.Series | None, when: Any) -> bool:
+    """True when the cache actually extends to ``when``.
+
+    Grading a 14-day horizon against the newest bar available is not
+    grading it over 14 days. If the cache stops short of the due date the
+    prediction has not matured *in our data* and must wait.
+    """
+    if series is None or len(series) == 0:
+        return False
+    ts = pd.Timestamp(when)
+    tz = getattr(series.index, "tz", None)
+    if tz is not None:
+        ts = ts.tz_localize(tz) if ts.tzinfo is None else ts.tz_convert(tz)
+    elif ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
+    return bool(series.index.max() >= ts)
 
 
 def _read_close(data_dir: Path, symbol: str) -> pd.Series | None:

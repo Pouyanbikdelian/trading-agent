@@ -100,9 +100,33 @@ _FORWARD_RE = re.compile("|".join(_FORWARD_MARKERS), re.IGNORECASE)
 # mandate even without an explicit "next round".
 _INSTRUCTION_RE = re.compile(
     r"\b(include|add|allocate|buy|hold|own|overweight|underweight|avoid|drop|"
-    r"exclude|look at|keep an eye|consider)\b",
+    r"exclude|look at|keep an eye|consider|"
+    # Added 2026-08-06. The list above was the entire vocabulary a mandate
+    # could be written in, and it silently swallowed the largest strategic
+    # instruction the operator has ever sent — a full thematic allocation
+    # ("I want you to ... dedicate at least 40% ... to physical AI and
+    # quantum ... rest of capital 30% to energy infrastructure"). It
+    # graded as `strong` and was still dropped, because he wrote
+    # "dedicate" and "focus" and neither was a recognised verb.
+    #
+    # The lesson is not "add two words": a detector whose recall depends
+    # on the operator guessing its vocabulary will keep failing silently.
+    # These cover how allocation instructions are actually phrased.
+    r"dedicate|devote|commit|focus|concentrate|"
+    r"put|place|deploy|invest|weight|tilt|lean|skew|bias|"
+    r"target|aim for|cap|limit|reserve|set aside|keep|maintain|"
+    r"trim|cut|reduce|increase|raise|lower|rotate|shift|move|"
+    r"prioriti[sz]e|emphasi[sz]e|favou?r|prefer|stick with|stay in)\b",
     re.IGNORECASE,
 )
+
+# A bare percentage aimed at the book is an instruction even without a
+# verb: "rest of capital 30% to energy infrastructure" has no verb at
+# all, and "20-30% cash if markets are falling" only has a preposition.
+# Requiring a verb there is requiring the operator to write like the
+# regex. Paired with a strength marker as usual, so idle talk about
+# percentages ("SPY is up 3% today") is not captured.
+_ALLOCATION_RE = re.compile(r"\d{1,3}\s*(?:-\s*\d{1,3}\s*)?%|\bpercent\b", re.IGNORECASE)
 
 # Questions are not mandates, however opinionated. "why not GS?" is an
 # objection (see thread.py); "should we buy GS?" is a question.
@@ -163,10 +187,11 @@ def _clause_is_mandate(clause: str) -> bool:
         return False
     if _FORWARD_RE.search(t):
         return True
-    if not _INSTRUCTION_RE.search(t):
+    # An instruction verb OR a percentage aimed at the book. Either alone
+    # is ambiguous ("add cash", "30%"), so both still require a strength
+    # phrase — that is what separates an instruction from commentary.
+    if not (_INSTRUCTION_RE.search(t) or _ALLOCATION_RE.search(t)):
         return False
-    # An instruction verb alone ("add cash") is ambiguous; pair it with a
-    # recognised strength phrase to avoid capturing idle talk.
     return any(re.search(p, t.lower()) for _s, p in _STRENGTH_PATTERNS)
 
 

@@ -37,6 +37,26 @@ DEFAULT_UNIVERSES_PATH = PROJECT_ROOT / "config" / "universes.yaml"
 GENERATED_UNIVERSES_PATH = PROJECT_ROOT / "config" / "universes.generated.yaml"
 
 
+def _generated_paths() -> tuple[Path, ...]:
+    """Where machine-written index constituents may live, newest first.
+
+    The generated file was put next to the hand-curated config, and
+    ``config/`` is bind-mounted READ-ONLY into the container so operator
+    YAML cannot be mutated by the running system. Correct instinct,
+    wrong consequence: it also made the file impossible to refresh from
+    the box, so ``sp500``/``nasdaq100``/``russell1000`` sat two months
+    stale (last written 2026-06-12) while nothing complained.
+
+    The fix is not to loosen the mount — it is to stop storing generated
+    data in a config directory. State goes in ``state/``, which is a
+    writable volume. The old location is still read as a fallback so an
+    un-migrated checkout keeps working.
+    """
+    from trading.core.config import settings
+
+    return (Path(settings.state_dir) / "universes.generated.yaml", GENERATED_UNIVERSES_PATH)
+
+
 def _load_single(path: Path) -> dict[str, dict]:
     """Read one YAML file's ``universes:`` mapping; empty dict if absent."""
     if not path.exists():
@@ -55,14 +75,17 @@ def _load_single(path: Path) -> dict[str, dict]:
 def _load_yaml(path: Path) -> dict[str, dict]:
     """Load the primary file plus the generated file. Primary wins on collision."""
     primary = _load_single(path)
-    generated = _load_single(GENERATED_UNIVERSES_PATH)
+    generated: dict[str, dict] = {}
+    for candidate in reversed(_generated_paths()):
+        # Reversed so the preferred (state/) location is merged LAST and
+        # therefore wins over the legacy config/ copy.
+        generated.update(_load_single(candidate))
     # Hand-curated entries shadow generated ones — never the other way around.
     # If neither file declares anything, that's a hard error: tests + the
     # runner both rely on something being there.
     if not primary and not generated:
-        raise FileNotFoundError(
-            f"no universes defined — checked {path} and {GENERATED_UNIVERSES_PATH}"
-        )
+        checked = ", ".join(str(p) for p in (path, *_generated_paths()))
+        raise FileNotFoundError(f"no universes defined — checked {checked}")
     return {**generated, **primary}
 
 

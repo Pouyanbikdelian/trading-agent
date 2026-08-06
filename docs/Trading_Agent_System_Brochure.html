@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The Trading Agent — System Brochure</title>
+<style>
+  :root{
+    --ink:#12161c; --mut:#5d6773; --line:#dfe3e8; --bg:#fff;
+    --accent:#1a5c3a; --warn:#8a4b12; --bad:#8c2c26; --soft:#f6f8f9;
+  }
+  *{box-sizing:border-box}
+  body{
+    font:11pt/1.55 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    color:var(--ink); background:#eef1f3; margin:0; padding:24px;
+  }
+  .page{
+    background:var(--bg); width:210mm; min-height:297mm; margin:0 auto 24px;
+    padding:20mm 18mm; box-shadow:0 1px 14px rgba(0,0,0,.13); position:relative;
+  }
+  h1{font-size:24pt; line-height:1.15; margin:0 0 4pt; letter-spacing:-.4pt}
+  h2{font-size:14pt; margin:22pt 0 6pt; padding-bottom:3pt; border-bottom:1.5px solid var(--ink)}
+  h3{font-size:11.5pt; margin:14pt 0 4pt; color:var(--accent)}
+  p{margin:0 0 8pt}
+  .lede{font-size:12.5pt; color:var(--mut); margin:0 0 14pt}
+  .kicker{font:600 8.5pt/1 ui-sans-serif,system-ui,sans-serif;
+    letter-spacing:1.6pt; text-transform:uppercase; color:var(--mut); margin-bottom:10pt}
+  .folio{position:absolute; bottom:12mm; right:18mm; font:9pt ui-sans-serif,system-ui,sans-serif; color:var(--mut)}
+  .foot{position:absolute; bottom:12mm; left:18mm; font:9pt ui-sans-serif,system-ui,sans-serif; color:var(--mut)}
+  table{width:100%; border-collapse:collapse; margin:8pt 0 12pt; font-size:9.5pt}
+  th{text-align:left; font:600 8.5pt ui-sans-serif,system-ui,sans-serif; letter-spacing:.5pt;
+     text-transform:uppercase; color:var(--mut); border-bottom:1px solid var(--ink); padding:4pt 6pt 3pt}
+  td{padding:4pt 6pt; border-bottom:1px solid var(--line); vertical-align:top}
+  code,.mono{font:9.5pt ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--soft); padding:1px 4px; border-radius:3px}
+  pre{background:var(--soft); border-left:2px solid var(--line); padding:8pt 10pt;
+      font:8.5pt/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; overflow-x:auto; margin:6pt 0 10pt}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:14pt}
+  .card{border:1px solid var(--line); border-radius:5px; padding:9pt 11pt; background:var(--bg)}
+  .card h4{margin:0 0 4pt; font:600 10pt ui-sans-serif,system-ui,sans-serif}
+  .card p{font-size:9.5pt; color:var(--mut); margin:0}
+  .note{border-left:3px solid var(--accent); background:var(--soft); padding:8pt 11pt; margin:10pt 0; font-size:10pt}
+  .warnbox{border-left:3px solid var(--warn); background:#fdf7f0; padding:8pt 11pt; margin:10pt 0; font-size:10pt}
+  .badbox{border-left:3px solid var(--bad); background:#fdf3f2; padding:8pt 11pt; margin:10pt 0; font-size:10pt}
+  ul,ol{margin:0 0 10pt; padding-left:17pt} li{margin-bottom:3pt}
+  .tag{display:inline-block; font:600 7.5pt ui-sans-serif,system-ui,sans-serif; letter-spacing:.8pt;
+       text-transform:uppercase; padding:2px 6px; border-radius:3px; background:var(--soft); color:var(--mut)}
+  .tag.ok{background:#eaf5ee; color:var(--accent)} .tag.no{background:#fbeceb; color:var(--bad)}
+  .rule{height:1px; background:var(--line); margin:14pt 0}
+  .big{font:600 21pt ui-sans-serif,system-ui,sans-serif; letter-spacing:-.5pt}
+  .sub{font:9pt ui-sans-serif,system-ui,sans-serif; color:var(--mut)}
+  .flow{font:9pt/1.6 ui-monospace,Menlo,monospace; white-space:pre; background:var(--soft);
+        padding:10pt; border-radius:4px; margin:8pt 0}
+  @media print{
+    body{background:#fff; padding:0}
+    .page{box-shadow:none; margin:0; width:auto; min-height:auto; page-break-after:always; padding:16mm}
+    h2{page-break-after:avoid} table,pre,.note,.warnbox,.badbox{page-break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+
+<!-- ───────────────────────────── 1 · COVER ───────────────────────────── -->
+<section class="page">
+  <div class="kicker">Systematic trading infrastructure · Private</div>
+  <h1>The Trading Agent</h1>
+  <p class="lede">A staged, defensive, self-auditing trading system for Interactive
+  Brokers — one mechanical strategy that trades, and a committee of reasoning
+  agents that argues about it and is scored on being right.</p>
+
+  <div class="rule"></div>
+
+  <div class="grid">
+    <div class="card">
+      <h4>Two loops, one rule</h4>
+      <p>A mechanical momentum strategy places every order through a hard-blocking
+      risk manager. Eight LLM personas debate, predict and allocate a separate
+      simulated book. The agents cannot reach the broker — that isolation is
+      structural, and a test enforces it.</p>
+    </div>
+    <div class="card">
+      <h4>Everything is graded</h4>
+      <p>Every agent view is a falsifiable prediction with a horizon, scored
+      against real prices weeks later. Voices are weighted by track record, not
+      by how confidently they were phrased.</p>
+    </div>
+    <div class="card">
+      <h4>Limits bind in code</h4>
+      <p>Position, cluster, gross and drawdown caps are enforced by the risk
+      manager, not requested in a prompt. Live trading requires two independent
+      flags set deliberately.</p>
+    </div>
+    <div class="card">
+      <h4>It audits itself</h4>
+      <p>A watchdog asks not whether jobs ran but what they <em>produced</em> —
+      because the most expensive failures in this system have all been things
+      that ran successfully and achieved nothing.</p>
+    </div>
+  </div>
+
+  <div class="rule"></div>
+
+  <table>
+    <tr><th>Scale</th><th></th></tr>
+    <tr><td>Python source</td><td>~24,000 lines across 17 packages</td></tr>
+    <tr><td>Tests</td><td>982 across 86 files, hermetic, network-free by default</td></tr>
+    <tr><td>Reasoning agents</td><td>8 specialists + challenger + manager + PM + historian</td></tr>
+    <tr><td>Scheduled jobs</td><td>26, from 5-second polls to weekly distillation</td></tr>
+    <tr><td>Deployment</td><td>Single Docker image, 5 services, 2-core VPS</td></tr>
+    <tr><td>Status</td><td><span class="tag no">Paper</span> — live gated behind two flags</td></tr>
+  </table>
+
+  <div class="foot">Trading Agent — System Brochure</div>
+  <div class="folio">1</div>
+</section>
+
+<!-- ───────────────────────────── 2 · HOW IT WORKS ───────────────────── -->
+<section class="page">
+  <div class="kicker">Chapter one</div>
+  <h1 style="font-size:19pt">How the system works</h1>
+  <p class="lede">Two independent loops sharing one read-only view of the world.</p>
+
+  <div class="flow">          ┌──────────────── APScheduler ────────────────┐
+          │        26 jobs, one async process           │
+          └───────┬─────────────────────────┬───────────┘
+                  │                         │
+        TRADING LOOP                   AGENT LOOP
+     (mechanical · moves money)   (reasoning · cannot move money)
+                  │                         │
+     parquet price cache            build_context()
+                  ↓                         ↓
+     strategy → target weights     8 specialists → takes + predictions
+                  ↓                         ↓
+     selection / combination        challenger attacks the two loudest
+                  ↓                         ↓
+     ═══ RISK MANAGER ═══           manager synthesises a posture
+        (hard block)                        ↓
+                  ↓                  weekly PM allocates a SIMULATED book
+     broker adapter → IBKR                  ↓
+                  ↓                  historian distils lessons (Fridays)
+     paper account (CHF)                    ↓
+                                     memory: journal · predictions · trust</div>
+
+  <h2>The trading loop</h2>
+  <p>Once a day at 21:05 UTC the cycle loads prices, asks the configured strategy
+  for target weights, and hands them to the risk manager. The risk manager is the
+  <strong>only</strong> path to an order. It rejects, scales or accepts, and returns a
+  decision with a reason. Nothing bypasses it — not a strategy, not an agent, not
+  an operator mandate typed into Telegram at midnight.</p>
+
+  <h3>Why weights and not orders</h3>
+  <p>Strategies emit <em>target weights</em>. They never construct an order. That single
+  interface choice is what makes the risk manager unbypassable: there is no other
+  object a strategy could produce that the broker would accept.</p>
+
+  <h2>The agent loop</h2>
+  <p>Twice a week a committee of eight personas each receives a <em>slice</em> of a shared
+  context blob — the quant sees ranked candidates and the macro dial, the creative
+  agent is deliberately denied the book so it cannot anchor on what is already
+  held. Each returns a stance plus a falsifiable prediction: subject, direction,
+  horizon, confidence.</p>
+
+  <p>A challenger then attacks the two highest-conviction takes. A manager
+  synthesises a posture from the takes, the objections, the deterministic guard
+  flags, the lesson book and each agent's graded track record.</p>
+
+  <div class="note"><strong>The design premise.</strong> Every prediction is stored and
+  graded weeks later against real closes. That produces a hit rate and a Brier
+  score per agent, and those numbers — not eloquence — decide how much a voice
+  is worth. An agent wrong all month is a fade.</div>
+
+  <h2>The two books</h2>
+  <p>The single most important thing to understand, and the source of the most
+  expensive bug found to date.</p>
+
+  <table>
+    <tr><th></th><th>Traded book</th><th>Agent PM book</th></tr>
+    <tr><td>Decided by</td><td>Mechanical momentum strategy</td><td>An LLM, weekly</td></tr>
+    <tr><td>Money</td><td>IBKR account, CHF</td><td>Simulated, USD</td></tr>
+    <tr><td>Order path</td><td>risk manager → broker</td><td><strong>none</strong></td></tr>
+    <tr><td>Debated by</td><td>the committee</td><td>allocated by the PM alone</td></tr>
+  </table>
+
+  <div class="foot">Chapter one · How the system works</div>
+  <div class="folio">2</div>
+</section>
+
+<!-- ───────────────────────────── 3 · AGENTS ─────────────────────────── -->
+<section class="page">
+  <div class="kicker">Chapter two</div>
+  <h1 style="font-size:19pt">The committee</h1>
+  <p class="lede">Eight specialists, an adversary, and a synthesiser — each fed
+  only what its role needs.</p>
+
+  <table>
+    <tr><th>Agent</th><th>Brief</th><th>Sees</th></tr>
+    <tr><td><strong>Quant</strong></td><td>Reasons from numbers. Two hard rules: a high 52-week
+      percentile says <em>where</em> price is, not that reward-to-risk is good; correlated
+      holdings are ONE bet.</td><td>ladder, book, macro, vol</td></tr>
+    <tr><td><strong>Narrator</strong></td><td>Geopolitics, central-bank psychology, what is priced
+      in versus what is not.</td><td>dossiers, trust, headlines</td></tr>
+    <tr><td><strong>Street</strong></td><td>Sell-side ratings, revision momentum, crowded love and
+      crowded hate.</td><td>ladder, style, headlines</td></tr>
+    <tr><td><strong>Position coach</strong></td><td>Only our book — does each original thesis still
+      hold, and where in its range was it bought.</td><td>book, holds, objections</td></tr>
+    <tr><td><strong>Risk officer</strong></td><td>What can hurt us this week. Permitted to say
+      "nothing actionable".</td><td>vol, macro, triggers</td></tr>
+    <tr><td><strong>Trader</strong></td><td>Tactical, this-week horizon. Dislikes stale opinions.</td>
+      <td>ladder, tape, triggers</td></tr>
+    <tr><td><strong>Scout</strong></td><td>The next theme, weeks to months out. Weighs announced
+      capital commitments above commentary.</td><td>ladder, headlines, trust</td></tr>
+    <tr><td><strong>Creative</strong></td><td>Position-blind contrarian. Surfaces what the committee
+      is missing because it is staring at its holdings.</td><td><em>not</em> the book</td></tr>
+  </table>
+
+  <h2>What every agent must return</h2>
+  <pre>{"stance": "bullish|neutral|bearish",
+ "take": "&lt;4-6 sentences, specific&gt;",
+ "prediction": {"subject":"NVDA","direction":"up",
+                "horizon_days":14,"confidence":0.72},
+ "sources": ["..."], "cited_lessons": ["ls-..."]}</pre>
+
+  <p>The prediction is the point. Without it a take is an opinion; with it, the
+  agent has staked something checkable.</p>
+
+  <h2>Model routing</h2>
+  <table>
+    <tr><th>Role</th><th>Tier</th><th>Why</th></tr>
+    <tr><td>8 specialists</td><td>Mid-tier</td><td>High volume, low individual stakes</td></tr>
+    <tr><td>Challenger</td><td>Frontier</td><td>Adversarial reasoning earns the cost</td></tr>
+    <tr><td>Manager</td><td>Frontier</td><td>Synthesis is a decision node</td></tr>
+    <tr><td>Agent PM</td><td>Frontier</td><td>Turns debate into allocations</td></tr>
+    <tr><td>Historian</td><td>Frontier</td><td>Writes the only artifact that outlives its week</td></tr>
+  </table>
+
+  <h2>The portfolio manager</h2>
+  <p>Weekly, the PM reads the week's debates, each agent's calibration, the
+  sentinel's alert state, its own performance versus SPY, and a ranked candidate
+  ladder. It returns target weights for a simulated sleeve.</p>
+
+  <p>Those weights then pass through a chain of caps that cannot be argued with:
+  whitelist → 10% per single stock → maximum three ETF positions → 50% per
+  correlated cluster → 100% gross. Anything off-list or operator-pinned is cut to
+  cash, never substituted.</p>
+
+  <div class="warnbox"><strong>A hard-won lesson.</strong> The PM's charter once listed
+  example tickers — "own JPM instead of XLF, LMT instead of ITA". With no ranked
+  candidate feed in its prompt, those examples <em>became</em> the portfolio. It held
+  the same names for a month at perfectly healthy turnover. Exemplars in a prompt
+  are not illustrations; they are instructions.</div>
+
+  <div class="foot">Chapter two · The committee</div>
+  <div class="folio">3</div>
+</section>
+
+<!-- ───────────────────────────── 4 · MEMORY ─────────────────────────── -->
+<section class="page">
+  <div class="kicker">Chapter three</div>
+  <h1 style="font-size:19pt">Memory, and how the desk learns</h1>
+  <p class="lede">Append-only by design. Nothing is deleted; beliefs are
+  superseded or retired, and every one of them is supposed to be earned.</p>
+
+  <h2>The spine</h2>
+  <table>
+    <tr><th>Store</th><th>Holds</th><th>Feeds</th></tr>
+    <tr><td>journal</td><td>Every event: takes, rulings, PM runs, mandates, lessons</td><td>historian, PM, copilot</td></tr>
+    <tr><td>predictions</td><td>Agent calls with horizon, graded against price</td><td>calibration, source trust</td></tr>
+    <tr><td>episodes</td><td>Closed round-trips: entry, exit, P&amp;L, entry percentile</td><td>lesson evidence</td></tr>
+    <tr><td>lessons</td><td>Durable beliefs, candidate → established → retired</td><td>every agent, every cycle</td></tr>
+    <tr><td>source_trust</td><td>Beta posterior per named source</td><td>narrator, creative</td></tr>
+    <tr><td>shadow</td><td>Names considered and <em>passed on</em>, with forward returns</td><td>the only real edge measurement</td></tr>
+  </table>
+
+  <h3>The counterfactual ledger</h3>
+  <p>Most desks record what they did. This one also records what it declined —
+  the ranked candidates it passed over — and measures their forward returns
+  against the same benchmark over the same window. Without it, in a rising
+  market, every name you didn't buy looks like a missed opportunity. It is the
+  only comparison that establishes whether selection has edge.</p>
+
+  <h2>The lesson lifecycle</h2>
+  <p>The historian reads a week of evidence and may propose at most two lessons.
+  A separate independent reviewer — a different charter, blind to authorship —
+  votes on whether the week supported or contradicted existing claims. Promotion
+  to <em>established</em> requires +3 net supporting evidence, so a lesson survives
+  roughly a month of scrutiny before any agent treats it as true.</p>
+
+  <p>Every lesson must state its own boundaries:</p>
+  <table>
+    <tr><td style="width:26%"><code>applies_when</code></td><td>Conditions where it holds — specific enough to tell whether today qualifies</td></tr>
+    <tr><td><code>fails_when</code></td><td>Where it breaks, or where evidence is silent</td></tr>
+    <tr><td><code>invalidated_if</code></td><td>The single observation that retires it</td></tr>
+    <tr><td><code>sample</code></td><td>Distinct names and period supporting it</td></tr>
+  </table>
+
+  <div class="badbox"><strong>Why the conditions are mandatory.</strong> A desk study tested
+  "quality mega-caps rebound after extended drawdowns". Pooled over eight years it
+  showed +5.8% excess versus SPY and a 74% hit rate — compelling, and it would
+  have been recorded as established. Broken out by year, the hit rate has been
+  <strong>below 50% every year since 2023</strong>. True on average, useless now. An
+  unconditioned regularity is usually a description of the sample it was found in.</div>
+
+  <h2>The operator is part of the loop</h2>
+  <p>Instructions typed into Telegram are graded by tone — <em>strong</em>, <em>medium</em>,
+  <em>soft</em> — deterministically, so the reading is predictable and is echoed back
+  before it is acted on. A firm lesson enters the book established; anything
+  softer arrives as a candidate the desk may disagree with. No mandate, however
+  firm, can lift a risk cap.</p>
+
+  <div class="foot">Chapter three · Memory</div>
+  <div class="folio">4</div>
+</section>
+
+<!-- ───────────────────────────── 5 · RISK ───────────────────────────── -->
+<section class="page">
+  <div class="kicker">Chapter four</div>
+  <h1 style="font-size:19pt">Risk, safety and the live gates</h1>
+  <p class="lede">The part of the system designed on the assumption that
+  everything else will eventually be wrong.</p>
+
+  <h2>Two flags, both deliberate</h2>
+  <pre>TRADING_ENV=live
+ALLOW_LIVE_TRADING=true</pre>
+  <p>Both are required; either alone does nothing. <code>Settings.is_live_armed()</code>
+  enforces the conjunction and <code>trading live</code> refuses to start otherwise. This
+  is the single most important invariant in the repository.</p>
+
+  <h2>What the risk manager enforces</h2>
+  <table>
+    <tr><th>Limit</th><th>Default</th><th>Behaviour</th></tr>
+    <tr><td>Per-position</td><td>10% of equity</td><td>Order scaled or rejected</td></tr>
+    <tr><td>Gross exposure</td><td>100%</td><td>No leverage</td></tr>
+    <tr><td>Short selling</td><td>Disabled</td><td>Negative targets clamped to zero, always</td></tr>
+    <tr><td>Margin borrowing</td><td>0%</td><td>Cash-account behaviour; auto-loan blocked pre-submit</td></tr>
+    <tr><td>Daily loss</td><td>2%</td><td>One-day kill switch — reduce only</td></tr>
+    <tr><td>Drawdown</td><td>15% from high-water</td><td>Full halt until a human resets</td></tr>
+  </table>
+
+  <div class="note"><strong>Configuration trap worth knowing.</strong> The risk manager reads
+  its limits from <code>.env</code> only. The portfolio and position numbers in
+  <code>config/risk.yaml</code> are <em>not</em> loaded by it — that file feeds the backtester
+  and documents intent. Editing the YAML changes nothing about live risk.</div>
+
+  <h2>Layered defences</h2>
+  <div class="grid">
+    <div class="card"><h4>Pre-trade</h4><p>Whitelist, caps, cluster concentration,
+      liquidity, currency-cash checks — all before an order exists.</p></div>
+    <div class="card"><h4>Kill switches</h4><p>Daily-loss and drawdown halts persist to
+      disk, so a crash mid-day cannot forget that the switch was thrown.</p></div>
+    <div class="card"><h4>Human gate</h4><p>Cycle approval can require you to accept
+      every rebalance by hand from Telegram before anything is submitted.</p></div>
+    <div class="card"><h4>Position guards</h4><p>ATR trailing stops and a profit ratchet,
+      flowing through the audited command pipeline — never a new order path.</p></div>
+    <div class="card"><h4>Sentinel</h4><p>Intraday tripwires every 15 minutes. Information
+      only: it alerts, it never convenes or trades.</p></div>
+    <div class="card"><h4>Operator pins</h4><p><code>/hold</code> freezes a position out of the
+      rebalance entirely, and the PM is hard-blocked from allocating to it.</p></div>
+  </div>
+
+  <h2>The promotion path a strategy must survive</h2>
+  <p><strong>Backtest → walk-forward out-of-sample → paper for at least 30 days →
+  live, sized down.</strong> No exceptions, including for ideas that feel obviously
+  right. Especially those.</p>
+
+  <div class="foot">Chapter four · Risk</div>
+  <div class="folio">5</div>
+</section>
+
+<!-- ───────────────────────────── 6 · OPS ────────────────────────────── -->
+<section class="page">
+  <div class="kicker">Chapter five</div>
+  <h1 style="font-size:19pt">Operations</h1>
+  <p class="lede">One image, five services, and a watchdog that asks what was
+  produced rather than what ran.</p>
+
+  <h2>Daily rhythm (UTC)</h2>
+  <table>
+    <tr><th>Time</th><th>Job</th><th>Money?</th></tr>
+    <tr><td>every 5s / 30s</td><td>command processor, on-demand triggers</td><td>via approved orders</td></tr>
+    <tr><td>11:00</td><td>committee convenes</td><td>no</td></tr>
+    <tr><td>13:30 · 13:40</td><td>macro monitor · news watch</td><td>no</td></tr>
+    <tr><td>13:00–20:00 /15m</td><td>sentinel tripwires</td><td>no</td></tr>
+    <tr><td>Mon 14:30</td><td>agent PM rebalances the sim sleeve</td><td>no</td></tr>
+    <tr><td><strong>21:05</strong></td><td><strong>the cycle — the real rebalance</strong></td><td><strong>yes</strong></td></tr>
+    <tr><td>21:15 · 21:40</td><td>PM daily mark · price cache refresh</td><td>no</td></tr>
+    <tr><td>22:30</td><td>prediction grading, episodes, shadow ledger</td><td>no</td></tr>
+    <tr><td>Fri 22:45</td><td>historian distils the week</td><td>no</td></tr>
+    <tr><td>Sun 03:00</td><td>index constituent refresh</td><td>no</td></tr>
+  </table>
+
+  <h2>Interfaces</h2>
+  <div class="grid">
+    <div class="card"><h4>Telegram</h4><p>~40 commands plus a conversational copilot
+      that answers from the desk's own state and is structurally read-only.</p></div>
+    <div class="card"><h4>Dashboard :8787</h4><p>Six tabs — live, portfolio, rotation,
+      macro, economy, memory. Read-only, basic-auth.</p></div>
+    <div class="card"><h4>Ops channel</h4><p>Infrastructure alerts kept out of the trading
+      chat. Silence means healthy.</p></div>
+    <div class="card"><h4>CLI</h4><p>One <code>trading</code> entry point: status, data fetch,
+      backtest, paper, live.</p></div>
+  </div>
+
+  <h2>The watchdog philosophy</h2>
+  <p>Freshness checks ask whether a file was touched. They cannot ask whether the
+  work inside succeeded — and in this system that gap once hid three separate
+  loops that had been running and achieving nothing for weeks, while every check
+  stayed green.</p>
+
+  <p>So the watchdog now asks different questions. Did the committee produce a
+  ruling? Did the grader score anything? Are predictions piling up past their due
+  date? Has the historian ever run at all? Plus a catch-all that surfaces any
+  exception logged in the last hour, grouped by call site.</p>
+
+  <div class="note"><strong>The operating principle, stated plainly:</strong> a system that
+  reports what it <em>attempted</em> rather than what it <em>achieved</em> will eventually
+  lie to you, and it will do so politely, for months.</div>
+
+  <div class="foot">Chapter five · Operations</div>
+  <div class="folio">6</div>
+</section>
+
+<!-- ───────────────────────────── 7 · PRINCIPLES ─────────────────────── -->
+<section class="page">
+  <div class="kicker">Chapter six</div>
+  <h1 style="font-size:19pt">Design principles</h1>
+  <p class="lede">Most of these were bought rather than chosen. Each one is here
+  because something went wrong first.</p>
+
+  <h3>1 · Limits belong in code, not in prompts</h3>
+  <p>A rule stated in a charter is a suggestion. The PM's charter demanded "maximum
+  three ETF positions" for months while a six-ETF book satisfied every cap that was
+  actually enforced. If a constraint matters, it must be unbypassable.</p>
+
+  <h3>2 · Never accept "it ran" as evidence</h3>
+  <p>The scorecard, the counterfactual ledger and the weekly historian each ran on
+  schedule and produced nothing, for weeks, silently. Count what was produced and
+  alert when a counter that should move does not.</p>
+
+  <h3>3 · Turnover is not a staleness metric</h3>
+  <p>A book can churn weight every single week and hold the same names for a
+  quarter. What matters is whether the <em>name set</em> moved.</p>
+
+  <h3>4 · An unconditioned rule is a description of its sample</h3>
+  <p>Every belief must state where it applies, where it fails, and what would
+  retire it. A rule with no failure mode has not been thought through and will be
+  believed for far too long.</p>
+
+  <h3>5 · When two portfolios appear in one prompt, the key name is the whole
+  disambiguation</h3>
+  <p>A bare key called <code>positions</code> next to one called <code>holdings</code> caused an
+  allocator to spend its entire review obligation on a portfolio it did not manage.</p>
+
+  <h3>6 · Degrade, but say so</h3>
+  <p>A broad exception handler around a decision path is correct — a bad symbol
+  must not kill a cycle. It is only correct if the degradation is visible.</p>
+
+  <h3>7 · Test the wiring, not just the parts</h3>
+  <p>Every component that failed had passing unit tests. The bugs were in the
+  seams nobody could reach. If a loop cannot be tested without standing up the
+  whole system, extract it until it can.</p>
+
+  <h3>8 · Generated data does not belong in a config directory</h3>
+  <p>Machine-written files placed among human-curated ones inherit the wrong
+  permissions and quietly stop being maintained.</p>
+
+  <div class="rule"></div>
+
+  <h2>Deliberate constraints</h2>
+  <table>
+    <tr><td style="width:34%">Long-only</td><td>Shorting is disabled at the risk manager, not by convention</td></tr>
+    <tr><td>No leverage</td><td>Gross capped at 100%; margin borrowing at 0%</td></tr>
+    <tr><td>No intraday</td><td>Swing and position horizons only — days to months</td></tr>
+    <tr><td>Free data first</td><td>Paid sources require an explicit decision</td></tr>
+    <tr><td>Agents never trade</td><td>Enforced by an import test, not by good intentions</td></tr>
+  </table>
+
+  <div class="foot">Chapter six · Principles</div>
+  <div class="folio">7</div>
+</section>
+
+<!-- ───────────────────────────── 8 · STATUS ─────────────────────────── -->
+<section class="page">
+  <div class="kicker">Chapter seven</div>
+  <h1 style="font-size:19pt">Where it stands</h1>
+  <p class="lede">An honest assessment, written to be read before risking money
+  rather than after.</p>
+
+  <h2>Solid</h2>
+  <ul>
+    <li>Risk gating, order state machine and kill switches — well covered and defensive by construction.</li>
+    <li>Protocol seams with real alternate implementations, so the simulator is not a mock.</li>
+    <li>Dependency direction enforced by a test, not by convention.</li>
+    <li>982 tests, fast and hermetic; network and broker tests explicitly marked.</li>
+    <li>A mechanical strategy with a walk-forward-validated configuration and a live paper curve.</li>
+  </ul>
+
+  <h2>Unproven</h2>
+  <ul>
+    <li><strong>The agent layer has no track record yet.</strong> Every mechanism that would
+    have produced one was disconnected until 2026-08-06. Calibration starts from
+    zero, honestly, from today.</li>
+    <li>The simulated PM is ahead of SPY over a short window that includes a month
+    of a known bug. Encouraging; not evidence.</li>
+    <li>The lesson book predates working outcome measurement and should be read as
+    unevidenced.</li>
+  </ul>
+
+  <h2>Known open items</h2>
+  <table>
+    <tr><th>Item</th><th>Consequence</th></tr>
+    <tr><td>Cited lessons collected but never read</td><td>No measure of which beliefs get used</td></tr>
+    <tr><td>Six PM charter blocks all marked "mandatory"</td><td>Precedence undefined; the model chooses silently</td></tr>
+    <tr><td>Sentinel deployment cap stated in prose only</td><td>Ran 74% while reporting it respected 70%</td></tr>
+    <tr><td>Cluster map covers ~60 tickers</td><td>Concentration blind spots in a 1,600-name universe</td></tr>
+    <tr><td>No absolute capital cap</td><td>All limits are fractions of broker-reported equity</td></tr>
+    <tr><td>Live-account mirror unhealthy</td><td>Live panel may show stale figures</td></tr>
+  </table>
+
+  <h2>The road to live</h2>
+  <ol>
+    <li>Deploy, then confirm calibration becomes non-empty within days.</li>
+    <li>Thirty days of paper with the learning loops <em>verifiably</em> alive.</li>
+    <li>Fund the live account with only what can be lost — the cleanest cap there is.</li>
+    <li>Cycle approval on: accept every rebalance by hand for the first month.</li>
+    <li>Work the first-month checklist weekly, and write down every incident.</li>
+  </ol>
+
+  <div class="note"><strong>The standard to hold.</strong> Success in month one is not
+  profit — over one month on a small account, profit is noise, and reading it as a
+  verdict is the most likely way to fool yourself. Success is that every trade is
+  explainable, no invariant is violated, the graded-prediction count rises every
+  week, and at least one real bug is found. A clean month with an empty incidents
+  log usually means the monitoring is broken.</div>
+
+  <div class="foot">Chapter seven · Status · Generated 2026-08-06</div>
+  <div class="folio">8</div>
+</section>
+
+</body>
+</html>

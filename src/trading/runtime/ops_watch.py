@@ -5,7 +5,18 @@ Hourly mechanical checks on the box and the data plumbing:
 * disk usage and available memory on the host (as seen from the container);
 * freshness of every state artifact (broker snapshot, news, econ, macro,
   committee, PM book) against per-artifact tolerances;
-* trading halt state (a halted runner at 2am is news the operator wants).
+* trading halt state (a halted runner at 2am is news the operator wants);
+* **liveness of the learning loops** — did the committee, the PM, the
+  historian and the nightly memory pass actually produce anything;
+* **errors logged in the last hour**, grouped by call site.
+
+The last two exist because the first three were all green on 2026-08-06
+while three separate loops had been running-and-achieving-nothing for
+weeks. Freshness asks whether a file was touched. It cannot ask whether
+the work inside succeeded, and every one of those failures wrote a
+perfectly ordinary log line and updated a perfectly ordinary mtime. A
+watchdog that only checks that things RAN will keep missing this class of
+bug; these checks ask what was PRODUCED.
 
 Issues go to a dedicated ops Telegram channel when ``OPS_TELEGRAM_BOT_TOKEN``
 / ``OPS_TELEGRAM_CHAT_ID`` are set — keeping infrastructure noise out of the
@@ -18,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -40,6 +52,161 @@ _FRESHNESS: dict[str, tuple[str, float]] = {
     "committee": ("last_committee.json", 80.0),
     "PM book": ("agent_pm/portfolio.json", 200.0),  # weekly cadence
 }
+
+
+# --------------------------------------------------------------- liveness
+#
+# Everything above this line checks that a FILE is fresh. That is not the
+# same as checking that the work succeeded, and on 2026-08-06 the gap
+# turned out to be the whole ballgame: the nightly grader, the shadow
+# ledger and the weekly historian had each been running-and-achieving-
+# nothing for as long as they had existed, while every mtime check stayed
+# green. One raised a TypeError swallowed by a broad `except`; one turned
+# the same error into a `None` indistinguishable from "not due yet"; one
+# was never scheduled at all because of an indentation accident.
+#
+# So these checks ask a different question: did the loop PRODUCE anything?
+# A loop that is supposed to write a journal row and has not written one
+# in twice its cadence is broken, whatever its logs say.
+#
+# journal kind -> (label, max age in hours before it counts as dead)
+_JOURNAL_CADENCE: dict[str, tuple[str, float]] = {
+    "committee": ("committee debate", 96.0),  # 2x/week
+    "agent_pm": ("agent PM run", 240.0),  # weekly
+    "historian": ("historian distillation", 264.0),  # weekly, Friday
+    "daily": ("nightly memory pass", 48.0),  # nightly
+}
+
+
+def check_learning_loops(state_dir: Path, *, now: datetime | None = None) -> list[str]:
+    """Did the learning machinery actually do anything lately?
+
+    Returns issue strings; [] means the loops are alive. Never raises —
+    a watchdog that can crash is a watchdog that stops watching.
+    """
+    now = now or datetime.now(tz=timezone.utc)
+    issues: list[str] = []
+    db = Path(state_dir) / "memory" / "memory.db"
+    if not db.exists():
+        return []  # nothing to say before the first run creates it
+
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return ["memory database unreadable"]
+
+    try:
+        for kind, (label, max_h) in _JOURNAL_CADENCE.items():
+            try:
+                row = conn.execute(
+                    "SELECT MAX(ts) AS ts FROM journal WHERE kind = ?", (kind,)
+                ).fetchone()
+            except sqlite3.Error:
+                continue
+            last = row["ts"] if row else None
+            if last is None:
+                issues.append(f"{label}: has NEVER run")
+                continue
+            age_h = (now.timestamp() - float(last)) / 3600.0
+            if age_h > max_h:
+                issues.append(f"{label}: last ran {age_h / 24:.1f}d ago (limit {max_h / 24:.0f}d)")
+
+        # Predictions that came due and were never scored. This is the
+        # exact signature of the tz bug: they accumulate forever while the
+        # grader logs a cheerful nothing every night.
+        try:
+            overdue = conn.execute(
+                "SELECT COUNT(*) FROM predictions WHERE graded_ts IS NULL AND due_ts <= ?",
+                (now.timestamp() - 48 * 3600,),
+            ).fetchone()[0]
+            graded = conn.execute(
+                "SELECT COUNT(*) FROM predictions WHERE graded_ts IS NOT NULL"
+            ).fetchone()[0]
+            if overdue >= 5:
+                issues.append(
+                    f"{overdue} prediction(s) overdue and ungraded — the scorecard is not scoring"
+                )
+            total = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+            if total >= 20 and graded == 0:
+                issues.append(
+                    f"{total} predictions recorded, ZERO ever graded — agent calibration is empty"
+                )
+        except sqlite3.Error:
+            pass
+
+        # Shadow legs matured but never filled — the counterfactual ledger
+        # failing quietly looks exactly like a ledger patiently waiting.
+        try:
+            stale_legs = conn.execute(
+                "SELECT COUNT(*) FROM shadow WHERE ts <= ? AND ret_21d IS NULL",
+                (now.timestamp() - 45 * 86400,),
+            ).fetchone()[0]
+            if stale_legs >= 10:
+                issues.append(f"{stale_legs} shadow leg(s) matured but ungraded")
+        except sqlite3.Error:
+            pass  # older schema without the shadow table
+    finally:
+        conn.close()
+    return issues
+
+
+_ERROR_LINE_RE = re.compile(r"^\S+ \S+ \| (ERROR|CRITICAL)\s+\| ([^\s]+) - (.*)$")
+_ERROR_ALERT_THRESHOLD = 1  # one unhandled error is worth knowing about
+
+
+def check_recent_errors(log_dir: Path, *, hours: float = 1.5) -> list[str]:
+    """ERROR/CRITICAL lines from the last ``hours`` of today's log.
+
+    The catch-all. Most failures in this system are caught by a broad
+    ``except`` that calls ``logger.exception`` and continues — correct
+    behaviour for a trading loop that must not die over a bad symbol, but
+    it means a real bug produces a log line nobody reads and nothing
+    else. Every silent failure found on 2026-08-06 had been printing to
+    this file, nightly, for weeks.
+
+    Grouped by call site so a loop that throws two hundred times is one
+    alert, not two hundred.
+    """
+    now = datetime.now(tz=timezone.utc)
+    path = Path(log_dir) / f"trading.{now.date().isoformat()}.log"
+    if not path.exists():
+        return []
+    cutoff = now.timestamp() - hours * 3600.0
+    counts: dict[str, int] = {}
+    try:
+        # Tail only: these files reach tens of MB and the watchdog runs
+        # hourly on a 1-vCPU box.
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            start = max(0, f.tell() - 400_000)
+            f.seek(start)
+            lines = f.read().decode("utf-8", "replace").splitlines()
+            # Only discard the first line when we actually seeked into the
+            # middle of the file and it may therefore be a fragment. A
+            # short log starts at byte 0 and its first line is complete —
+            # dropping it there loses a real error.
+            tail = lines[1:] if start > 0 else lines
+    except OSError:
+        return []
+    for line in tail:
+        m = _ERROR_LINE_RE.match(line)
+        if not m:
+            continue
+        try:
+            stamp = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if stamp.timestamp() < cutoff:
+            continue
+        where, msg = m.group(2), m.group(3)[:120]
+        counts[f"{where} — {msg}"] = counts.get(f"{where} — {msg}", 0) + 1
+    if not counts:
+        return []
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:4]
+    return [f"error in {k}" + (f" (x{n})" if n > 1 else "") for k, n in top]
 
 
 def _mem_available_mb() -> float | None:
@@ -85,6 +252,21 @@ def check_health(state_dir: Path, *, now: datetime | None = None) -> list[str]:
             issues.append(f"trading HALTED: {halt.get('reason', 'no reason recorded')}")
     except Exception:
         pass
+
+    # Outcome checks, not mtime checks — see _JOURNAL_CADENCE above.
+    try:
+        issues.extend(check_learning_loops(state_dir, now=now))
+    except Exception:
+        logger.bind(component="ops_watch").exception("learning-loop check failed")
+
+    # Anything that threw in the last hour and was logged rather than
+    # surfaced. Runs last so infrastructure problems lead the message.
+    try:
+        from trading.core.config import settings
+
+        issues.extend(check_recent_errors(settings.log_dir))
+    except Exception:
+        logger.bind(component="ops_watch").exception("error-log scan failed")
 
     return issues
 

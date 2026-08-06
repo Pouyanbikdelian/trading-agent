@@ -243,3 +243,59 @@ class TestAgentsSeeMandates:
 
         assert "operator_mandates" in _VIEW_KEYS["risk_officer"]
         assert "operator_mandates" in _VIEW_KEYS["position_coach"]
+
+
+class TestAllocationPhrasingIsCaught:
+    """Regression for 2026-08-06: the detector was vocabulary-locked and
+    silently swallowed the largest strategic instruction the operator had
+    ever sent — a full thematic allocation that graded as `strong` and was
+    still dropped, because he wrote "dedicate" and "focus" and neither was
+    a recognised verb. A detector whose recall depends on the operator
+    guessing its vocabulary fails silently, every time, forever."""
+
+    REAL_MESSAGE = (
+        "For PM SIMULATION, I want you to hardly focus and dedicate at least 40% "
+        "of my portoflio on physical AI and quantinum .. but maybe let's be smart "
+        "whichy has more potetnial to move and grow earlier then lean heavier "
+        "toward that. Rest of capital 30% to energy infrustrture, and Fintech and "
+        "innovative Airdefence. and also be awrea to keep 20-30 % if markets are "
+        "band falling tobuy cheaper."
+    )
+
+    def test_the_message_that_was_lost_is_now_captured(self) -> None:
+        assert looks_like_mandate(self.REAL_MESSAGE) is True
+        assert grade_strength(self.REAL_MESSAGE) == "strong"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "I want you to dedicate 40% to quantum going forward",
+            "I want to put 30% into energy infrastructure",
+            "make sure we keep 20% cash",
+            "I want you to tilt the book toward defence",
+            "I want to target 15% in fintech",
+            "make sure we trim semis next round",
+        ],
+    )
+    def test_natural_allocation_phrasings(self, text: str) -> None:
+        assert looks_like_mandate(text) is True
+
+    def test_a_bare_percentage_still_needs_a_strength_marker(self) -> None:
+        """Otherwise every market comment containing a number becomes an
+        instruction."""
+        assert looks_like_mandate("SPY is up 3% today") is False
+        assert looks_like_mandate("the book is 100% technology right now") is False
+        assert looks_like_mandate("healthcare is down 3.8% vs SPY") is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "what is SPY doing today?",
+            "are you able to consider NVDA?",
+            "if I told you I want 40% in tech, what would happen?",
+            "how much cash do we hold?",
+            "can you dedicate 40% to quantum?",
+        ],
+    )
+    def test_questions_and_hypotheticals_are_still_not_mandates(self, text: str) -> None:
+        assert looks_like_mandate(text) is False
