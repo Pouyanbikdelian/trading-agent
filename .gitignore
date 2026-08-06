@@ -1,3 +1,20 @@
+# OS / editor junk
+.DS_Store
+*.swp
+.Rhistory
+
+# Personal, not part of the trading system. Kept on disk, out of git —
+# these were showing in every `git status` and making it harder to see
+# what had actually changed.
+_career_materials/
+linkedin_drafts/.Rhistory
+
+# Research scratch: kept deliberately (old backtest results are worth
+# referring back to) but never committed — result CSVs and PNGs are
+# regenerable artifacts, not source.
+experiments/__pycache__/
+experiments/*.log
+
 # Python
 __pycache__/
 *.py[cod]

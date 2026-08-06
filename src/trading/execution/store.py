@@ -200,6 +200,59 @@ class OrderStore:
         rows = self.conn.execute(q, params).fetchall()
         return [self._row_to_order(r) for r in rows]
 
+    #: Statuses that are not terminal — an order sitting in one of these
+    #: may still fill, so the cycle must keep looking for its fills.
+    OPEN_STATUSES: tuple[OrderStatus, ...] = (
+        OrderStatus.PENDING,
+        OrderStatus.SUBMITTED,
+        OrderStatus.PARTIAL,
+    )
+
+    def oldest_open_created_at(self) -> datetime | None:
+        """When the oldest still-open order was created, or None.
+
+        The cycle used to reconcile fills with ``since=ts_start`` — only
+        fills that arrived during the submitting cycle. An order placed
+        after the close that fills at the next open was therefore never
+        seen: by the time the next cycle ran, its ``since`` was already
+        past the fill. Those rows stayed ``submitted`` in orders.db
+        permanently (all of 2026-06-10 and 2026-07-14 are still like
+        that), which means the local view of what we hold silently
+        diverges from the broker's.
+
+        Reconciling from here instead is self-healing: as long as an order
+        is open we keep asking for its fills, and the moment one is found
+        the row goes terminal and stops widening the window. No watermark
+        file to corrupt, and it back-fills the existing stuck rows on the
+        first run without a migration.
+        """
+        placeholders = ",".join("?" * len(self.OPEN_STATUSES))
+        row = self.conn.execute(
+            f"SELECT MIN(created_at) AS t FROM orders WHERE status IN ({placeholders})",
+            [s.value for s in self.OPEN_STATUSES],
+        ).fetchone()
+        if row is None or row["t"] is None:
+            return None
+        return datetime.fromtimestamp(float(row["t"]), tz=timezone.utc)
+
+    def open_orders_older_than(
+        self, cutoff: datetime
+    ) -> list[tuple[Order, OrderStatus, str | None]]:
+        """Still-open orders created before ``cutoff`` — the stale ones.
+
+        An order that has been open for days is either a broker-side
+        problem or a reconciliation gap. Either way the operator should
+        hear about it rather than discover it in a P&L that does not add
+        up.
+        """
+        placeholders = ",".join("?" * len(self.OPEN_STATUSES))
+        rows = self.conn.execute(
+            f"SELECT * FROM orders WHERE status IN ({placeholders}) AND created_at < ? "
+            "ORDER BY created_at ASC",
+            [*(s.value for s in self.OPEN_STATUSES), _ts_to_epoch(cutoff)],
+        ).fetchall()
+        return [self._row_to_order(r) for r in rows]
+
     def _row_to_order(self, r: sqlite3.Row) -> tuple[Order, OrderStatus, str | None]:
         order = Order(
             client_order_id=r["client_order_id"],

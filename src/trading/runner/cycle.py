@@ -28,7 +28,7 @@ Hard-coded design choices (and why)
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -250,7 +250,7 @@ class Cycle:
                 self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
                 self.alerts.error(f"force-flatten submit failed: {e!r}")
 
-        fills = self.broker.get_fills(since=ts_start)
+        fills = self.broker.get_fills(since=self._reconcile_from(ts_start))
         for fill in fills:
             try:
                 self.order_store.save_fill(fill, client_order_id=fill.order_id)
@@ -621,14 +621,24 @@ class Cycle:
         except Exception:
             logger.bind(component="cycle").exception("broker tick failed")
 
-        # 10. Reconcile fills since the start of this cycle.
-        fills = self.broker.get_fills(since=ts_start)
+        # 10. Reconcile fills — from the oldest STILL-OPEN order, not from
+        #     the start of this cycle.
+        #
+        #     `since=ts_start` only ever saw fills that arrived during the
+        #     submitting cycle. An order placed after the close that filled
+        #     at the next open was invisible: by the next cycle, `since`
+        #     was already past it. Those rows stayed `submitted` forever
+        #     and the local position view silently diverged from the
+        #     broker's — which on live means the system can believe it
+        #     holds nothing and buy the same name again.
+        fills = self.broker.get_fills(since=self._reconcile_from(ts_start))
         for fill in fills:
             try:
                 self.order_store.save_fill(fill, client_order_id=fill.order_id)
                 self.order_store.update_status(fill.order_id, OrderStatus.FILLED)
             except Exception:
                 logger.bind(component="cycle").exception("save_fill failed")
+        self._warn_on_stale_open_orders(ts_start)
 
         # 10b. Telegram a fill summary so the operator doesn't have to
         # poll /positions. Aggregated to keep noise low even when 8
@@ -664,6 +674,61 @@ class Cycle:
 
     def _elapsed_ms(self, ts_start: datetime) -> float:
         return (self._clock() - ts_start).total_seconds() * 1000.0
+
+    #: How far back fill reconciliation may reach. An order open longer
+    #: than this is a problem to alert on, not a window to keep widening —
+    #: without a ceiling one wedged row would make every cycle ask the
+    #: broker for a year of fills.
+    RECONCILE_LOOKBACK = timedelta(days=14)
+
+    #: An order still open past this is stale. Two sessions covers a
+    #: normal after-hours order filling at the next open, plus a weekend.
+    STALE_ORDER_AGE = timedelta(days=3)
+
+    def _reconcile_from(self, ts_start: datetime) -> datetime:
+        """Earliest timestamp worth asking the broker for fills from.
+
+        The oldest still-open order, floored at RECONCILE_LOOKBACK and
+        never later than this cycle's start. Self-healing: while an order
+        is open we keep looking for its fill; once it goes terminal the
+        window closes again on its own. No watermark file to corrupt, and
+        the existing stuck rows get back-filled on the first run.
+        """
+        floor = ts_start - self.RECONCILE_LOOKBACK
+        try:
+            oldest = self.order_store.oldest_open_created_at()
+        except Exception:
+            logger.bind(component="cycle").exception("open-order lookup failed")
+            return ts_start
+        if oldest is None:
+            return ts_start
+        return max(min(oldest, ts_start), floor)
+
+    def _warn_on_stale_open_orders(self, ts_start: datetime) -> None:
+        """Alert on orders that have been open too long.
+
+        The reconciliation fix stops NEW orders getting stuck, but an
+        order the broker never acted on still needs a human. Silence when
+        healthy; one message listing the offenders when not.
+        """
+        try:
+            stale = self.order_store.open_orders_older_than(ts_start - self.STALE_ORDER_AGE)
+        except Exception:
+            logger.bind(component="cycle").exception("stale-order check failed")
+            return
+        if not stale:
+            return
+        lines = [
+            f"  `{o.instrument.symbol}` {o.side.value} {o.quantity:g} "
+            f"({status.value}, {(ts_start - o.created_at).days}d old)"
+            for o, status, _ in stale[:8]
+        ]
+        logger.bind(component="cycle").warning(f"{len(stale)} order(s) open past the stale window")
+        self.alerts.error(
+            f"⚠️ *{len(stale)} order(s) still open* — never reached a terminal state:\n"
+            + "\n".join(lines)
+            + "\n_Local position view may differ from the broker. Check /orders._"
+        )
 
     # Per-instrument refresh hard ceiling. yfinance has no built-in timeout;
     # before this we silently hung for >5min on the sp500 universe, blowing
