@@ -1,208 +1,40 @@
-"""Refresh S&P 500 + NASDAQ-100 universe constituents from Wikipedia.
+"""Refresh index constituents — thin CLI wrapper.
 
-Wikipedia is the de-facto reference for these indices: crowd-maintained and
-typically updated within hours of an actual rebalance. The free alternative
-to a paid index-data feed.
+All the logic lives in ``trading.data.universe_refresh`` because the
+Docker image copies ``src/`` and NOT ``scripts/``: anything the runner
+needs at runtime must be importable, not a file on a path that only
+exists in the git checkout.
 
-Output: writes ``state/universes.generated.yaml`` (override with
-``UNIVERSES_GENERATED_PATH``) with two universes:
-
-* ``sp500``      — current S&P 500 constituents.
-* ``nasdaq100``  — current NASDAQ-100 constituents.
-
-The runner's universe loader merges this file with ``universes.yaml``; the
-hand-curated file wins on any name collision, so adding either name to
-``universes.yaml`` lets you override the auto-managed list.
-
-Run cadence
------------
-* Weekly is plenty. Indices rebalance quarterly, but ad-hoc adds/drops
-  (acquisitions, bankruptcies, spin-offs) happen between rebalances.
-* The runner schedules this itself (Sundays 03:00 UTC, job
-  ``universe_refresh``) and alerts with the membership delta, so a change
-  is visible rather than silent. Before that existed the file went two
-  months without a refresh and nothing noticed.
-
-Symbol formatting
------------------
-Wikipedia uses dotted class shares (``BRK.B``, ``BF.B``). yfinance wants
-dashes; IBKR wants no separator. We standardize on **dashes** because the
-default data source is yfinance. The IBKR adapter handles the dash form for
-US equities transparently.
+Writes ``state/universes.generated.yaml`` (override with
+``UNIVERSES_GENERATED_PATH``). The runner also does this on its own
+schedule — Sundays 03:00 UTC, job ``universe_refresh`` — and alerts with
+the membership delta, so a constituent change is visible rather than
+silent. This script is for running it by hand.
 
 Usage::
 
     uv run python scripts/refresh_universes.py
-    git diff config/universes.generated.yaml      # review what changed
-    git add config/universes.generated.yaml && git commit
+    docker compose exec trader python -m trading.data.universe_refresh
 """
 
 from __future__ import annotations
 
-import datetime as _dt
-import io
-import os
 import sys
-import urllib.request
 from pathlib import Path
 
-import pandas as pd
-import yaml
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-_SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-_NDX_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
-_R1000_URL = "https://en.wikipedia.org/wiki/Russell_1000_Index"
-
-# Wikipedia blocks requests without a UA. They ask scripts to identify
-# themselves with a project name and a way to contact you if it misbehaves.
-_USER_AGENT = (
-    "trading-agent/0.1 (universe-refresh script; https://github.com/your-user/trading-agent)"
-)
-
-
-def _out_path() -> Path:
-    """Write to ``state/`` — a writable volume — not ``config/``.
-
-    ``config/`` is bind-mounted read-only in the container so the running
-    system cannot mutate operator YAML. That is right, and it also meant
-    this script could never run on the box: the index constituents sat
-    two months stale because the only place they could be written was a
-    directory the writer could not write to. Generated data belongs with
-    state. Override with UNIVERSES_GENERATED_PATH.
-    """
-    override = os.getenv("UNIVERSES_GENERATED_PATH")
-    if override:
-        return Path(override)
-    try:
-        from trading.core.config import settings
-
-        return Path(settings.state_dir) / "universes.generated.yaml"
-    except Exception:
-        return Path(__file__).resolve().parents[1] / "state" / "universes.generated.yaml"
-
-
-_OUT = _out_path()
-
-
-def _fetch_html(url: str, *, timeout: float = 15.0) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
-
-
-def _normalize(symbols: list[str]) -> list[str]:
-    """Convert vendor-specific share-class separators to yfinance's dashes
-    and de-duplicate while preserving order."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for raw in symbols:
-        s = str(raw).strip().upper().replace(".", "-")
-        if not s or s in seen:
-            continue
-        seen.add(s)
-        out.append(s)
-    return sorted(out)
-
-
-def fetch_sp500() -> list[str]:
-    html = _fetch_html(_SP500_URL)
-    tables = pd.read_html(io.StringIO(html))
-    df = tables[0]
-    # The constituents table's symbol column has been called "Symbol" or
-    # "Ticker" depending on when you scrape it. Match by prefix to ride out
-    # the next Wikipedia rename without code changes.
-    sym_col = next(c for c in df.columns if str(c).lower().startswith(("sym", "tick")))
-    return _normalize(df[sym_col].astype(str).tolist())
-
-
-def fetch_nasdaq100() -> list[str]:
-    html = _fetch_html(_NDX_URL)
-    tables = pd.read_html(io.StringIO(html))
-    for df in tables:
-        cols_lower = {str(c).lower() for c in df.columns}
-        if cols_lower & {"ticker", "symbol"}:
-            sym_col = next(c for c in df.columns if str(c).lower() in ("ticker", "symbol"))
-            return _normalize(df[sym_col].astype(str).tolist())
-    raise RuntimeError("could not find NASDAQ-100 constituent table on the page")
-
-
-def fetch_russell1000() -> list[str]:
-    """Wikipedia's Russell 1000 page lists current components with tickers.
-    The components table is the (only) one with a ticker/symbol column."""
-    html = _fetch_html(_R1000_URL)
-    tables = pd.read_html(io.StringIO(html))
-    best: list[str] = []
-    for df in tables:
-        for c in df.columns:
-            if str(c).lower().startswith(("sym", "tick")):
-                syms = _normalize(df[c].astype(str).tolist())
-                if len(syms) > len(best):
-                    best = syms
-    if not best:
-        raise RuntimeError("could not find Russell 1000 component table on the page")
-    return best
+from trading.data.universe_refresh import refresh
 
 
 def main() -> int:
-    try:
-        sp500 = fetch_sp500()
-        ndx = fetch_nasdaq100()
-    except Exception as e:
-        print(f"refresh failed: {e!r}", file=sys.stderr)
+    result = refresh()
+    if not result["ok"]:
+        print(f"refresh failed: {result['reason']}", file=sys.stderr)
         return 1
-    # Russell 1000 is best-effort: the Wikipedia page is less rigorously
-    # maintained than the S&P/NDX ones, so its absence must not block the
-    # primary refresh.
-    try:
-        r1000 = fetch_russell1000()
-        if len(r1000) < 700:
-            print(f"russell1000 only {len(r1000)} symbols; skipping it", file=sys.stderr)
-            r1000 = []
-    except Exception as e:
-        print(f"russell1000 fetch failed (non-fatal): {e!r}", file=sys.stderr)
-        r1000 = []
-
-    # Sanity checks before writing — better to refuse than to ship a 5-symbol
-    # "S&P 500" because Wikipedia changed a table id.
-    if len(sp500) < 400:
-        print(f"refusing to write: sp500 has only {len(sp500)} symbols", file=sys.stderr)
-        return 1
-    if len(ndx) < 80:
-        print(f"refusing to write: nasdaq100 has only {len(ndx)} symbols", file=sys.stderr)
-        return 1
-
-    payload = {
-        "_generated_by": "scripts/refresh_universes.py",
-        "_generated_at": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(),
-        "universes": {
-            "sp500": {
-                "asset_class": "equity",
-                "description": f"S&P 500 from Wikipedia ({len(sp500)} names).",
-                "symbols": sp500,
-            },
-            "nasdaq100": {
-                "asset_class": "equity",
-                "description": f"NASDAQ-100 from Wikipedia ({len(ndx)} names).",
-                "symbols": ndx,
-            },
-        },
-    }
-    if r1000:
-        payload["universes"]["russell1000"] = {
-            "asset_class": "equity",
-            "description": f"Russell 1000 from Wikipedia ({len(r1000)} names).",
-            "symbols": r1000,
-        }
-
-    _OUT.parent.mkdir(parents=True, exist_ok=True)
-    _OUT.write_text(
-        "# AUTO-GENERATED — do not hand-edit. Re-run scripts/refresh_universes.py to refresh.\n"
-        "# Hand-curated entries in universes.yaml WIN over anything here.\n"
-        + yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
-    )
-    print(f"wrote {_OUT}")
-    print(f"  sp500     : {len(sp500)} symbols")
-    print(f"  nasdaq100 : {len(ndx)} symbols")
+    print(f"wrote {result['path']}")
+    for name, n in result["counts"].items():
+        print(f"  {name:<12} {n} symbols")
     return 0
 
 

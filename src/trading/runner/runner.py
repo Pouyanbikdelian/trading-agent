@@ -21,7 +21,6 @@ import asyncio
 import contextlib
 import os
 import signal
-import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1286,18 +1285,21 @@ class Runner:
                 with contextlib.suppress(Exception):
                     before[name] = {i.symbol for i in load_universe(name)}
 
-            import subprocess
+            # Import, do not subprocess. The first cut shelled out to
+            # /app/scripts/refresh_universes.py — a path that does not
+            # exist in the image, because the Dockerfile copies src/ and
+            # config/ but not scripts/. It would have raised
+            # FileNotFoundError every Sunday, been swallowed by the
+            # except below, and left the universe frozen while looking
+            # scheduled. Importing also avoids a second pandas in RAM.
+            from trading.data.universe_refresh import refresh
 
-            script = Path(__file__).resolve().parents[3] / "scripts" / "refresh_universes.py"
-            rc = await _asyncio.to_thread(
-                lambda: subprocess.run(
-                    [sys.executable, str(script)], capture_output=True, text=True, timeout=300
-                )
-            )
-            if rc.returncode != 0:
+            result = await _asyncio.to_thread(refresh)
+            if not result["ok"]:
                 logger.bind(component="data").warning(
-                    f"universe refresh failed rc={rc.returncode}: {rc.stderr[-300:]}"
+                    f"universe refresh failed: {result['reason']}"
                 )
+                self.alerts.info(f"⚠️ universe refresh failed: {result['reason']}")
                 return
             clear_cache()
 
