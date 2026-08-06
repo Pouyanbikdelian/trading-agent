@@ -35,6 +35,7 @@ from typing import Any, ClassVar, Literal
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from trading.core.exec_lock import ExecutionBusyError, execution_lock
 from trading.core.logging import logger
 from trading.core.types import (
     AccountSnapshot,
@@ -56,7 +57,7 @@ from trading.runner.state import RunnerStore
 from trading.selection.overlay import vol_target
 from trading.strategies.base import get_strategy
 
-CycleStatus = Literal["ok", "no_orders", "halted", "error"]
+CycleStatus = Literal["ok", "no_orders", "halted", "error", "skipped_locked"]
 
 
 class CycleReport(BaseModel):
@@ -237,26 +238,32 @@ class Cycle:
         )
 
         orders_submitted = 0
-        for order in orders:
-            try:
-                self.order_store.save_order(order)
-                self.broker.submit_order(order)
-                self.order_store.update_status(order.client_order_id, OrderStatus.SUBMITTED)
-                orders_submitted += 1
-            except Exception as e:
-                logger.bind(component="cycle").exception(
-                    f"force-flatten submit failed for {order.client_order_id}"
-                )
-                self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
-                self.alerts.error(f"force-flatten submit failed: {e!r}")
+        # Force-flatten is the operator's emergency exit, so it takes the
+        # lock with a LONGER deadline than a routine cycle: if a cycle is
+        # mid-submit we would rather wait for it than fail to flatten.
+        # It still refuses to wait forever — a wedged holder must not
+        # trap the one command that reduces risk.
+        with execution_lock(self._state_dir(), holder="force_flatten", timeout=120.0):
+            for order in orders:
+                try:
+                    self.order_store.save_order(order)
+                    self.broker.submit_order(order)
+                    self.order_store.update_status(order.client_order_id, OrderStatus.SUBMITTED)
+                    orders_submitted += 1
+                except Exception as e:
+                    logger.bind(component="cycle").exception(
+                        f"force-flatten submit failed for {order.client_order_id}"
+                    )
+                    self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
+                    self.alerts.error(f"force-flatten submit failed: {e!r}")
 
-        fills = self.broker.get_fills(since=self._reconcile_from(ts_start))
-        for fill in fills:
-            try:
-                self.order_store.save_fill(fill, client_order_id=fill.order_id)
-                self.order_store.update_status(fill.order_id, OrderStatus.FILLED)
-            except Exception:
-                logger.bind(component="cycle").exception("save_fill failed")
+            fills = self.broker.get_fills(since=self._reconcile_from(ts_start))
+            for fill in fills:
+                try:
+                    self.order_store.save_fill(fill, client_order_id=fill.order_id)
+                    self.order_store.update_status(fill.order_id, OrderStatus.FILLED)
+                except Exception:
+                    logger.bind(component="cycle").exception("save_fill failed")
         try:
             self.runner_store.save_snapshot(self.broker.get_account())
         except Exception:
@@ -590,8 +597,48 @@ class Cycle:
                 duration_ms=self._elapsed_ms(ts_start),
             )
 
-        # 9. Submit each order. The cycle stops at first hard failure to
-        #    avoid partial portfolio bringups, but logs and alerts.
+        # 9. Submit each order, under the single execution lock.
+        #
+        #    Four paths can reach the broker — this cycle, the on-demand
+        #    cycle, the approval flow and manual commands — and until
+        #    2026-08-06 they shared no mutex, only per-job locks that stop
+        #    a job racing ITSELF. The system already shipped one incident
+        #    from that gap (2026-07-14/15 order stacking took two names
+        #    short). The lock is held around the broker mutation only:
+        #    submit plus reconcile, seconds, not the whole cycle.
+        try:
+            with execution_lock(self._state_dir(), holder="cycle"):
+                orders_submitted, fills = self._submit_and_reconcile(orders, prices, ts_start)
+        except ExecutionBusyError as e:
+            # Skipping a cycle is recoverable; double-submitting is not.
+            logger.bind(component="cycle").warning(f"cycle skipped: {e}")
+            self.alerts.error(
+                f"⚠️ cycle skipped — another path is trading: {e.holder}\n"
+                "_No orders submitted. The next scheduled cycle will retry._"
+            )
+            return CycleReport(
+                ts=ts_start,
+                status="skipped_locked",
+                orders_submitted=0,
+                fills_received=0,
+                decisions=decisions,
+                duration_ms=self._elapsed_ms(ts_start),
+            )
+
+        # 10b. Telegram a fill summary so the operator doesn't have to
+        # poll /positions. Aggregated to keep noise low even when 8
+        # names fill at once. Silent if no fills this cycle.
+        if fills:
+            self._announce_fills(fills)
+
+        return self._finish_cycle(ts_start, decisions, orders_submitted, fills)
+
+    def _submit_and_reconcile(
+        self, orders: list[Any], prices: pd.DataFrame, ts_start: datetime
+    ) -> tuple[int, list[Any]]:
+        """Everything that mutates broker state. Runs under the execution
+        lock — keep it short, and keep anything slow (price refresh, LLM
+        calls, snapshots) outside it."""
         orders_submitted = 0
         for order in orders:
             try:
@@ -639,13 +686,18 @@ class Cycle:
             except Exception:
                 logger.bind(component="cycle").exception("save_fill failed")
         self._warn_on_stale_open_orders(ts_start)
+        return orders_submitted, fills
 
-        # 10b. Telegram a fill summary so the operator doesn't have to
-        # poll /positions. Aggregated to keep noise low even when 8
-        # names fill at once. Silent if no fills this cycle.
-        if fills:
-            self._announce_fills(fills)
-
+    def _finish_cycle(
+        self,
+        ts_start: datetime,
+        decisions: list[Any],
+        orders_submitted: int,
+        fills: list[Any],
+    ) -> CycleReport:
+        """Snapshot, announce and report — deliberately OUTSIDE the
+        execution lock, so a slow broker snapshot cannot block the
+        operator's /flatten."""
         # 11. Persist the post-trade snapshot AND announce the new state.
         # Operator asked for an immediate portfolio print after every cycle
         # that did anything — so they don't have to /positions + /balances
@@ -671,6 +723,15 @@ class Cycle:
         )
 
     # ---------------------------------------------------------- helpers
+
+    @staticmethod
+    def _state_dir() -> Path:
+        """Where the shared execution lock lives. Read at call time, not
+        at construction, so a test or a live/paper split that overrides
+        STATE_DIR is honoured."""
+        from trading.core.config import settings as _s
+
+        return Path(_s.state_dir)
 
     def _elapsed_ms(self, ts_start: datetime) -> float:
         return (self._clock() - ts_start).total_seconds() * 1000.0

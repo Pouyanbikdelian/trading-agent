@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from trading.core.exec_lock import ExecutionBusyError, execution_lock
 from trading.core.logging import logger
 from trading.core.types import AssetClass, Instrument, Order, OrderType, Side, TimeInForce
 from trading.execution.base import Broker
@@ -166,10 +167,35 @@ def _execute_one(
         alerts.error(f"🛑 `{_short_id(cmd.id)}` {cmd.type.value} {msg}")
         return
 
+    # Execution gate: one mutex across every path that can reach the
+    # broker — the scheduled cycle, the on-demand cycle, the approval
+    # flow and these manual commands. They previously shared nothing but
+    # per-job locks, which stop a job racing ITSELF and do nothing about
+    # two different jobs racing each other; the 2026-07-14 order-stacking
+    # incident came out of exactly that gap.
+    #
+    # Only order-submitting commands take it. /reconnect and /refresh do
+    # not touch positions and must stay available while a cycle runs —
+    # in particular /reconnect is how you recover a wedged broker.
+    #
+    # A refusal here is reported to the operator with the current holder,
+    # because "try again" is only useful if you know what to wait for.
+    needs_lock = cmd.type in _ORDER_SUBMITTING_COMMANDS
     try:
-        result = handler(cmd, broker)
+        if needs_lock:
+            with execution_lock(state_dir, holder=f"command:{cmd.type.value}"):
+                result = handler(cmd, broker)
+        else:
+            result = handler(cmd, broker)
         mark_executed(cmd, state_dir, status="ok", result=result)
         alerts.info(_format_success(cmd, result))
+    except ExecutionBusyError as e:
+        msg = f"busy — {e.holder} is trading right now. Re-issue in a moment."
+        logger.bind(component="command_processor").warning(
+            f"execution lock blocked {cmd.type.value} command {cmd.id}: {e.holder}"
+        )
+        mark_executed(cmd, state_dir, status="error", result=msg)
+        alerts.error(f"⏳ `{_short_id(cmd.id)}` {cmd.type.value} {msg}")
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
         logger.bind(component="command_processor").exception(f"command {cmd.type.value} failed")
