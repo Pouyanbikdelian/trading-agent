@@ -108,6 +108,46 @@ _CRON_DOW_NAMES = {
 }
 
 
+def _precycle_trigger(cron: str, tz: str, *, lead_minutes: int = 60) -> Any:
+    """A cron trigger ``lead_minutes`` before ``cron``, or None.
+
+    DERIVED from the cycle's own schedule rather than hardcoded, so the
+    two cannot drift: change CRON in .env and the pre-cycle warning
+    follows it. A readiness check that fires an hour before a cycle that
+    has since moved is worse than none — it would report "all clear" and
+    then the cycle would run unchecked.
+
+    Only handles the fixed ``m h * * DOW`` shape the runner actually uses.
+    Anything cleverer (step values, lists in the minute field) returns
+    None and the job is simply not scheduled, which is honest.
+    """
+    # Imported here, not at module scope: apscheduler is only needed when
+    # a runner is actually being wired, and the rest of this module is
+    # importable without it.
+    from apscheduler.triggers.cron import CronTrigger
+
+    parts = cron.split()
+    if len(parts) != 5:
+        return None
+    minute, hour, dom, month, dow = parts
+    try:
+        m, h = int(minute), int(hour)
+    except ValueError:
+        return None  # ranges/steps in minute or hour — not our shape
+
+    total = h * 60 + m - lead_minutes
+    if total < 0:
+        # Crossing midnight backwards would also shift the day-of-week,
+        # and getting that subtly wrong is worse than not running.
+        logger.bind(component="runner").warning(
+            f"pre-cycle check skipped: {cron} minus {lead_minutes}m crosses midnight"
+        )
+        return None
+    return CronTrigger(
+        minute=total % 60, hour=total // 60, day=dom, month=month, day_of_week=dow, timezone=tz
+    )
+
+
 def _humanize_cron(expr: str) -> str:
     """Translate a 5-field cron string into something humans read.
 
@@ -454,6 +494,27 @@ class Runner:
                     replace_existing=True,
                     max_instances=1,
                 )
+            # Broker readiness, ONE HOUR before the cycle. IBKR mandates
+            # 2FA for every user and re-prompts after its daily restart
+            # and weekly shutdown; IBC retries a missed prompt, but only
+            # a human can answer it. Every other consequence of a dead
+            # gateway is non-fatal — this is the one moment it is not,
+            # because a cycle that cannot reach the broker submits
+            # nothing and looks identical to one that chose to.
+            #
+            # Derived from the cycle's own cron so the two can never
+            # drift apart: change CRON and the warning moves with it.
+            with contextlib.suppress(Exception):
+                pre = _precycle_trigger(self.config.schedule_cron, self.config.schedule_tz)
+                if pre is not None:
+                    self._scheduler.add_job(
+                        self._check_broker_ready_async,
+                        pre,
+                        id="broker_ready",
+                        replace_existing=True,
+                        max_instances=1,
+                    )
+
             # Price cache refresh: weekdays 21:40 UTC, after the close and
             # after the rebalance. Until now NOTHING refreshed the parquet
             # cache on a schedule — it updated only as a side effect of the
@@ -1275,6 +1336,45 @@ class Runner:
             )
         except Exception:
             logger.bind(component="memory").exception("memory grader failed")
+
+    #: How far ahead of the cycle to check the broker. Long enough to open
+    #: an app, approve a login and let the gateway finish handshaking;
+    #: short enough that the answer is still true when the cycle runs.
+    PRECYCLE_LEAD_MINUTES = 60
+
+    async def _check_broker_ready_async(self) -> None:
+        """Ask the broker for the account an hour before the cycle needs it.
+
+        Alerts only on failure, and once on recovery after a failure — a
+        green message every single week is a message that stops being
+        read, which defeats the purpose.
+        """
+        try:
+            from trading.runtime.broker_ready import (
+                check_broker_ready,
+                format_not_ready_alert,
+                format_ready_note,
+            )
+
+            result = await asyncio.to_thread(check_broker_ready, self.cycle.broker)
+            flag = settings.state_dir / "broker_ready_failed.flag"
+            if not result["ready"]:
+                flag.parent.mkdir(parents=True, exist_ok=True)
+                flag.write_text(result.get("detail", ""))
+                self.alerts.critical(
+                    format_not_ready_alert(result, minutes_to_cycle=self.PRECYCLE_LEAD_MINUTES)
+                )
+                return
+            if flag.exists():
+                flag.unlink(missing_ok=True)
+                self.alerts.info(
+                    format_ready_note(result, minutes_to_cycle=self.PRECYCLE_LEAD_MINUTES)
+                )
+            logger.bind(component="broker_ready").info(
+                f"pre-cycle broker check ok (equity {result.get('equity')})"
+            )
+        except Exception:
+            logger.bind(component="broker_ready").exception("pre-cycle broker check failed")
 
     async def _refresh_universes_async(self) -> None:
         """Weekly index-constituent refresh. Reports the delta, not just

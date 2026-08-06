@@ -59,6 +59,30 @@ from trading.strategies.base import get_strategy
 
 CycleStatus = Literal["ok", "no_orders", "halted", "error", "skipped_locked"]
 
+# Substrings that mean "we could not reach the broker" rather than "the
+# broker said no". Matched on the exception text because ib-async raises
+# several unrelated types for the same underlying condition — a plain
+# ConnectionError, an asyncio TimeoutError, and its own errors all mean
+# the same thing to an operator: the session is down, go tap your phone.
+_DISCONNECT_MARKERS = (
+    "not connected",
+    "connection",
+    "connect call failed",
+    "timeout",
+    "timed out",
+    "broken pipe",
+    "reset by peer",
+    "no route to host",
+    "econnrefused",
+    "refused",
+)
+
+
+def _looks_like_disconnect(exc: BaseException) -> bool:
+    """Distinguish a dead session from a refused order."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(m in text for m in _DISCONNECT_MARKERS)
+
 
 class CycleReport(BaseModel):
     """Outcome of a single cycle. Persisted by RunnerStore and returned to
@@ -654,10 +678,27 @@ class Cycle:
                     f"submit failed for {order.client_order_id}"
                 )
                 self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
-                self.alerts.error(
-                    f"❌ order rejected: {order.side.value} {order.quantity:g} "
-                    f"{order.instrument.symbol} — {err_str}"
-                )
+                # A CONNECTIVITY failure is a different event from a
+                # rejected order and needs a different reaction. "Order
+                # rejected: insufficient margin" is information; "cannot
+                # reach the broker" means the whole batch is dead and a
+                # human has to do something — usually approve a 2FA
+                # prompt. Escalate it so it does not scroll past looking
+                # like one more per-name rejection.
+                if _looks_like_disconnect(e):
+                    self.alerts.critical(
+                        "🔴 *Broker unreachable while submitting orders*\n"
+                        f"`{err_str}`\n"
+                        f"Failed on {order.instrument.symbol}; the rest of this "
+                        "batch will fail too.\n"
+                        "_Most likely an IBKR Mobile 2FA prompt after a gateway "
+                        "restart. Approve it, then `/cycle` to retry._"
+                    )
+                else:
+                    self.alerts.error(
+                        f"❌ order rejected: {order.side.value} {order.quantity:g} "
+                        f"{order.instrument.symbol} — {err_str}"
+                    )
 
         # 9b. Drive the broker's internal clock so paper-trade fills
         # materialize in the same cycle they were submitted in. No-op for
