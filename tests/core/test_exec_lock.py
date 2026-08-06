@@ -93,8 +93,24 @@ class TestDiagnostics:
 def _hold_then_exit(path: str, seconds: float) -> None:
     """Child process: take the lock, then die WITHOUT releasing it."""
     with execution_lock(Path(path), holder="child", timeout=5.0):
+        Path(path, "child-has-it").touch()  # handshake, see _wait_until_held
         time.sleep(seconds)
         os._exit(1)  # hard kill — no finally, no unlock
+
+
+def _wait_until_held(tmp_path: Path, timeout: float = 5.0) -> None:
+    """Block until the child actually owns the lock.
+
+    A fixed ``sleep(0.05)`` passed alone and failed under full-suite load,
+    where the fork can take longer to be scheduled — a flaky test about
+    locking is worse than no test, because it trains you to re-run.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (tmp_path / "child-has-it").exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError("child never acquired the lock")
 
 
 class TestCannotTrapTheOperator:
@@ -108,7 +124,7 @@ class TestCannotTrapTheOperator:
         ctx = mp.get_context("fork")
         p = ctx.Process(target=_hold_then_exit, args=(str(tmp_path), 0.2))
         p.start()
-        time.sleep(0.05)  # let the child take it
+        _wait_until_held(tmp_path)
 
         with (
             pytest.raises(ExecutionBusyError),
@@ -126,7 +142,7 @@ class TestCannotTrapTheOperator:
         ctx = mp.get_context("fork")
         p = ctx.Process(target=_hold_then_exit, args=(str(tmp_path), 0.3))
         p.start()
-        time.sleep(0.05)
+        _wait_until_held(tmp_path)
 
         started = time.monotonic()
         with execution_lock(tmp_path, holder="operator", timeout=5.0):

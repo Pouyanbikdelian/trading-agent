@@ -3,8 +3,14 @@
 # Usage (paper trading; default):
 #   docker compose up -d
 #
-# Usage (live trading — requires .env with TRADING_ENV=live + ALLOW_LIVE_TRADING=true):
-#   docker compose --profile live up -d
+# Usage (live trading — see the LIVE DAY block in .env.example first):
+#   docker compose stop trader                       # live REPLACES paper
+#   docker compose --profile live up -d trader-live
+#
+# Live replaces paper rather than running beside it: two runners need two
+# gateways, and two gateways cannot share host networking (the second
+# Xvfb collides with the first's X display socket). Paper's history lives
+# in the `state` volume and survives either way.
 #
 # Daily ops:
 #   docker compose logs -f trader            # follow the runner
@@ -48,7 +54,15 @@ services:
       # nightly scheduled restart below.
       #
       # bash + /dev/tcp avoids requiring nc/netcat in the gateway image.
-      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/127.0.0.1/4002' || exit 1"]
+      #
+      # The port FOLLOWS the trading mode: 4002 paper, 4001 live. It was
+      # hardcoded to 4002, so a gateway switched to live mode would have
+      # reported unhealthy forever — and autoheal watches this container,
+      # so it would have been restarted every few minutes, in a loop, on
+      # live day.
+      test:
+        - "CMD-SHELL"
+        - "timeout 5 bash -c '</dev/tcp/127.0.0.1/${IBKR_PORT:-4002}' || exit 1"
       interval: 60s
       timeout: 10s
       retries: 3
@@ -225,14 +239,8 @@ services:
       - trader
     env_file:
       - .env
-    environment:
-      # The read-only live-account mirror (profile `mirror` below) writes
-      # snapshots here; when the dir has a runner.db the dashboard's Live
-      # tab renders it as its own sleeve — never merged with paper.
-      DASHBOARD_LIVE_STATE_DIR: /app/state_live
     volumes:
       - state:/app/state
-      - state_live:/app/state_live:ro
       - data:/app/data:ro
       - ./config:/app/config:ro
     ports:
@@ -241,88 +249,47 @@ services:
     networks:
       - trading
 
-  # ---- Read-only LIVE-account mirror (opt-in) ---------------------------
-  # Shows the REAL account on the dashboard before/without trading it.
-  # Activate:   docker compose --profile mirror up -d
-  # Deactivate: docker compose --profile mirror down ib-gateway-live mirror
+  # ---- Read-only LIVE-account mirror: REMOVED 2026-08-06 ----------------
   #
-  # BEFORE enabling, check RAM — the box has 2GB and a second gateway
-  # needs ~500-700MB:   free -m   (want >700MB free + swap configured).
+  # `ib-gateway-live` + `mirror` existed to show the real account on the
+  # dashboard WITHOUT trading it. Once `trader-live` is armed that view
+  # comes from the live runner directly, so the mirror was a second
+  # gateway (~350 MB, a full JVM) and a second container earning
+  # nothing on a 2 GB box. It had also sat unhealthy for three weeks on
+  # a pinned image SHA that every rebuild skipped, so the panel it fed
+  # was stale anyway.
   #
-  # Requires in .env:  IBKR_LIVE_USERNAME (the live login; the paper one
-  # without the trailing "2"). Password is shared with the paper login.
-  # First start (and each nightly gateway restart) may ping IBKR mobile
-  # 2FA — approve it on the phone or the gateway sits at the login screen.
-  #
-  # Safety stack, outermost first:
-  #   1. READ_ONLY_API=yes — IBKR itself refuses order calls on this session.
-  #   2. `trading mirror run` only ever calls get_account() + save_snapshot().
-  #   3. Own state volume — the paper runner's state/orders are untouched.
-  #   4. Own client_id (27) — never shares the trader's API identity.
-  ib-gateway-live:
-    profiles: ["mirror"]
-    image: ghcr.io/gnzsnz/ib-gateway:stable
-    container_name: ibkr-gateway-live
-    restart: unless-stopped
-    logging: *default-logging
-    healthcheck:
-      # Live-mode gateway listens on 4001 inside the container.
-      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/127.0.0.1/4001' || exit 1"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 180s
-    labels:
-      - "autoheal=true"
-      # Nightly restart 23:35 UTC — 5 min after the paper gateway's so the
-      # two IBC login dances (and possible 2FA pings) don't overlap.
-      - "ofelia.enabled=true"
-      - "ofelia.job-exec.nightly-restart-live.schedule=0 35 23 * * *"
-      - "ofelia.job-exec.nightly-restart-live.command=/bin/sh -c \"kill 1\""
-    # BRIDGE network, unlike the paper gateway. Two gateways can't share
-    # host networking: with a shared network namespace the second Xvfb
-    # collides with the first's X display socket (seen 2026-07-09,
-    # "Cannot establish any listening sockets"). On the bridge the image's
-    # built-in socat relay (port 4003 → 127.0.0.1:4001) lets the mirror
-    # connect from another container while the gateway still sees a
-    # trusted 127.0.0.1 source — TrustedIPs stays happy.
-    networks:
-      - trading
-    environment:
-      TWS_USERID: ${IBKR_LIVE_USERNAME}
-      TWS_PASSWORD: ${IBKR_PASSWORD}
-      TRADING_MODE: live
-      READ_ONLY_API: "yes"
-      TIME_ZONE: ${TZ:-UTC}
-      TWOFA_TIMEOUT_ACTION: "restart"
-      BYPASS_WARNING: "yes"
-    volumes:
-      - ib_settings_live:/home/ibgateway/Jts
+  # Recoverable from git if a read-only view is ever wanted again while
+  # paper is the active runner.
 
-  mirror:
-    profiles: ["mirror"]
-    image: trading-agent:latest
-    container_name: trader-mirror
-    restart: unless-stopped
-    logging: *default-logging
-    depends_on:
-      - ib-gateway-live
-    env_file:
-      - .env
-    networks:
-      - trading
-    environment:
-      # 4003 = the live gateway's socat relay (see ib-gateway-live note);
-      # the relay delivers us to the gateway as 127.0.0.1, which is the
-      # only source its TrustedIPs default accepts.
-      IBKR_HOST: ib-gateway-live
-      IBKR_PORT: "4003"
-      IBKR_CLIENT_ID: "27"
-    volumes:
-      - state_live:/app/state
-    command: ["mirror", "run"]
-
-  # Live profile flips the command. Activate with `--profile live`.
+  # ---- LIVE runner (opt-in profile) -------------------------------------
+  #
+  #   Arm:     docker compose --profile live up -d trader-live
+  #   Disarm:  docker compose --profile live stop trader-live
+  #
+  # REPLACES the paper `trader` — it does not run alongside it. Two
+  # runners would need two gateways, and two gateways cannot share host
+  # networking (the second Xvfb collides with the first's X display
+  # socket — seen 2026-07-09). Replacing keeps the plumbing identical to
+  # the paper setup that already works, and keeps memory flat on a 2 GB
+  # box. Paper's history is in the `state` volume and survives regardless.
+  #
+  # Rewritten 2026-08-06. The previous definition could not have worked:
+  #   * `IBKR_HOST: ib-gateway` over the docker bridge — the gateway's
+  #     TrustedIPs default is 127.0.0.1 only, so bridged connections are
+  #     refused. The paper trader uses host networking for exactly this
+  #     reason and this must too.
+  #   * `depends_on: ib-gateway` while the gateway stayed in paper mode.
+  #   * `state:/app/state` — the SAME state dir as paper. runner.db holds
+  #     the daily-equity baseline the kill switch computes from; mixing
+  #     ~1.07M CHF paper snapshots with ~88k live ones makes that number
+  #     meaningless, so the daily-loss stop would either fire instantly
+  #     or never. Live gets its own STATE_DIR (set in .env — see below).
+  #
+  # STATE_DIR deliberately is NOT set here. It belongs in `.env` so the
+  # bot and dashboard move with the runner: if the bot wrote halt.json to
+  # a different directory than the live runner reads, /halt would not
+  # stop live trading. One variable, one stack, no split brain.
   trader-live:
     profiles: ["live"]
     image: trading-agent:latest
@@ -334,21 +301,35 @@ services:
     env_file:
       - .env
     environment:
-      IBKR_HOST: ib-gateway
+      # Host networking + loopback, same as the paper trader: the gateway
+      # trusts 127.0.0.1 and nothing else.
+      IBKR_HOST: 127.0.0.1
       IBKR_PORT: ${IBKR_PORT:-4001}
       TRADING_ENV: live
       ALLOW_LIVE_TRADING: "true"
+      # Distinct client id — IBKR drops the older session when two
+      # connections share one, which on live day looks like a dead broker.
+      IBKR_CLIENT_ID: ${IBKR_LIVE_CLIENT_ID:-37}
     volumes:
       - data:/app/data
       - logs:/app/logs
       - state:/app/state
       - ./config:/app/config:ro
-    command: ["live", "run", "${UNIVERSE:-us_large_cap}",
-              "--strategy", "${STRATEGY:-donchian}",
-              "--cron", "${CRON:-0 16 * * MON-FRI}",
-              "--tz",   "${TZ:-UTC}"]
-    networks:
-      - trading
+    group_add:
+      - "${DOCKER_GID:-999}"
+    # `-p rebalance=` mirrors the paper command deliberately: live must run
+    # the configuration that was actually paper-tested, not the strategy's
+    # untested default. `live run` had no -p flag at all until 2026-08-06,
+    # so live would have silently rebalanced quarterly while every paper
+    # result you have was generated weekly. Set REBALANCE=63 in .env if you
+    # want the quarterly cadence — but then paper is no longer the control.
+    command: ["live", "run", "${UNIVERSE:-sp500}",
+              "--strategy", "${STRATEGY:-top_k_momentum}",
+              "--cron", "${CRON:-5 21 * * FRI}",
+              "--tz",   "${TZ:-UTC}",
+              "-p", "rebalance=${REBALANCE:-5}"]
+    # NB: network_mode: host is incompatible with the `networks` key.
+    network_mode: host
 
   # Autoheal: watches every container with `autoheal=true` label. When a
   # container's docker healthcheck reports "unhealthy" 3 times in a row,
@@ -390,12 +371,9 @@ services:
 
 volumes:
   ib_settings: {}
-  ib_settings_live: {}
   data: {}
   logs: {}
   state: {}
-  # The live mirror's snapshots — separate from paper state by design.
-  state_live: {}
 
 networks:
   trading:

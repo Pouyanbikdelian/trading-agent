@@ -259,15 +259,6 @@ def check_health(state_dir: Path, *, now: datetime | None = None) -> list[str]:
     except Exception:
         logger.bind(component="ops_watch").exception("learning-loop check failed")
 
-    # Anything that threw in the last hour and was logged rather than
-    # surfaced. Runs last so infrastructure problems lead the message.
-    try:
-        from trading.core.config import settings
-
-        issues.extend(check_recent_errors(settings.log_dir))
-    except Exception:
-        logger.bind(component="ops_watch").exception("error-log scan failed")
-
     return issues
 
 
@@ -307,10 +298,30 @@ def _save(state_dir: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def run_ops_watch(state_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
-    """One watchdog cycle: check, debounce per issue, alert, track recovery."""
+def run_ops_watch(
+    state_dir: Path,
+    *,
+    now: datetime | None = None,
+    log_dir: Path | None = None,
+) -> dict[str, Any]:
+    """One watchdog cycle: check, debounce per issue, alert, track recovery.
+
+    ``log_dir`` opts into the error-log scan and is passed explicitly by
+    the runner. It is NOT read from settings by default, and that is the
+    point: an ambient read made this function depend on whatever any
+    other component had logged, so "is the system healthy" answered
+    differently on every call. State freshness and error recency are two
+    different questions — keep them separate, merge at the reporting
+    layer, and let the caller say which it wants.
+    """
     now = now or datetime.now(tz=timezone.utc)
     issues = check_health(state_dir, now=now)
+    if log_dir is not None:
+        try:
+            issues.extend(check_recent_errors(log_dir))
+        except Exception:
+            logger.bind(component="ops_watch").exception("error-log scan failed")
+
     state = _load(state_dir)
     reported: dict[str, str] = dict(state.get("reported", {}))
 

@@ -1132,7 +1132,12 @@ class Runner:
         try:
             from trading.runtime.ops_watch import run_ops_watch
 
-            await asyncio.to_thread(run_ops_watch, settings.state_dir)
+            # log_dir passed explicitly: it opts the error-log scan in.
+            # run_ops_watch does not reach for settings itself, so its
+            # answer depends only on what it is handed.
+            await asyncio.to_thread(
+                lambda: run_ops_watch(settings.state_dir, log_dir=settings.log_dir)
+            )
         except Exception:
             logger.bind(component="ops_watch").exception("ops watch failed")
 

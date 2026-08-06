@@ -627,6 +627,17 @@ def _live_run(
     tz: str = typer.Option("UTC", "--tz"),
     vol_target_value: float | None = typer.Option(None, "--vol-target"),
     initial_cash: float = typer.Option(100_000.0, "--cash"),
+    param: list[str] = typer.Option(
+        [],
+        "--param",
+        "-p",
+        help=(
+            "Override a strategy parameter, e.g. `-p rebalance=5`. Same flag "
+            "as `paper run` — without it, live silently used the strategy's "
+            "DEFAULT cadence while paper ran the overridden one, so live "
+            "would not have been the configuration that was paper-tested."
+        ),
+    ),
 ) -> None:
     """Live-trading runner. Refuses unless both .env flags say live."""
     if not settings.is_live_armed():
@@ -648,6 +659,9 @@ def _live_run(
         initial_cash=initial_cash,
         use_simulator=False,
     )
+    overrides = _parse_params(param)
+    if overrides:
+        cfg = cfg.model_copy(update={"strategy_params": {s: dict(overrides) for s in strategy}})
     runner = Runner.from_config(cfg, broker=broker)
     import asyncio
 
