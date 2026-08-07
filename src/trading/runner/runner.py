@@ -1304,11 +1304,33 @@ class Runner:
                 snap = RunnerStore(settings.state_dir / "runner.db").latest_snapshot()
                 if not snap or not snap.positions:
                     return {"exits": [], "alerts": []}
+
+                def _mark(p: Any) -> float | None:
+                    """The broker's own valuation per share.
+
+                    ``avg_price + unrealized_pnl / quantity``. This is an
+                    INDEPENDENT price source from the yfinance quote the
+                    guards trail against, which is the whole point: a
+                    trailing stop turns one number into a full-position
+                    market sell, and that number comes from a free feed
+                    that sometimes serves an unadjusted price across a
+                    split. Two sources agreeing is cheap; being wrong is
+                    not recoverable.
+                    """
+                    qty = float(p.quantity)
+                    if abs(qty) < 1e-9:
+                        return None
+                    try:
+                        return float(p.avg_price) + float(p.unrealized_pnl) / qty
+                    except Exception:
+                        return None
+
                 positions = [
                     {
                         "symbol": p.instrument.symbol,
                         "qty": float(p.quantity),
                         "avg_price": float(p.avg_price),
+                        "mark": _mark(p),
                     }
                     for p in snap.positions.values()
                 ]

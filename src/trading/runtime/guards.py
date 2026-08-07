@@ -132,6 +132,33 @@ def _save(state_dir: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+#: How far the quoted price may sit from the broker's own mark before we
+#: refuse to act on it. A trailing stop turns one number into a
+#: full-position market sell, and that number comes from yfinance — a
+#: free feed that occasionally serves an unadjusted price across a split,
+#: a stale bar, or a bad tick. Any of those is indistinguishable from a
+#: crash to a naive comparison, and the guard's response is irreversible.
+#:
+#: The broker already gives us an independent mark for every position:
+#: avg_price + unrealized_pnl / quantity. Two sources disagreeing by more
+#: than this means we do not know the price, and "we do not know" must
+#: not be a reason to sell.
+PRICE_SANITY_PCT = 20.0
+
+
+def _price_is_sane(quoted: float, mark: float | None, tol_pct: float) -> bool:
+    """True when the quoted price is close enough to the broker's mark.
+
+    No mark available (fresh position, zero quantity, missing PnL) means
+    we cannot cross-check — return True rather than blocking the guards
+    entirely. Half a safety net beats none, and a position with no mark
+    is usually one we just opened.
+    """
+    if mark is None or mark <= 0 or quoted <= 0:
+        return True
+    return abs(quoted - mark) / mark * 100.0 <= tol_pct
+
+
 def check_guards(
     state_dir: Path,
     data_dir: Path,
@@ -144,7 +171,12 @@ def check_guards(
 ) -> dict[str, Any]:
     """One guard pass. Pure decision logic — injectable inputs, no I/O
     beyond the guard state file. Returns exits to submit + alerts to send;
-    the runner owns actually doing both."""
+    the runner owns actually doing both.
+
+    Each position dict may carry ``mark`` — the broker's own valuation of
+    the holding. When present it is used to sanity-check the quoted price
+    before any exit; see ``PRICE_SANITY_PCT``.
+    """
     now = now or datetime.now(tz=timezone.utc)
     holds = holds or set()
     state = _load(state_dir)
@@ -199,6 +231,27 @@ def check_guards(
                 pass
 
         avg = float(p.get("avg_price", px)) or px
+
+        # Cross-check the quoted price against the broker's own mark
+        # BEFORE any exit decision. The state above (hwm, stop_level) is
+        # still updated from the quote — a suspect print should not also
+        # be allowed to ratchet the trail — but nothing gets sold on a
+        # number two independent sources disagree about.
+        mark = p.get("mark")
+        tol = _env_f("GUARD_PRICE_SANITY_PCT", PRICE_SANITY_PCT) or PRICE_SANITY_PCT
+        if not _price_is_sane(px, None if mark is None else float(mark), tol):
+            alerts.append(
+                f"⚠️ *{sym} price looks wrong* — quote {px:.2f} vs broker mark "
+                f"{float(mark):.2f} ({abs(px - float(mark)) / float(mark) * 100:.0f}% apart, "
+                f"limit {tol:.0f}%). Guard exits SKIPPED for this symbol.\n"
+                "_Usually an unadjusted price across a split, a stale bar, or a bad "
+                "tick. Check the symbol before trusting any stop on it._"
+            )
+            logger.bind(component="guards").warning(
+                f"{sym}: quote {px} diverges from broker mark {mark}; skipping guard exit"
+            )
+            continue
+
         if px <= stop_level:
             exit_orders.append({"symbol": sym, "reason": "trailing_stop"})
             alerts.append(
