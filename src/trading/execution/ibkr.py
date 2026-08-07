@@ -886,9 +886,22 @@ class IbkrBroker(Broker):
             ib_order.action = "SELL"
             ib_order.totalQuantity = float(from_amount)
 
-        trade = self._bounded(
+        # _call_with_timeout, NOT _bounded. _bounded reconnects and RETRIES
+        # on timeout, which is right for reads and wrong for every write:
+        # a timeout does not mean the order failed to reach IBKR, so a
+        # retry can convert twice. submit_order has said so since
+        # 2026-07-15; this path was missed.
+        #
+        # A doubled conversion is worse than a doubled equity order,
+        # because it does not merely overshoot a position — it can drive
+        # the source currency negative, and with
+        # MAX_MARGIN_BORROWING_PCT=0.0 a negative balance makes the risk
+        # manager reject every subsequent basket. That is the shape of the
+        # June 2026 incident: three weeks of refused cycles.
+        trade = self._call_with_timeout(
             f"placeOrder-fx-{pair_base}{pair_quote}",
             lambda: self._ib.placeOrder(contract, ib_order),
+            None,
         )
         logger.bind(broker=self.name).info(
             f"FX order: {ib_order.action} {pair_base}{pair_quote} "
