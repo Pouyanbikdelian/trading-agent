@@ -1,12 +1,30 @@
-# Risk manager configuration.
+# Risk manager configuration — REFERENCE ONLY. NOTHING LOADS THIS FILE.
 #
-# PRECEDENCE (verified in code 2026-07-09, GO_LIVE.md §2 audit): the risk
-# manager builds its limits from .env (core/config.py Settings) ONLY.
-# The portfolio/position/drawdown numbers below are NOT loaded by the
-# risk manager — .env is the single source of truth for those. This file
-# still feeds the backtester/simulator sections (slippage_model) and
-# documents intent; an earlier version of this header claimed it
-# overrides .env, which was never true.
+# Verified 2026-08-07 by grepping every reference in src/: the only
+# mention of "risk.yaml" anywhere in the codebase is a docstring in
+# runner/playbook.py. No loader exists.
+#
+# The 2026-07-09 header was already half-right — it said the risk manager
+# reads .env only, which is true — but it went on to claim "this file
+# still feeds the backtester/simulator sections (slippage_model)". It
+# does not. The backtester takes an explicit CostModel from its caller,
+# and the live cycle passes ZERO_COSTS.
+#
+# That mattered because CLAUDE.md lists "change risk limit defaults in
+# .env.example or config/risk.yaml" as needing the owner's approval,
+# which reads as though editing this file changes behaviour. Editing it
+# changes nothing at all.
+#
+# WHERE THE REAL VALUES LIVE:
+#   max_gross_exposure, max_position_pct, max_daily_loss_pct,
+#   max_drawdown_pct, max_margin_borrowing_pct  -> .env
+#   max_sector_exposure, allow_short            -> RiskLimits defaults
+#                                                  (risk/limits.py)
+#   backtest costs                              -> the CostModel passed
+#                                                  to run_vectorized()
+#
+# The values below are kept as a record of intent. Three of them describe
+# controls that DO NOT EXIST anywhere — flagged inline.
 
 portfolio:
   # Max total long+short exposure as a fraction of equity. 1.0 = fully invested, no leverage.
@@ -19,9 +37,14 @@ portfolio:
 position:
   # Cap any single instrument as a fraction of equity (long or short).
   max_position_pct: 0.10
-  # Sector concentration cap (uses sector tags in universes.yaml — TBD).
+  # Sector concentration cap. IMPLEMENTED, but from RiskLimits
+  # .max_sector_exposure (default 0.30) — not from this line. They agree
+  # today by coincidence, not by wiring.
   max_sector_pct: 0.30
-  # Minimum trade size in account currency — skip dust trades.
+  # NOT IMPLEMENTED. No dust filter exists on any order path; a delta of
+  # one share is submitted like any other. Harmless at current sizing
+  # (~2.5k per name) — it would bite on a much larger universe or a much
+  # smaller sleeve, where commission can exceed the trade's value.
   min_trade_notional: 50.0
 
 drawdown:
@@ -32,14 +55,26 @@ drawdown:
   max_drawdown_pct: 0.15
 
 execution:
-  # Maximum % of average daily volume we'll ever consume in a single trade.
-  # Prevents marketability issues in lower-liquidity names.
+  # NOT IMPLEMENTED. Nothing checks intended notional against average
+  # daily volume, on any path. Not binding at current size (a ~2.5k order
+  # in an S&P name is noise), but it is a control this file describes and
+  # the system does not have.
   max_pct_adv: 0.05
-  # Skip an instrument if our intended notional > this % of its 20-day avg volume.
-  # (Mostly applies to small caps — large caps will never hit this.)
 
 slippage_model:
-  # Used by the simulator and as a conservative pre-trade haircut in live.
+  # NOT WIRED. The header used to claim the simulator reads these. It
+  # does not — run_vectorized() takes an explicit CostModel from its
+  # caller, and the live cycle passes ZERO_COSTS ("sentinel for tests and
+  # pure-signal analyses", per its own docstring).
+  #
+  # Consequence, currently LATENT: when the combiner is risk-aware
+  # (inverse_vol / min_variance / dsr_weighted) AND more than one
+  # strategy is configured, per-strategy returns are ranked with zero
+  # costs — which systematically favours high-turnover strategies,
+  # because turnover is free in that computation. The live config runs a
+  # single strategy with combiner=equal_weight, both of which short-
+  # circuit before the returns are computed, so nothing is biased today.
+  # Revisit before running a multi-strategy risk-aware combiner.
   equity_bps: 5        # 5 bps per side
   fx_bps: 1
   crypto_bps: 10
