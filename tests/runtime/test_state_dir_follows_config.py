@@ -90,7 +90,7 @@ class TestOfeliaHygieneJobs:
         )
 
     def test_the_vacuum_job_targets_both_databases(self, compose_text: str) -> None:
-        line = next(l for l in compose_text.splitlines() if "sqlite-vacuum.command" in l)
+        line = next(ln for ln in compose_text.splitlines() if "sqlite-vacuum.command" in ln)
         assert "runner.db" in line and "orders.db" in line
 
 
