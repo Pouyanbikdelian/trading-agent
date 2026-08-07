@@ -27,6 +27,7 @@ Hard-coded design choices (and why)
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -318,6 +319,23 @@ class Cycle:
         # heavy work, so the screen is essentially free.
         if cfg.screens is not None:
             instruments = self._apply_screens(instruments, cfg)
+
+        # 1c. The Agent PM's own picks, when the bridge is live.
+        #
+        # The PM allocates across single names AND up to three ETFs, which
+        # is how it expresses a hedge or a sector view. The cycle prices
+        # only its configured universe, so under UNIVERSE=sp500 every ETF
+        # target is unpriceable and gets dropped. Measured on the first
+        # real decision: GLD 0.15 + XLV 0.12 out of 0.67 gross — FORTY
+        # PERCENT of what the PM wanted to hold would have silently become
+        # cash, and the digest would still have read like a fully invested
+        # book.
+        #
+        # Added AFTER the screens deliberately: the screens exist to cut
+        # illiquid or low-quality single names, and have nothing useful to
+        # say about SPY. Only when the bridge is actually on, so the
+        # mechanical strategy's universe is unchanged at sleeve 0.
+        instruments = self._add_pm_targets(instruments)
 
         # 2. Build wide-format price frame.
         prices = self._load_prices(instruments, ts_start)
@@ -793,6 +811,67 @@ class Cycle:
     #: normal after-hours order filling at the next open, plus a weekend.
     STALE_ORDER_AGE = timedelta(days=3)
 
+    def _add_pm_targets(self, instruments: list[Any]) -> list[Any]:
+        """Make the PM's actual picks priceable. No-op at sleeve 0, never
+        raises.
+
+        The PM chooses from a much wider set than the cycle prices: its
+        whitelist is sp500 + nasdaq100 + russell1000 + us_large_cap (~1000
+        names) plus a 21-ETF shelf, while the cycle loads only
+        ``UNIVERSE`` — 503 names under sp500. Anything it picks outside
+        that is unpriceable, gets dropped, and the weight silently becomes
+        cash. Measured on the first real decision: GLD 0.15 + XLV 0.12 out
+        of 0.67 gross — forty percent of the intended book, gone, with the
+        digest still reading fully invested.
+
+        The obvious fix, loading the PM's whole whitelist, is the wrong
+        one: 503 symbols took 124s, so ~1000 would approach the cycle's
+        300s timeout every week to price names it will not hold.
+
+        So add only what the PM ACTUALLY PICKED — typically 7 or 8 symbols.
+        Reading its decision here, before the price load, costs one small
+        JSON read and makes the bridge's real constraint the whitelist
+        (its anti-hallucination guard) rather than an unrelated universe
+        setting.
+        """
+        try:
+            from trading.core.config import settings as _s
+
+            if float(getattr(_s, "agent_pm_sleeve_pct", 0.0) or 0.0) <= 0:
+                return instruments
+
+            from trading.agents.pm import UNIVERSE as PM_ETF_SHELF
+            from trading.agents.pm_signal import pm_decision_path
+            from trading.core.types import AssetClass, Instrument
+
+            raw = json.loads(pm_decision_path(_s.state_dir).read_text())
+            if not raw.get("ok"):
+                return instruments
+            targets = {str(s).upper().strip() for s in (raw.get("weights") or {})}
+        except FileNotFoundError:
+            return instruments
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "could not read PM targets; its off-universe picks will be "
+                "dropped this cycle"
+            )
+            return instruments
+
+        have = {getattr(i, "symbol", "").upper() for i in instruments}
+        extra = [
+            Instrument(
+                symbol=s,
+                asset_class=AssetClass.ETF if s in PM_ETF_SHELF else AssetClass.EQUITY,
+            )
+            for s in sorted(targets - have)
+        ]
+        if extra:
+            logger.bind(component="cycle").info(
+                f"PM bridge: pricing {len(extra)} PM target(s) outside the universe: "
+                f"{[i.symbol for i in extra]}"
+            )
+        return [*instruments, *extra]
+
     def _merge_pm_signal(
         self,
         signal: Any,
@@ -802,18 +881,29 @@ class Cycle:
     ) -> Any:
         """Blend the Agent PM's decision into the strategy signal.
 
-        One knob, ``AGENT_PM_SLEEVE_PCT``: the fraction of the account the
-        PM directs. The mechanical strategy is scaled by ``1 - sleeve``, so
-        the two books sum to ONE account rather than to ``1 + sleeve`` —
-        without that, turning the bridge on would quietly lever the book.
+        Two INDEPENDENT knobs, ``AGENT_PM_SLEEVE_PCT`` and
+        ``STRATEGY_SLEEVE_PCT``, each the fraction of the account that book
+        represents:
 
-            0.0  -> pure mechanical strategy (today's behaviour)
-            0.5  -> half each
-            1.0  -> pure Agent PM
+            pm 0.00, strat 1.00 -> mechanical only (the default)
+            pm 0.11, strat 0.00 -> PM manages ~11% of the account, the
+                                   strategy computes but never trades
+            pm 0.50, strat 0.50 -> half each
 
-        Overlapping names ADD rather than overwrite: if both want AAPL,
-        the account holds the sum of two independent convictions, which is
-        the honest reading of two managers agreeing.
+        An earlier version derived the strategy's share as ``1 - pm``. That
+        conflated two meanings and broke the case this exists for: the PM's
+        weights are fractions of ITS OWN book, so its sleeve says "how much
+        of the account that book represents". Setting it to 0.11 for a 10k
+        sleeve on an 88k account then silently handed the strategy the
+        other 89%. Independent knobs; the operator says what they mean.
+
+        Weights are NOT renormalised. The PM holding 67% invested and 33%
+        cash is a decision, and scaling its gross up to fill the sleeve
+        would overrule it. Its 0.15 in GLD becomes 0.15 * sleeve of the
+        account, and its cash stays cash.
+
+        Overlapping names ADD rather than overwrite: if both books want
+        AAPL, the account holds the sum of two independent convictions.
 
         Never raises and never silently no-ops. A cycle where the PM was
         expected to trade and did not is indistinguishable, in a position
@@ -833,6 +923,8 @@ class Cycle:
             )
             return signal
 
+        strat = float(getattr(_s, "strategy_sleeve_pct", 1.0) or 0.0)
+
         if result.signal is None:
             # Silence only for the off switch. Every other refusal is an
             # event the operator needs, because it means the PM was meant
@@ -840,17 +932,30 @@ class Cycle:
             if "disabled" not in result.reason:
                 logger.bind(component="cycle").warning(f"PM bridge: {result.reason}")
                 self.alerts.error(format_bridge_note(result))
-            return signal
+            if strat >= 1.0:
+                return signal
+            # The strategy's own share still applies even when the PM does
+            # not trade. Skipping this on the refusal path would hand the
+            # whole account to a strategy the operator had deliberately
+            # sized down — or, at strat 0, trade a book meant to be
+            # benchmark-only.
+            return signal.model_copy(
+                update={
+                    "target_weights": {
+                        k: w * strat for k, w in signal.target_weights.items()
+                    }
+                }
+            )
 
         sleeve = result.sleeve_pct
         merged: dict[str, float] = {
-            k: w * (1.0 - sleeve) for k, w in signal.target_weights.items()
+            k: w * strat for k, w in signal.target_weights.items()
         }
         for k, w in result.signal.target_weights.items():
             merged[k] = merged.get(k, 0.0) + w
 
         logger.bind(component="cycle").info(
-            f"PM bridge: sleeve {sleeve:.1%}, strategy scaled to {1 - sleeve:.1%}, "
+            f"PM bridge: pm sleeve {sleeve:.1%}, strategy sleeve {strat:.1%}, "
             f"{len(result.signal.target_weights)} PM name(s), "
             f"combined gross {sum(merged.values()):.1%}"
         )
@@ -859,10 +964,13 @@ class Cycle:
         return signal.model_copy(
             update={
                 "target_weights": merged,
-                "strategy": f"{signal.strategy}+agent_pm",
+                "strategy": (
+                    "agent_pm" if strat <= 0 else f"{signal.strategy}+agent_pm"
+                ),
                 "metadata": {
                     **(signal.metadata or {}),
                     "pm_sleeve_pct": f"{sleeve:.4f}",
+                    "strategy_sleeve_pct": f"{strat:.4f}",
                     "pm_decided_at": result.signal.metadata.get("decided_at", ""),
                     "pm_dropped": ",".join(result.dropped),
                 },

@@ -45,6 +45,7 @@ class _Cycle:
     from trading.runner.cycle import Cycle as _Real
 
     _merge_pm_signal = _Real._merge_pm_signal
+    _add_pm_targets = _Real._add_pm_targets
 
 
 def strategy_signal(**weights: float) -> Signal:
@@ -85,45 +86,115 @@ def make_result(
     )
 
 
-class TestGrossIsPreserved:
-    """The property that makes the knob safe."""
+def patch_strategy_sleeve(monkeypatch, pct: float) -> None:
+    import types
 
-    def test_enabling_the_pm_does_not_lever_the_book(self, cycle, monkeypatch) -> None:
-        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.30}, sleeve=0.30))
+    monkeypatch.setattr(
+        "trading.core.config.settings",
+        types.SimpleNamespace(state_dir="/nonexistent", strategy_sleeve_pct=pct),
+    )
+
+
+class TestTheTwoSleevesAreIndependent:
+    """An earlier version derived the strategy's share as (1 - pm_sleeve).
+    That conflated two meanings: the PM's weights are fractions of ITS OWN
+    book, so its sleeve says how much of the account that book is. Setting
+    it to 0.11 for a 10k sleeve on an 88k account then silently handed the
+    mechanical strategy the other 89%."""
+
+    def test_a_small_pm_sleeve_does_not_hand_the_rest_to_the_strategy(
+        self, cycle, monkeypatch
+    ) -> None:
+        patch_strategy_sleeve(monkeypatch, 0.0)  # benchmark-only
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.10}, sleeve=0.11))
         base = strategy_signal(**{"equity:AAPL": 0.5, "equity:MSFT": 0.5})
 
         out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
 
-        assert sum(out.target_weights.values()) == pytest.approx(1.0)
-
-    def test_the_strategy_is_scaled_by_one_minus_sleeve(self, cycle, monkeypatch) -> None:
-        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.25}, sleeve=0.25))
-        base = strategy_signal(**{"equity:AAPL": 0.6})
-
-        out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
-
-        assert out.target_weights["equity:AAPL"] == pytest.approx(0.45)
-        assert out.target_weights["equity:NVDA"] == pytest.approx(0.25)
-
-    def test_a_full_sleeve_hands_the_account_to_the_pm(self, cycle, monkeypatch) -> None:
-        patch_bridge(monkeypatch, make_result({"equity:NVDA": 1.0}, sleeve=1.0))
-        base = strategy_signal(**{"equity:AAPL": 0.6, "equity:MSFT": 0.4})
-
-        out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
-
         assert out.target_weights["equity:AAPL"] == 0.0
-        assert out.target_weights["equity:NVDA"] == pytest.approx(1.0)
+        assert out.target_weights["equity:MSFT"] == 0.0
+        assert out.target_weights["equity:NVDA"] == pytest.approx(0.10)
+
+    def test_the_strategy_can_be_benchmark_only(self, cycle, monkeypatch) -> None:
+        """Signals, shadow ledger and dashboard still compute; every weight
+        is zero so nothing can reach an order."""
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.2}, sleeve=0.2))
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW
+        )
+        assert out.target_weights["equity:AAPL"] == 0.0
+        assert out.strategy == "agent_pm"
+
+    def test_both_can_run_side_by_side(self, cycle, monkeypatch) -> None:
+        patch_strategy_sleeve(monkeypatch, 0.5)
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.5}, sleeve=0.5))
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW
+        )
+        assert out.target_weights["equity:AAPL"] == pytest.approx(0.5)
+        assert out.target_weights["equity:NVDA"] == pytest.approx(0.5)
+        assert out.strategy == "top_k_momentum+agent_pm"
+
+
+class TestThePMsCashDecisionSurvives:
+    def test_weights_are_not_renormalised_to_fill_the_sleeve(
+        self, cycle, monkeypatch
+    ) -> None:
+        """The PM holding 67% invested and 33% cash is a decision. Scaling
+        its gross up to fill the sleeve would overrule it."""
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(
+            monkeypatch,
+            make_result({"equity:A": 0.10, "equity:B": 0.05}, sleeve=0.11),
+        )
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW
+        )
+        assert sum(out.target_weights.values()) == pytest.approx(0.15)
+
+    def test_relative_conviction_is_preserved(self, cycle, monkeypatch) -> None:
+        """The reason this matters: the risk manager caps per-position
+        BEFORE gross, so if the PM's weights arrive too large every name
+        clips to the same number and a conviction-weighted book silently
+        becomes equal-weight."""
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(
+            monkeypatch,
+            make_result({"equity:BIG": 0.15, "equity:SMALL": 0.06}, sleeve=0.11),
+        )
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW
+        )
+        w = out.target_weights
+        assert w["equity:BIG"] / w["equity:SMALL"] == pytest.approx(0.15 / 0.06)
 
 
 class TestOverlappingNames:
     def test_shared_convictions_add_rather_than_overwrite(self, cycle, monkeypatch) -> None:
         """Both managers wanting AAPL is two independent votes, not one."""
+        patch_strategy_sleeve(monkeypatch, 0.6)
         patch_bridge(monkeypatch, make_result({"equity:AAPL": 0.20}, sleeve=0.40))
         base = strategy_signal(**{"equity:AAPL": 1.0})
 
         out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
 
         assert out.target_weights["equity:AAPL"] == pytest.approx(0.60 + 0.20)
+
+
+class TestRefusalStillRespectsTheStrategySleeve:
+    def test_a_benchmark_only_strategy_does_not_trade_when_the_pm_refuses(
+        self, cycle, monkeypatch
+    ) -> None:
+        """The dangerous path: PM declines on freshness, and a strategy the
+        operator had set to benchmark-only inherits the whole account."""
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(monkeypatch, make_result(None, reason="PM decision 96.0h old"))
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW
+        )
+        assert out.target_weights["equity:AAPL"] == 0.0
+        assert any("96.0h" in m for m in cycle.alerts.error_msgs)
 
 
 class TestDisabledAndRefusals:
@@ -159,6 +230,85 @@ class TestDisabledAndRefusals:
         base = strategy_signal(**{"equity:AAPL": 1.0})
 
         assert cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW) is base
+
+
+class TestPricingThePMsPicks:
+    """The PM chooses from ~1000 names plus 21 ETFs; the cycle prices only
+    UNIVERSE (503 under sp500). Anything outside is unpriceable, dropped,
+    and the weight silently becomes cash. On the first real decision that
+    was GLD 0.15 + XLV 0.12 of 0.67 gross — forty percent of the intended
+    book, with the digest still reading fully invested."""
+
+    @staticmethod
+    def _patch_settings(monkeypatch, state_dir, sleeve: float) -> None:
+        """Settings is frozen (every domain model is), so setattr on the
+        instance raises. Swap the module-level object instead — which is
+        what the code under test resolves at call time anyway."""
+        import types
+
+        monkeypatch.setattr(
+            "trading.core.config.settings",
+            types.SimpleNamespace(state_dir=state_dir, agent_pm_sleeve_pct=sleeve),
+        )
+
+    @classmethod
+    def _cycle_with(cls, tmp_path, monkeypatch, weights: dict, sleeve: float = 0.8):
+        import json as _json
+
+        pm = tmp_path / "agent_pm"
+        pm.mkdir(parents=True, exist_ok=True)
+        (pm / "last_run.json").write_text(
+            _json.dumps({"ok": True, "ts": NOW.isoformat(), "weights": weights})
+        )
+        cls._patch_settings(monkeypatch, tmp_path, sleeve)
+        return _Cycle()
+
+    @staticmethod
+    def _equities(*syms):
+        from trading.core.types import AssetClass, Instrument
+
+        return [Instrument(symbol=s, asset_class=AssetClass.EQUITY) for s in syms]
+
+    def test_off_universe_picks_are_added(self, tmp_path, monkeypatch) -> None:
+        c = self._cycle_with(tmp_path, monkeypatch, {"JPM": 0.1, "HUM": 0.08})
+        out = c._add_pm_targets(self._equities("JPM"))
+        assert sorted(i.symbol for i in out) == ["HUM", "JPM"]
+
+    def test_etf_shelf_names_are_typed_as_etf(self, tmp_path, monkeypatch) -> None:
+        """`etf:GLD` vs `equity:GLD` decides the parquet partition — wrong
+        class means unpriceable, which is the bug we are fixing."""
+        c = self._cycle_with(tmp_path, monkeypatch, {"GLD": 0.15, "HUM": 0.08})
+        out = c._add_pm_targets([])
+        by_sym = {i.symbol: i.asset_class.value for i in out}
+        assert by_sym == {"GLD": "etf", "HUM": "equity"}
+
+    def test_nothing_is_duplicated(self, tmp_path, monkeypatch) -> None:
+        c = self._cycle_with(tmp_path, monkeypatch, {"JPM": 0.1})
+        out = c._add_pm_targets(self._equities("JPM", "AAPL"))
+        assert len(out) == 2
+
+    def test_disabled_bridge_leaves_the_universe_alone(self, tmp_path, monkeypatch) -> None:
+        """At sleeve 0 the mechanical strategy's universe must be exactly
+        what it was — enabling the PM should not change what momentum
+        ranks over."""
+        c = self._cycle_with(tmp_path, monkeypatch, {"GLD": 0.15}, sleeve=0.0)
+        base = self._equities("JPM")
+        assert c._add_pm_targets(base) is base
+
+    def test_a_missing_decision_is_not_an_error(self, tmp_path, monkeypatch) -> None:
+        self._patch_settings(monkeypatch, tmp_path, 0.8)
+        base = self._equities("JPM")
+        assert _Cycle()._add_pm_targets(base) is base
+
+    def test_a_failed_pm_run_adds_nothing(self, tmp_path, monkeypatch) -> None:
+        import json as _json
+
+        pm = tmp_path / "agent_pm"
+        pm.mkdir(parents=True)
+        (pm / "last_run.json").write_text(_json.dumps({"ok": False, "reason": "timeout"}))
+        self._patch_settings(monkeypatch, tmp_path, 0.8)
+        base = self._equities("JPM")
+        assert _Cycle()._add_pm_targets(base) is base
 
 
 class TestAttribution:

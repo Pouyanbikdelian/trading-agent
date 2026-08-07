@@ -85,6 +85,35 @@ class Settings(BaseSettings):
     # before submitting orders. Default off in research/paper; flip on
     # alongside live trading.
     require_cycle_approval: bool = Field(default=False, alias="REQUIRE_CYCLE_APPROVAL")
+
+    # ---- Agent PM execution bridge ----
+    # Fraction of the account the Agent PM directs. The mechanical
+    # strategy is scaled by (1 - this), so the two books sum to one
+    # account rather than levering it. 0.0 keeps the PM advisory, which is
+    # what it was from the day it was built — reaching the market must be
+    # an explicit act, never a consequence of deploying.
+    agent_pm_sleeve_pct: float = Field(default=0.0, alias="AGENT_PM_SLEEVE_PCT", ge=0.0, le=1.0)
+    # Fraction of the account the MECHANICAL strategy directs. Independent
+    # of the PM's sleeve on purpose: an earlier design derived this as
+    # (1 - agent_pm_sleeve_pct), which conflated two different meanings.
+    # The PM's weights are fractions of ITS OWN book, so its sleeve is
+    # "how much of the account that book represents" — while the strategy's
+    # share is a separate decision. Coupling them made "PM manages 10k of
+    # 88k" (sleeve 0.11) silently imply "momentum manages the other 89%".
+    #
+    # 1.0 is today's behaviour: the strategy owns the account. 0.0 makes it
+    # benchmark-only — signals, shadow ledger and dashboard all still
+    # compute, but every weight is zero so it can never reach an order.
+    strategy_sleeve_pct: float = Field(
+        default=1.0, alias="STRATEGY_SLEEVE_PCT", ge=0.0, le=1.0
+    )
+    # How stale a PM decision may be and still be executed. The PM is
+    # scheduled 45 minutes ahead of the cycle; anything approaching this
+    # limit means the two have drifted apart and the decision no longer
+    # describes the tape it would trade against.
+    agent_pm_signal_max_age_h: float = Field(
+        default=6.0, alias="AGENT_PM_SIGNAL_MAX_AGE_H", gt=0.0
+    )
     # How long the cycle waits for an /approve or /reject before
     # auto-rejecting and submitting nothing. Default 10 minutes.
     cycle_approval_timeout_s: int = Field(default=600, alias="CYCLE_APPROVAL_TIMEOUT_S")
