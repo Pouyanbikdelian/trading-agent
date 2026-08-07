@@ -135,7 +135,10 @@ services:
       # Each /buy / /cycle / /balances leaves one of these; uncapped it
       # grows by ~MB/month per active operator.
       - "ofelia.job-exec.prune-executed.schedule=0 45 23 * * *"
-      - 'ofelia.job-exec.prune-executed.command=/bin/sh -c "find /app/state/commands/executed -type f -name ''*.json'' -mtime +14 -delete 2>/dev/null; echo prune-executed: $(find /app/state/commands/executed -type f 2>/dev/null | wc -l) files remaining"'
+      # Paths follow STATE_DIR — hardcoding /app/state meant every hygiene
+      # job became a silent no-op on live, where state lives under
+      # /app/state/live.
+      - 'ofelia.job-exec.prune-executed.command=/bin/sh -c "find ${STATE_DIR:-/app/state}/commands/executed -type f -name ''*.json'' -mtime +14 -delete 2>/dev/null; echo prune-executed: $(find ${STATE_DIR:-/app/state}/commands/executed -type f 2>/dev/null | wc -l) files remaining"'
       # Weekly Sunday 04:00 UTC: vacuum the SQLite stores so deleted
       # rows actually reclaim disk. Without VACUUM, SQLite holds
       # tombstoned pages indefinitely — annoying for the long tail.
@@ -143,7 +146,7 @@ services:
       # NOTE on $$db: docker-compose expands $vars from the environment
       # before the container ever sees the command. $$ escapes to a literal
       # $ so the shell inside the trader interprets $db as a loop variable.
-      - 'ofelia.job-exec.sqlite-vacuum.command=/bin/sh -c "for db in /app/state/runner.db /app/state/orders.db; do [ -f \"$$db\" ] && python -c \"import sqlite3,sys; sqlite3.connect(sys.argv[1]).execute(''VACUUM'')\" \"$$db\" && echo vacuumed $$db; done"'
+      - 'ofelia.job-exec.sqlite-vacuum.command=/bin/sh -c "for db in ${STATE_DIR:-/app/state}/runner.db ${STATE_DIR:-/app/state}/orders.db; do [ -f \"$$db\" ] && python -c \"import sqlite3,sys; sqlite3.connect(sys.argv[1]).execute(''VACUUM'')\" \"$$db\" && echo vacuumed $$db; done"'
     # HOST NETWORKING: the trader connects to IB Gateway via 127.0.0.1.
     # Why not the docker bridge network: IB Gateway's TrustedIPs default
     # is 127.0.0.1 only. Connections from the docker bridge subnet
@@ -152,6 +155,21 @@ services:
     # the dialog entirely — connections appear FROM 127.0.0.1, which IS
     # trusted. Also bumps connect reliability.
     network_mode: host
+    # The image bakes in a healthcheck against /app/state/heartbeat.json.
+    # That path is wrong the moment STATE_DIR moves (live uses
+    # /app/state/live), and the failure is the worst kind: the runner
+    # writes its heartbeat somewhere the check never looks, so the
+    # container reports unhealthy forever no matter how well it is running
+    # — turning the one "cycles have stopped" signal into a permanent red
+    # light. Override so the check follows STATE_DIR.
+    healthcheck:
+      test:
+        ["CMD", "python", "/app/docker/healthcheck.py",
+         "${STATE_DIR:-/app/state}/heartbeat.json", "300"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
     environment:
       IBKR_HOST: 127.0.0.1
       # 4001 = live, 4002 = paper. We pick the right port based on the
@@ -310,6 +328,17 @@ services:
       # Distinct client id — IBKR drops the older session when two
       # connections share one, which on live day looks like a dead broker.
       IBKR_CLIENT_ID: ${IBKR_LIVE_CLIENT_ID:-37}
+    # Same override as `trader`, and it matters more here: live is the
+    # whole reason STATE_DIR moves, so without this the live runner is
+    # permanently "unhealthy" from its first five minutes.
+    healthcheck:
+      test:
+        ["CMD", "python", "/app/docker/healthcheck.py",
+         "${STATE_DIR:-/app/state}/heartbeat.json", "300"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
     volumes:
       - data:/app/data
       - logs:/app/logs

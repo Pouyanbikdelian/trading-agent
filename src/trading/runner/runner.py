@@ -504,9 +504,22 @@ class Runner:
             #
             # Derived from the cycle's own cron so the two can never
             # drift apart: change CRON and the warning moves with it.
-            with contextlib.suppress(Exception):
+            # Registration is logged on EVERY path, including the failures.
+            # A check that exists to catch a silent failure must not itself
+            # fail silently: the first cut wrapped this in a bare
+            # `contextlib.suppress(Exception)` with no logging, so a cron
+            # shape `_precycle_trigger` could not parse would have left the
+            # job unregistered and said nothing. "Is the 2FA warning armed?"
+            # has to be answerable from the log, not inferred.
+            try:
                 pre = _precycle_trigger(self.config.schedule_cron, self.config.schedule_tz)
-                if pre is not None:
+                if pre is None:
+                    logger.bind(component="runner").warning(
+                        "pre-cycle broker check NOT scheduled: cannot derive a lead time from "
+                        f"cron {self.config.schedule_cron!r} (crosses midnight, or an "
+                        "unsupported shape). A dead gateway will only be discovered AT the cycle."
+                    )
+                else:
                     self._scheduler.add_job(
                         self._check_broker_ready_async,
                         pre,
@@ -514,6 +527,15 @@ class Runner:
                         replace_existing=True,
                         max_instances=1,
                     )
+                    logger.bind(component="runner").info(
+                        f"pre-cycle broker check scheduled {self.PRECYCLE_LEAD_MINUTES}min "
+                        f"before the cycle: {pre}"
+                    )
+            except Exception:
+                logger.bind(component="runner").exception(
+                    "pre-cycle broker check could not be scheduled — a dead gateway will "
+                    "only be discovered at the cycle itself"
+                )
 
             # Price cache refresh: weekdays 21:40 UTC, after the close and
             # after the rebalance. Until now NOTHING refreshed the parquet
@@ -621,6 +643,14 @@ class Runner:
         logger.bind(component="runner").info(
             f"scheduler started — next run: {self._scheduler.get_job('cycle').next_run_time}"
         )
+        # Inventory every registered job. Several are conditional on env
+        # flags or on parsing the cron, and until now the only way to know
+        # whether one had actually armed was to wait and see whether it
+        # ever fired. One line at startup answers it instead.
+        for _job in sorted(self._scheduler.get_jobs(), key=lambda j: j.id):
+            logger.bind(component="runner").info(
+                f"  job {_job.id:<18} next={_job.next_run_time}"
+            )
 
         # Startup reconciliation. Today (May 2026) we shipped a bug where
         # broker.get_account silently returned a zero-position snapshot on
