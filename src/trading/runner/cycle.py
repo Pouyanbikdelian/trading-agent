@@ -393,6 +393,12 @@ class Cycle:
         # names below the cut is the only way to ever answer whether the
         # ranking step adds anything — see docs/LEARNING_ARCHITECTURE.md.
         self._record_shadow_ladder(prices, signal, last_prices, cfg=cfg)
+
+        # 7c. Agent PM bridge. Deliberately AFTER the shadow ladder, so the
+        # counterfactual keeps measuring the mechanical strategy's ranking
+        # rather than the blend, and BEFORE the risk manager, so the PM
+        # gets no privileged path to the broker. Disabled at sleeve 0.
+        signal = self._merge_pm_signal(signal, instruments_by_key=instruments_by_key, ts=ts_start)
         # Sector tags for the risk manager's sector cap. cfg.sector_map wins;
         # otherwise derive key -> sector from the fundamentals cache so the cap
         # actually binds instead of silently no-op'ing on an empty map.
@@ -786,6 +792,82 @@ class Cycle:
     #: An order still open past this is stale. Two sessions covers a
     #: normal after-hours order filling at the next open, plus a weekend.
     STALE_ORDER_AGE = timedelta(days=3)
+
+    def _merge_pm_signal(
+        self,
+        signal: Any,
+        *,
+        instruments_by_key: dict[str, Any],
+        ts: datetime,
+    ) -> Any:
+        """Blend the Agent PM's decision into the strategy signal.
+
+        One knob, ``AGENT_PM_SLEEVE_PCT``: the fraction of the account the
+        PM directs. The mechanical strategy is scaled by ``1 - sleeve``, so
+        the two books sum to ONE account rather than to ``1 + sleeve`` —
+        without that, turning the bridge on would quietly lever the book.
+
+            0.0  -> pure mechanical strategy (today's behaviour)
+            0.5  -> half each
+            1.0  -> pure Agent PM
+
+        Overlapping names ADD rather than overwrite: if both want AAPL,
+        the account holds the sum of two independent convictions, which is
+        the honest reading of two managers agreeing.
+
+        Never raises and never silently no-ops. A cycle where the PM was
+        expected to trade and did not is indistinguishable, in a position
+        report, from a PM that chose to hold everything — so every refusal
+        is announced.
+        """
+        from trading.agents.pm_signal import format_bridge_note, load_pm_signal
+        from trading.core.config import settings as _s
+
+        try:
+            result = load_pm_signal(
+                _s.state_dir, now=ts, tradeable_keys=set(instruments_by_key)
+            )
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "PM bridge raised; continuing on the mechanical strategy alone"
+            )
+            return signal
+
+        if result.signal is None:
+            # Silence only for the off switch. Every other refusal is an
+            # event the operator needs, because it means the PM was meant
+            # to reach the market this cycle and did not.
+            if "disabled" not in result.reason:
+                logger.bind(component="cycle").warning(f"PM bridge: {result.reason}")
+                self.alerts.error(format_bridge_note(result))
+            return signal
+
+        sleeve = result.sleeve_pct
+        merged: dict[str, float] = {
+            k: w * (1.0 - sleeve) for k, w in signal.target_weights.items()
+        }
+        for k, w in result.signal.target_weights.items():
+            merged[k] = merged.get(k, 0.0) + w
+
+        logger.bind(component="cycle").info(
+            f"PM bridge: sleeve {sleeve:.1%}, strategy scaled to {1 - sleeve:.1%}, "
+            f"{len(result.signal.target_weights)} PM name(s), "
+            f"combined gross {sum(merged.values()):.1%}"
+        )
+        self.alerts.info(format_bridge_note(result))
+
+        return signal.model_copy(
+            update={
+                "target_weights": merged,
+                "strategy": f"{signal.strategy}+agent_pm",
+                "metadata": {
+                    **(signal.metadata or {}),
+                    "pm_sleeve_pct": f"{sleeve:.4f}",
+                    "pm_decided_at": result.signal.metadata.get("decided_at", ""),
+                    "pm_dropped": ",".join(result.dropped),
+                },
+            }
+        )
 
     def _reconcile_from(self, ts_start: datetime) -> datetime:
         """Earliest timestamp worth asking the broker for fills from.

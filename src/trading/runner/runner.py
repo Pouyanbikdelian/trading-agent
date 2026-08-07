@@ -427,12 +427,33 @@ class Runner:
                     replace_existing=True,
                     max_instances=1,
                 )
-                # Agent PM: the committee's trading arm — SIMULATED ONLY.
-                # Weekly, Mondays 14:30 UTC (after that morning's committee).
-                # Writes to state/agent_pm/ and Telegram; never to IBKR.
+                # Agent PM: the committee's trading arm.
+                #
+                # Ran Mondays 14:30 UTC while it was simulation-only, when
+                # nothing depended on WHEN it decided. With the execution
+                # bridge (AGENT_PM_SLEEVE_PCT > 0) that stops being true:
+                # a Monday decision executed by Friday's cycle is a
+                # four-day-old view applied to a tape that has moved, and
+                # the bridge's freshness guard would refuse it every single
+                # week. A bridge that declines every week is worse than no
+                # bridge — it looks like a PM that keeps choosing to hold.
+                #
+                # So derive the PM run from the cycle's own cron, exactly
+                # as the broker-readiness check does, and put it 45 minutes
+                # ahead: long enough for the committee round trip, short
+                # enough to stay inside the 6h freshness window. Change
+                # CRON and both move together.
+                #
+                # Falls back to the Monday slot when the cron shape cannot
+                # be offset (crosses midnight, or is not a simple daily
+                # time) — simulation keeps running; the bridge will refuse
+                # on freshness and say so, which is the safe direction.
+                _pm_trigger = _precycle_trigger(
+                    self.config.schedule_cron, self.config.schedule_tz, lead_minutes=45
+                ) or CronTrigger(day_of_week="mon", hour=14, minute=30, timezone="UTC")
                 self._scheduler.add_job(
                     self._run_agent_pm_async,
-                    CronTrigger(day_of_week="mon", hour=14, minute=30, timezone="UTC"),
+                    _pm_trigger,
                     id="agent_pm",
                     replace_existing=True,
                 )

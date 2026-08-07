@@ -82,6 +82,10 @@ class PMSignalResult:
     age_hours: float | None = None
     dropped: list[str] = field(default_factory=list)
     gross: float = 0.0
+    #: The sleeve fraction this result was built with. The caller needs it
+    #: to scale the strategy side down by the same amount, so the two
+    #: books sum to one account rather than to 1 + sleeve.
+    sleeve_pct: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -224,6 +228,7 @@ def load_pm_signal(
         age_hours=age_h,
         dropped=sorted(dropped),
         gross=gross,
+        sleeve_pct=sleeve_pct,
     )
 
 
