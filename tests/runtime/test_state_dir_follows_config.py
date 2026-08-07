@@ -60,9 +60,7 @@ class TestHeartbeatHealthcheck:
         )
 
     @pytest.mark.parametrize("service", RUNNER_SERVICES)
-    def test_the_healthcheck_path_follows_state_dir(
-        self, compose_doc: dict, service: str
-    ) -> None:
+    def test_the_healthcheck_path_follows_state_dir(self, compose_doc: dict, service: str) -> None:
         test = " ".join(compose_doc["services"][service]["healthcheck"]["test"])
         assert "STATE_DIR" in test, f"{service} healthcheck does not follow STATE_DIR: {test}"
         assert "heartbeat.json" in test
@@ -100,9 +98,7 @@ class TestNoServiceInheritsTheHardcodedCheck:
         bare = test.replace("${STATE_DIR:-/app/state}", "")
         assert "/app/state" not in bare, f"{service} pins a state path: {test}"
 
-    def test_the_dashboard_probes_itself_rather_than_the_runner(
-        self, compose_doc: dict
-    ) -> None:
+    def test_the_dashboard_probes_itself_rather_than_the_runner(self, compose_doc: dict) -> None:
         """It has real observable liveness — it serves on 8787 or it does
         not. Borrowing the runner's heartbeat said nothing about whether
         this process was up."""

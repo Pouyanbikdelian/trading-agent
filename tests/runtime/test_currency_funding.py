@@ -165,7 +165,5 @@ class TestTheAlert:
 
     def test_it_explains_the_silent_symptom(self) -> None:
         """The operator has to recognise the failure if it happens anyway."""
-        r = check_trade_currency_funding(
-            _Broker(balances={"USD": 0.0}), gross_exposure_pct=0.11
-        )
+        r = check_trade_currency_funding(_Broker(balances={"USD": 0.0}), gross_exposure_pct=0.11)
         assert "bought nothing" in format_funding_alert(r, minutes_to_cycle=60)

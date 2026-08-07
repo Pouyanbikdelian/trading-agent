@@ -38,8 +38,7 @@ class TestUnattendedBoot:
         is there to click it, so the gateway never opens its API port."""
         val = gateway["environment"]["EXISTING_SESSION_DETECTED_ACTION"]
         assert "primary" in val, (
-            "gateway would block on the 'Existing session detected' modal; "
-            f"got {val!r}"
+            f"gateway would block on the 'Existing session detected' modal; got {val!r}"
         )
 
     def test_a_missed_2fa_prompt_retries_rather_than_dying(self, gateway: dict) -> None:

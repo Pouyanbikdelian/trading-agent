@@ -184,25 +184,19 @@ class TestInstrumentMapping:
         """The cycle builds its instrument map from the equity universe,
         so an ETF target would otherwise vanish into cash silently."""
         write_decision(tmp_path, weights={"XLK": 0.2, "AAPL": 0.1})
-        r = load_pm_signal(
-            tmp_path, now=NOW, sleeve_pct=0.10, tradeable_keys={"equity:AAPL"}
-        )
+        r = load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10, tradeable_keys={"equity:AAPL"})
         assert r.ok
         assert r.dropped == ["XLK"]
         assert list(r.signal.target_weights) == ["equity:AAPL"]  # type: ignore[union-attr]
 
-    def test_everything_dropped_is_a_refusal_not_an_empty_signal(
-        self, tmp_path: Path
-    ) -> None:
+    def test_everything_dropped_is_a_refusal_not_an_empty_signal(self, tmp_path: Path) -> None:
         """An empty target set means 'sell everything' to the risk
         manager. It must never be produced by an accident of mapping."""
         write_decision(tmp_path, weights={"XLK": 0.2})
         r = load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10, tradeable_keys=set())
         assert not r.ok and "survived instrument mapping" in r.reason
 
-    def test_non_numeric_and_non_positive_weights_are_discarded(
-        self, tmp_path: Path
-    ) -> None:
+    def test_non_numeric_and_non_positive_weights_are_discarded(self, tmp_path: Path) -> None:
         write_decision(tmp_path, weights={"AAPL": 0.1, "MSFT": "junk", "NVDA": -0.5})
         r = load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10)
         assert r.signal is not None
@@ -255,16 +249,12 @@ class TestOperatorNote:
 
     def test_refusal_states_the_reason(self, tmp_path: Path) -> None:
         write_decision(tmp_path, ts=NOW - timedelta(days=4))
-        note = format_bridge_note(
-            load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10, max_age_h=6)
-        )
+        note = format_bridge_note(load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10, max_age_h=6))
         assert "not traded" in note and "96.0h" in note
 
     def test_drops_are_visible(self, tmp_path: Path) -> None:
         write_decision(tmp_path, weights={"XLK": 0.2, "AAPL": 0.1})
         note = format_bridge_note(
-            load_pm_signal(
-                tmp_path, now=NOW, sleeve_pct=0.10, tradeable_keys={"equity:AAPL"}
-            )
+            load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10, tradeable_keys={"equity:AAPL"})
         )
         assert "dropped XLK" in note
