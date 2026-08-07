@@ -258,3 +258,58 @@ class TestPartialFills:
     def test_an_unknown_order_is_reported_not_guessed(self, tmp_path):
         store = OrderStore(tmp_path / "orders.db")
         assert store.settle_status("never-existed") is None
+
+
+class TestLateArrivingCommissions:
+    """IBKR delivers commissionReport ASYNCHRONOUSLY — often after the
+    execution. So the first sighting of a fill frequently carries
+    commission 0.0, and a later reconciliation pass carries the real one.
+
+    The pre-dedupe code captured that by accident, as a second duplicate
+    row. A plain INSERT OR IGNORE would have frozen the zero and
+    under-reported fees forever — a regression introduced by the dedupe
+    fix itself and caught reading the dashboard's PnL path.
+    """
+
+    def test_a_later_commission_updates_the_row(self, tmp_path):
+        store = OrderStore(tmp_path / "orders.db")
+        _order(store)
+
+        store.save_fill(_fill(exec_id="e1", commission=0.0), client_order_id="o-1")
+        store.save_fill(_fill(exec_id="e1", commission=1.37), client_order_id="o-1")
+
+        rows = store.conn.execute("SELECT commission FROM fills").fetchall()
+        assert [r[0] for r in rows] == [1.37]
+
+    def test_it_is_still_one_row(self, tmp_path):
+        store = OrderStore(tmp_path / "orders.db")
+        _order(store)
+
+        store.save_fill(_fill(exec_id="e1", commission=0.0), client_order_id="o-1")
+        store.save_fill(_fill(exec_id="e1", commission=1.37), client_order_id="o-1")
+
+        assert _count(store) == 1
+
+    def test_a_lost_report_cannot_erase_a_recorded_fee(self, tmp_path):
+        """Updates go UPWARDS only. A later pass that has dropped the
+        commissionReport must not zero a fee we already have."""
+        store = OrderStore(tmp_path / "orders.db")
+        _order(store)
+
+        store.save_fill(_fill(exec_id="e1", commission=1.37), client_order_id="o-1")
+        store.save_fill(_fill(exec_id="e1", commission=0.0), client_order_id="o-1")
+
+        rows = store.conn.execute("SELECT commission FROM fills").fetchall()
+        assert [r[0] for r in rows] == [1.37]
+
+    def test_an_exec_id_arriving_late_is_backfilled(self, tmp_path):
+        """Same execution seen first without an execId, then with one."""
+        store = OrderStore(tmp_path / "orders.db")
+        _order(store)
+
+        store.save_fill(_fill(commission=0.0), client_order_id="o-1")
+        store.save_fill(_fill(commission=2.0), client_order_id="o-1")
+
+        row = store.conn.execute("SELECT commission FROM fills").fetchone()
+        assert row[0] == 2.0
+        assert _count(store) == 1

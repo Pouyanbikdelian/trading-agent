@@ -372,11 +372,25 @@ class OrderStore:
         historian's trade reconstruction). Both counted the same execution
         repeatedly.
         """
+        # Upsert, not INSERT OR IGNORE. IBKR delivers commissionReport
+        # ASYNCHRONOUSLY — frequently after the execution itself — so the
+        # first sighting of a fill often carries commission 0.0 and a
+        # later reconciliation pass carries the real number.
+        #
+        # Plain INSERT OR IGNORE would freeze the zero and under-report
+        # fees forever. (The pre-dedupe code captured the commission by
+        # accident, as a second duplicate row.) Updating only UPWARDS
+        # keeps it monotonic: a later pass that has lost the report
+        # cannot erase a fee we already recorded.
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO fills
+            INSERT INTO fills
                 (order_id, ts, quantity, price, commission, venue, exec_id, dedupe_key)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dedupe_key) DO UPDATE SET
+                commission = excluded.commission,
+                exec_id    = COALESCE(fills.exec_id, excluded.exec_id)
+            WHERE excluded.commission > fills.commission
             """,
             (
                 client_order_id,
