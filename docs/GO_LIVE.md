@@ -124,6 +124,38 @@ Code / config audit:
 
 ## 3. Config & gating changes for live day  [Yan only]
 
+### 3.0 Hard gates — both learned the expensive way on 2026-08-07
+
+Two rules earned by the first live session, which lasted seven minutes.
+Neither is a preference. Both are now enforced in code as well as
+written here, because the VST step existed in an earlier draft of this
+checklist and was dropped when the scope narrowed to PM-only — a
+checklist item that can be dropped is not a gate.
+
+- [ ] **`/hold` every pre-existing personal position BEFORE arming.**
+      Two subsystems can sell them and they are independent: the
+      rebalance (any symbol the strategy did not pick has a target
+      weight of zero, and zero is a sell) and the position guards (ATR
+      trailing stops, `runtime/guards.py`, which apply to every position
+      in the account regardless of who opened it — on paper they had
+      only ever seen system positions). `GUARDS_ENABLED=false` closes
+      only the second path. `/hold` is the only thing that closes both.
+      Verify with `trading preflight check`; the live runner refuses to
+      start while anything is unprotected. To accept the risk instead of
+      holding, `trading preflight ack`.
+
+- [ ] **Never point `STATE_DIR` at the live directory until the gateway
+      is already in live mode.** Dry-running the live code path against
+      the paper gateway writes paper equity into the live baseline, and
+      `start_of_day` will not re-stamp it. On 2026-08-07 that put CHF
+      1,068,862 into `daily_equity_open` and `equity_high_watermark`;
+      the live session, with 87,413 of equity, halted at "daily loss
+      -91.82%" before it had done anything. State directories are now
+      stamped with the env that wrote them (`state/env.json`) and a
+      mismatched runner refuses to start — check with
+      `trading state check`, migrate with `trading state stamp --env live`
+      AFTER removing `halt.json`, `runner.db*` and `orders.db*`.
+
 - [ ] Open a SEPARATE IBKR live sub-account (or confirm main) — never
       share the paper account's state dir. Fresh `state/` for live.
 - [ ] `.env` for the live container:

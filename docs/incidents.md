@@ -14,6 +14,115 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-08-07 — First live session lasted seven minutes
+
+**TL;DR:** Went live on IBKR account U15995232 at ~14:44 UTC, PM-only
+(`AGENT_PM_SLEEVE_PCT=0.11`, `STRATEGY_SLEEVE_PCT=0.0`), ~10k cap. Two
+incidents inside seven minutes. The position guards sold a personal VST
+position, and the kill switch halted at "daily loss -91.82%" against a
+baseline written by a paper cycle an hour earlier. Neither was a code
+defect. Both were operator sequencing, and both are now enforced by
+code because a runbook step is only as good as the day nobody skips it.
+
+### Symptoms
+
+- 63 shares of VST sold at ~139.12 (~8,765 USD) minutes after arming.
+  Nothing in the PM's decision mentioned VST.
+- Telegram: `HALT: daily loss -91.82% breaches limit -2.00%` on an
+  account that had made one trade.
+
+### Wrong theories
+
+- *"The PM hallucinated a ticker and sold VST."* The bridge does run the
+  PM's picks through the same risk manager as everything else and the PM
+  can name a symbol it does not hold — but the PM never emitted VST. The
+  seller was `runtime/guards.py`, a subsystem neither the PM nor the
+  strategy knows about.
+- *"Turning the guards off would have prevented it."* Only half. The
+  rebalance sells anything whose target weight is zero, and every symbol
+  the strategy did not pick has a target weight of zero. `/hold` is the
+  only thing that blocks both paths.
+- *"The account really did drop 91%."* It did not move. The comparison
+  was against another account's equity.
+- *"Clearing the daily figure fixes the halt."* It re-halted
+  immediately. `equity_high_watermark` was poisoned by the same write,
+  and at `MAX_DRAWDOWN_PCT=0.02` an 87k account against a 1.07M peak
+  breaches on the next bar. The second half of a poisoned baseline is
+  the half you find out about later.
+
+### Actual root causes
+
+**1. A paper cycle wrote into the live state directory.** `STATE_DIR`
+was switched to `/app/state/live` an hour before arming, to dry-run the
+live code path — while the gateway was still in PAPER mode. That cycle
+stamped CHF 1,068,862 of paper equity into `daily_equity_open` and
+`equity_high_watermark`. `start_of_day` is idempotent per date, so when
+the live session opened an hour later `last_day` already equalled today
+and the baseline was never re-taken. A state directory is just files: it
+carried no record of which account wrote it, and nothing could tell that
+the two figures came from different places.
+
+**2. Pre-existing personal positions were never `/hold`-ed.** The
+position guards (ATR trailing stop + portfolio ratchet, `GUARDS_ENABLED`)
+apply to every position in the account regardless of who opened it. On
+paper they had only ever seen system positions, so nothing had made them
+visible — Yan did not know they existed. `guards.py:190` exempts symbols
+in `holds.json`, so `/hold VST` would have prevented the sale. The
+runbook had "resolve WMT/VST with /hold" as a gate; it was dropped when
+the scope narrowed to PM-only.
+
+### Fix
+
+- `core/state_env.py` — state directories are stamped with the
+  `TRADING_ENV` that wrote them. A mismatched runner raises
+  `StateEnvMismatchError` at `Runner.from_config`, before anything reads a
+  baseline. Unstamped directories are adopted (deployments have
+  several); a mismatch is fatal and never auto-resolved, because every
+  way of self-healing amounts to guessing which account the numbers on
+  disk belong to. `trading state check` / `trading state stamp`.
+- `risk/manager.py::start_of_day` — the date is no longer the only thing
+  that decides. A stored baseline more than
+  `BASELINE_SANITY_DIVERGENCE_PCT` (50%) from actual equity is re-stamped
+  whatever the date says, and BOTH figures go. Returns a note; the cycle
+  raises it as a critical alert, because a baseline silently repaired is
+  a baseline nobody investigates.
+- `runtime/broker_ready.check_unheld_positions` + `Runner.preflight_unheld`
+  — the live runner refuses to start while any account position is
+  neither in `holds.json` nor explicitly acknowledged. `trading preflight
+  check` lists them; `trading preflight ack` records the exact symbol set,
+  so a position opened later raises the question again.
+- GO_LIVE.md §3.0 — both rules written as hard gates at the top of the
+  live-day checklist.
+
+**Recovery on the day:** backed up `state/live/` to a tarball, deleted
+`halt.json`, `runner.db*`, `orders.db*`, `consecutive_errors.json`; kept
+`memory/` and `agent_pm/`.
+
+### Lessons
+
+1. **A number that cannot be produced by the market is a measurement
+   bug.** -91.82% on an account that had made one trade is not a loss.
+   The kill switches were working perfectly; what they measured against
+   was from somewhere else. Any limit worth halting on deserves a sanity
+   check on its own baseline.
+
+2. **Deleting `halt.json` clears the halt.** The system resumes silently
+   — no announcement, no re-confirmation. That is its own trap and it
+   fired during the recovery.
+
+3. **A subsystem that has only ever seen its own positions has not been
+   tested.** The guards ran for months on paper and looked well-behaved
+   because every position they saw belonged to the system. Their real
+   scope — the whole account — only became visible the first time the
+   account contained something else.
+
+4. **A gate that lives only in a checklist is not a gate.** The `/hold`
+   step existed, in writing, and was dropped in good faith when the scope
+   narrowed. The version that survives a change of scope is the one the
+   process refuses to start without.
+
+---
+
 ## 2026-07-15 — Paper book goes SHORT two names at the open
 
 **TL;DR:** Three independent order batches (a guard full-close and two
