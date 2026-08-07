@@ -10,6 +10,8 @@ The CLI is the primary way humans interact with the system:
 
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -778,9 +780,33 @@ def _live_run(
 ) -> None:
     """Live-trading runner. Refuses unless both .env flags say live."""
     if not settings.is_live_armed():
-        raise typer.BadParameter(
-            "live trading requires BOTH TRADING_ENV=live AND ALLOW_LIVE_TRADING=true in .env"
+        # Refusing is right. Refusing INSTANTLY is not: this runs under
+        # `restart: unless-stopped`, which restarts on any exit code, so
+        # an unarmed container becomes a hot crash loop — hundreds of
+        # restarts a minute, logs unreadable, autoheal thrashing. That
+        # happened on 2026-08-07 the moment the arming flag became
+        # settable from .env (it had been hardcoded on, which hid this).
+        #
+        # So: say it clearly, wait, then exit. The loop becomes one quiet
+        # line a minute — still obviously refusing, still costing nothing.
+        #
+        # To actually stand down, STOP the service:
+        #     docker compose stop trader-live
+        # A stopped container is an unambiguous "not trading"; a disarmed
+        # one that keeps restarting is a puzzle.
+        console.print(
+            "[red bold]NOT ARMED[/red bold] — live trading requires BOTH "
+            "TRADING_ENV=live AND ALLOW_LIVE_TRADING=true.\n"
+            f"  TRADING_ENV={settings.trading_env}  "
+            f"ALLOW_LIVE_TRADING={settings.allow_live_trading}\n"
+            "  Note: docker-compose `environment:` overrides `.env` — check both.\n"
+            "  To stand down deliberately: `docker compose stop trader-live`."
         )
+        logger.bind(component="cli").error(
+            "live runner not armed; sleeping before exit to avoid a restart storm"
+        )
+        time.sleep(float(os.getenv("UNARMED_EXIT_DELAY_S", "60")))
+        raise typer.Exit(code=1)
     # Build with the IBKR broker.
     from trading.execution.ibkr import IbkrBroker
 

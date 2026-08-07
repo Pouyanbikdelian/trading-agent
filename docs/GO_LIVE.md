@@ -124,6 +124,48 @@ Code / config audit:
 
 ## 3. Config & gating changes for live day  [Yan only]
 
+### 3.0b You must be able to see the account WITHOUT the system
+
+- [ ] **Create a second IBKR username** (Client Portal → Settings → Users
+      & Access Rights). The gateway uses one; you use the other.
+
+IBKR permits one session per username, and the gateway is configured
+`EXISTING_SESSION_DETECTED_ACTION=primary` — it *seizes* the session and
+disconnects whoever else holds it. That is the right setting: it is what
+lets the gateway recover unattended after a restart instead of waiting
+at a dialog for a human. But while it runs, logging into IBKR Mobile on
+the same username gets you kicked within seconds (observed 2026-08-07).
+
+The consequence is not convenience. It means the operator's only view of
+the account is the system's own dashboard and Telegram — the same code
+whose bugs the operator is trying to catch. On 2026-08-07 the system
+reported a 91.82% daily loss on an account that had not moved. Checking
+the broker directly would have settled it in ten seconds, and the
+operator could not hold a session long enough to look.
+
+**A system you cannot audit from outside itself is one you have to take
+on trust.** Two usernames costs nothing and removes that entirely.
+
+### 3.0a Standing down — STOP the service, don't just disarm
+
+To take the system out of the market for a session:
+
+```bash
+docker compose stop trader-live
+```
+
+A stopped container is an unambiguous "not trading". Disarming instead
+(`ALLOW_LIVE_TRADING=false`) leaves `restart: unless-stopped` respawning
+a runner that refuses on every start — it now waits a minute before
+exiting, so it is quiet rather than a storm, but it is still a puzzle to
+read at a glance.
+
+Note also that `docker-compose.yml` `environment:` values **override**
+`.env`. `ALLOW_LIVE_TRADING` used to be hardcoded `"true"` there, so
+editing `.env` disarmed nothing and `trading status` was the only place
+the truth showed. It is interpolated now; check `trading status`, not the
+file you edited.
+
 ### 3.0 Hard gates — both learned the expensive way on 2026-08-07
 
 Two rules earned by the first live session, which lasted seven minutes.
