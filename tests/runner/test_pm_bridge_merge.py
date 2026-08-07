@@ -48,6 +48,7 @@ class _Cycle:
     _add_pm_targets = _Real._add_pm_targets
     _mode_scale = _Real._mode_scale
     _pm_mode_scale = _Real._pm_mode_scale
+    _pm_capital_scale = _Real._pm_capital_scale
 
 
 def strategy_signal(**weights: float) -> Signal:
@@ -478,3 +479,142 @@ class TestTheOperatorModeReachesThePMSleeve:
         )
 
         assert out.target_weights["equity:NVDA"] == 0.10
+
+
+class TestThePMDollarCapExists:
+    """PM_SLEEVE_CAPITAL_USD was defined in 2026-07 with a comment saying
+    it existed so "the bridge, when built, sizes PM target weights against
+    min(PM_SLEEVE_CAPITAL_USD, allotted equity)".
+
+    The bridge was built 2026-08-07. Nothing read the setting. GO_LIVE §4
+    records "$20,000 USD, hard cap" as a locked decision and the July
+    notes record it as shipped — it did not exist. The only bound was
+    AGENT_PM_SLEEVE_PCT, a FRACTION, so the allocation grew with the
+    account, which is the thing a dollar cap is for.
+    """
+
+    def _settings(self, monkeypatch, *, cap: float, strat: float = 0.0):
+        import types
+
+        monkeypatch.setattr(
+            "trading.core.config.settings",
+            types.SimpleNamespace(
+                state_dir="/nonexistent",
+                strategy_sleeve_pct=strat,
+                pm_sleeve_capital_usd=cap,
+            ),
+        )
+
+    def _merge(self, cycle, monkeypatch, weights, **kw):
+        patch_bridge(monkeypatch, make_result(weights, sleeve=0.5))
+        monkeypatch.setattr(cycle, "_pm_mode_scale", lambda: (None, "neutral"))
+        return cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}),
+            instruments_by_key={},
+            ts=NOW,
+            **kw,
+        )
+
+    def test_the_cap_binds_on_a_usd_account(self, cycle, monkeypatch) -> None:
+        """20% of a 500k account is 100k; the cap says 20k."""
+        self._settings(monkeypatch, cap=20_000.0)
+
+        out = self._merge(
+            cycle,
+            monkeypatch,
+            {"equity:NVDA": 0.20},
+            equity=500_000.0,
+            base_currency="USD",
+            fx_rates={},
+        )
+
+        assert out.target_weights["equity:NVDA"] * 500_000.0 == pytest.approx(20_000.0)
+
+    def test_it_does_not_bind_when_the_sleeve_is_already_smaller(self, cycle, monkeypatch) -> None:
+        self._settings(monkeypatch, cap=20_000.0)
+
+        out = self._merge(
+            cycle,
+            monkeypatch,
+            {"equity:NVDA": 0.10},
+            equity=100_000.0,
+            base_currency="USD",
+            fx_rates={},
+        )
+
+        assert out.target_weights["equity:NVDA"] == pytest.approx(0.10)
+
+    def test_relative_conviction_survives_the_cap(self, cycle, monkeypatch) -> None:
+        """Scaling, not clipping — otherwise a conviction-weighted book
+        becomes equal-weight, the same trap the per-position cap sets."""
+        self._settings(monkeypatch, cap=20_000.0)
+
+        out = self._merge(
+            cycle,
+            monkeypatch,
+            {"equity:BIG": 0.30, "equity:SMALL": 0.10},
+            equity=500_000.0,
+            base_currency="USD",
+            fx_rates={},
+        )
+
+        w = out.target_weights
+        assert w["equity:BIG"] / w["equity:SMALL"] == pytest.approx(3.0)
+
+    def test_the_cap_is_converted_for_a_chf_account(self, cycle, monkeypatch) -> None:
+        """USD 20,000 at 0.81 CHF/USD is 16,200 CHF — not 20,000 CHF."""
+        self._settings(monkeypatch, cap=20_000.0)
+
+        out = self._merge(
+            cycle,
+            monkeypatch,
+            {"equity:NVDA": 0.50},
+            equity=500_000.0,
+            base_currency="CHF",
+            fx_rates={"USD": 0.81},
+        )
+
+        assert out.target_weights["equity:NVDA"] * 500_000.0 == pytest.approx(16_200.0)
+
+    def test_a_missing_rate_still_caps_rather_than_giving_up(self, cycle, monkeypatch) -> None:
+        self._settings(monkeypatch, cap=20_000.0)
+
+        out = self._merge(
+            cycle,
+            monkeypatch,
+            {"equity:NVDA": 0.50},
+            equity=500_000.0,
+            base_currency="CHF",
+            fx_rates={},
+        )
+
+        assert out.target_weights["equity:NVDA"] * 500_000.0 == pytest.approx(20_000.0)
+
+    def test_zero_disables_the_cap(self, cycle, monkeypatch) -> None:
+        self._settings(monkeypatch, cap=0.0)
+
+        out = self._merge(
+            cycle,
+            monkeypatch,
+            {"equity:NVDA": 0.50},
+            equity=500_000.0,
+            base_currency="USD",
+            fx_rates={},
+        )
+
+        assert out.target_weights["equity:NVDA"] == pytest.approx(0.50)
+
+    def test_no_equity_yet_does_not_zero_the_book(self, cycle, monkeypatch) -> None:
+        """A broker snapshot without equity must not be read as 'cap to 0'."""
+        self._settings(monkeypatch, cap=20_000.0)
+
+        out = self._merge(
+            cycle,
+            monkeypatch,
+            {"equity:NVDA": 0.10},
+            equity=0.0,
+            base_currency="USD",
+            fx_rates={},
+        )
+
+        assert out.target_weights["equity:NVDA"] == pytest.approx(0.10)

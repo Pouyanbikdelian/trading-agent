@@ -447,21 +447,32 @@ class Cycle:
         # counterfactual keeps measuring the mechanical strategy's ranking
         # rather than the blend, and BEFORE the risk manager, so the PM
         # gets no privileged path to the broker. Disabled at sleeve 0.
-        signal = self._merge_pm_signal(signal, instruments_by_key=instruments_by_key, ts=ts_start)
-        # Sector tags for the risk manager's sector cap. cfg.sector_map wins;
-        # otherwise derive key -> sector from the fundamentals cache so the cap
-        # actually binds instead of silently no-op'ing on an empty map.
-        sector_map = self._resolve_sector_map(instruments_by_key, cfg)
-
         # FX rates so the risk manager sizes in base-currency terms (CHF
         # account buying USD stocks — the sizing was off by the USDCHF
         # factor before 2026-07-14). Failure degrades to {}: the manager
         # then sizes at 1.0 and records a decision, never crashes.
+        #
+        # Fetched BEFORE the PM merge because the PM's hard dollar cap
+        # (PM_SLEEVE_CAPITAL_USD) is denominated in USD and the account is
+        # not.
         fx_rates: dict[str, float] = {}
         try:
             fx_rates = self.broker.get_fx_rates()
         except Exception as e:
             logger.bind(component="cycle").warning(f"get_fx_rates failed ({e!r}); sizing at 1.0")
+
+        signal = self._merge_pm_signal(
+            signal,
+            instruments_by_key=instruments_by_key,
+            ts=ts_start,
+            equity=float(getattr(account, "equity", 0.0) or 0.0),
+            base_currency=getattr(account, "base_currency", None) or "USD",
+            fx_rates=fx_rates,
+        )
+        # Sector tags for the risk manager's sector cap. cfg.sector_map wins;
+        # otherwise derive key -> sector from the fundamentals cache so the cap
+        # actually binds instead of silently no-op'ing on an empty map.
+        sector_map = self._resolve_sector_map(instruments_by_key, cfg)
 
         # Orders already working at the broker — from ANY source (earlier
         # after-hours cycles, guard exits, manual commands). The risk
@@ -912,12 +923,75 @@ class Cycle:
             )
         return [*instruments, *extra]
 
+    def _pm_capital_scale(
+        self,
+        pm_weights: dict[str, float],
+        *,
+        equity: float,
+        base_currency: str,
+        fx_rates: dict[str, float],
+    ) -> float:
+        """Scale factor enforcing PM_SLEEVE_CAPITAL_USD — the HARD cap.
+
+        This setting was added when the bridge was still hypothetical, with
+        a comment saying it existed so that "the bridge, when built, sizes
+        PM target weights against min(PM_SLEEVE_CAPITAL_USD, allotted
+        equity)". The bridge was built on 2026-08-07 and nothing ever read
+        it. GO_LIVE.md §4 records "$20,000 USD, hard cap" as a locked
+        decision, and the July notes record it as shipped. It did not
+        exist: the only thing bounding the PM was AGENT_PM_SLEEVE_PCT, a
+        FRACTION — so the allocation grew with the account, which is
+        exactly what a dollar cap is for.
+
+        Returns 1.0 when the cap does not bind, or when we cannot value
+        the book (no equity yet). Never raises.
+
+        Currency: the cap is USD, the account may not be. ``fx_rates`` maps
+        currency -> base units per 1 unit, so USD 20,000 on a CHF account
+        at 0.81 is 16,200 CHF. With no rate available we apply the number
+        as base currency and say so — on a CHF account that is slightly
+        LOOSER than intended, which is why it is logged rather than
+        silently assumed.
+        """
+        try:
+            from trading.core.config import settings as _s
+
+            cap_usd = float(getattr(_s, "pm_sleeve_capital_usd", 0.0) or 0.0)
+            if cap_usd <= 0 or equity <= 0:
+                return 1.0
+
+            if base_currency.upper() == "USD":
+                cap_base = cap_usd
+            else:
+                rate = float((fx_rates or {}).get("USD", 0.0) or 0.0)
+                if rate > 0:
+                    cap_base = cap_usd * rate
+                else:
+                    cap_base = cap_usd
+                    logger.bind(component="cycle").warning(
+                        f"no USD rate for the PM capital cap; treating "
+                        f"{cap_usd:,.0f} USD as {base_currency} — verify get_fx_rates()"
+                    )
+
+            wanted_base = sum(pm_weights.values()) * equity
+            if wanted_base <= cap_base:
+                return 1.0
+            return max(0.0, cap_base / wanted_base)
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "PM capital cap could not be computed; leaving the sleeve unscaled"
+            )
+            return 1.0
+
     def _merge_pm_signal(
         self,
         signal: Any,
         *,
         instruments_by_key: dict[str, Any],
         ts: datetime,
+        equity: float = 0.0,
+        base_currency: str = "USD",
+        fx_rates: dict[str, float] | None = None,
     ) -> Any:
         """Blend the Agent PM's decision into the strategy signal.
 
@@ -997,8 +1071,31 @@ class Cycle:
         # Scaled HERE rather than on the combined book, because the
         # strategy side has already had its scale applied and doing it
         # again downstream would cut it twice.
+        # PM_SLEEVE_CAPITAL_USD — the documented hard dollar cap, which
+        # until now nothing read. Applied BEFORE the mode scale so the two
+        # compose: the cap bounds what the PM may ever direct, the mode
+        # cuts it further when the operator has de-risked.
+        cap_scale = self._pm_capital_scale(
+            result.signal.target_weights,
+            equity=equity,
+            base_currency=base_currency,
+            fx_rates=fx_rates or {},
+        )
+        if cap_scale < 1.0:
+            from trading.core.config import settings as _cap_s
+
+            logger.bind(component="cycle").warning(
+                f"PM capital cap binding: scaling the sleeve by {cap_scale:.3f} "
+                f"(cap {float(_cap_s.pm_sleeve_capital_usd):,.0f} USD)"
+            )
+            self.alerts.info(
+                f"💵 PM sleeve capped at {float(_cap_s.pm_sleeve_capital_usd):,.0f} USD "
+                f"— targets scaled by {cap_scale:.2f}"
+            )
+
         mode_scale, mode_name = self._pm_mode_scale()
         for k, w in result.signal.target_weights.items():
+            w = w * cap_scale
             merged[k] = merged.get(k, 0.0) + (w if mode_scale is None else w * mode_scale)
         if mode_scale is not None:
             pm_gross = sum(result.signal.target_weights.values())
