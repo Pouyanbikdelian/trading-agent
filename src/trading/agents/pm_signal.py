@@ -57,17 +57,36 @@ from trading.core.types import AssetClass, Instrument, Signal
 #: Producer name, for attribution in the journal and the order ledger.
 STRATEGY_NAME = "agent_pm"
 
-#: How stale a PM decision may be and still be executed. Six hours assumes
-#: the PM is scheduled shortly before the cycle. It is deliberately far
-#: below the current four-day gap, so a mis-scheduled PM fails loudly
-#: instead of trading on last week's view.
-DEFAULT_MAX_AGE_H = float(os.getenv("AGENT_PM_SIGNAL_MAX_AGE_H", "6"))
+def _setting(name: str, env: str, fallback: float) -> float:
+    """Read a tunable from Settings, falling back to the environment.
 
-#: Fraction of TOTAL ACCOUNT EQUITY the PM may direct. The PM's own
-#: weights sum to at most MAX_GROSS (1.0) of its simulated book; scaling
-#: by this maps them onto a real sleeve. 0.0 disables the bridge, which
-#: is the default: reaching the market must be an explicit act.
-DEFAULT_SLEEVE_PCT = float(os.getenv("AGENT_PM_SLEEVE_PCT", "0.0"))
+    Resolved at CALL time rather than import time. A module-level
+    ``os.getenv`` freezes the value when the module is first imported,
+    which silently ignores a changed ``.env`` in any process that imported
+    early — and "I changed the sleeve and nothing happened" is exactly the
+    class of confusion this codebase keeps paying for.
+    """
+    try:
+        from trading.core.config import settings
+
+        return float(getattr(settings, name))
+    except Exception:
+        return float(os.getenv(env, str(fallback)))
+
+
+def default_max_age_h() -> float:
+    """How stale a PM decision may be and still be executed. Six hours
+    assumes the PM runs shortly before the cycle; it is far below the
+    four-day gap the old Monday schedule produced, so a mis-scheduled PM
+    fails loudly instead of trading last week's view."""
+    return _setting("agent_pm_signal_max_age_h", "AGENT_PM_SIGNAL_MAX_AGE_H", 6.0)
+
+
+def default_sleeve_pct() -> float:
+    """Fraction of TOTAL ACCOUNT EQUITY the PM may direct. Its own weights
+    sum to at most MAX_GROSS (1.0) of its simulated book; scaling by this
+    maps them onto a real sleeve. 0.0 disables the bridge."""
+    return _setting("agent_pm_sleeve_pct", "AGENT_PM_SLEEVE_PCT", 0.0)
 
 
 @dataclass(frozen=True)
@@ -124,8 +143,8 @@ def load_pm_signal(
     anything outside it is dropped and reported rather than silently lost.
     """
     now = now or datetime.now(tz=timezone.utc)
-    max_age_h = DEFAULT_MAX_AGE_H if max_age_h is None else max_age_h
-    sleeve_pct = DEFAULT_SLEEVE_PCT if sleeve_pct is None else sleeve_pct
+    max_age_h = default_max_age_h() if max_age_h is None else max_age_h
+    sleeve_pct = default_sleeve_pct() if sleeve_pct is None else sleeve_pct
 
     if sleeve_pct <= 0:
         return PMSignalResult(None, "PM bridge disabled (AGENT_PM_SLEEVE_PCT=0)")
@@ -250,7 +269,7 @@ def format_bridge_note(result: PMSignalResult) -> str:
 
 def stale_by(result: PMSignalResult, *, max_age_h: float | None = None) -> timedelta | None:
     """How far past the freshness limit the decision is, or None."""
-    max_age_h = DEFAULT_MAX_AGE_H if max_age_h is None else max_age_h
+    max_age_h = default_max_age_h() if max_age_h is None else max_age_h
     if result.age_hours is None or result.age_hours <= max_age_h:
         return None
     return timedelta(hours=result.age_hours - max_age_h)

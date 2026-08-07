@@ -70,6 +70,52 @@ class TestDisabledByDefault:
         assert load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.05).ok
 
 
+class TestDefaultsAreReadAtCallTime:
+    """The sleeve and the freshness window used to be module-level
+    ``os.getenv`` calls, so their values were frozen the first time
+    anything imported the module. In a long-lived process — the runner,
+    the bot — that means editing ``.env`` and restarting the *service*
+    changed nothing if the module had been imported before settings were
+    reloaded, and "I changed the sleeve and nothing happened" is a
+    failure mode this codebase has paid for more than once.
+    """
+
+    def test_the_sleeve_default_follows_settings(self, tmp_path: Path, monkeypatch) -> None:
+        from trading.agents import pm_signal
+
+        write_decision(tmp_path)
+
+        def sleeve(value: float):
+            return lambda name, env, fallback: value if "sleeve" in name else fallback
+
+        monkeypatch.setattr(pm_signal, "_setting", sleeve(0.0))
+        assert not pm_signal.load_pm_signal(tmp_path, now=NOW).ok
+
+        monkeypatch.setattr(pm_signal, "_setting", sleeve(0.11))
+        assert pm_signal.load_pm_signal(tmp_path, now=NOW).ok
+
+    def test_the_env_fallback_applies_when_settings_are_unavailable(self, monkeypatch) -> None:
+        from trading.agents import pm_signal
+
+        monkeypatch.setenv("AGENT_PM_SLEEVE_PCT", "0.07")
+        monkeypatch.setattr(
+            pm_signal,
+            "_setting",
+            lambda name, env, fallback: float(__import__("os").getenv(env, str(fallback))),
+        )
+        assert pm_signal.default_sleeve_pct() == pytest.approx(0.07)
+
+    def test_defaults_are_functions_not_frozen_constants(self) -> None:
+        """Pins the shape, not just the behaviour — reintroducing a
+        module-level constant would silently restore the old bug."""
+        from trading.agents import pm_signal
+
+        assert callable(pm_signal.default_sleeve_pct)
+        assert callable(pm_signal.default_max_age_h)
+        assert not hasattr(pm_signal, "DEFAULT_SLEEVE_PCT")
+        assert not hasattr(pm_signal, "DEFAULT_MAX_AGE_H")
+
+
 class TestFreshness:
     def test_a_decision_within_the_window_trades(self, tmp_path: Path) -> None:
         write_decision(tmp_path, ts=NOW - timedelta(hours=2))
