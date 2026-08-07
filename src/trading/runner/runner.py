@@ -1803,6 +1803,33 @@ class Runner:
         except Exception:
             logger.bind(component="command_processor").exception("command processing failed")
 
+        # /refresh drops a flag rather than fetching inline — a full
+        # universe pass takes ~2 minutes and this job holds
+        # max_instances=1, so doing it here would block /halt and
+        # /flatten behind a data refresh. Hand it to the scheduler as a
+        # one-off instead.
+        try:
+            from trading.runtime.command_processor import REFRESH_FLAG
+
+            flag = settings.state_dir / REFRESH_FLAG
+            if flag.exists():
+                flag.unlink(missing_ok=True)
+                if self._scheduler is not None:
+                    from apscheduler.triggers.date import DateTrigger
+
+                    self._scheduler.add_job(
+                        self._refresh_price_cache_async,
+                        DateTrigger(run_date=datetime.now(tz=timezone.utc)),
+                        id="price_cache_refresh_now",
+                        replace_existing=True,
+                        max_instances=1,
+                    )
+                    logger.bind(component="runner").info(
+                        "operator requested a price-cache refresh; scheduled now"
+                    )
+        except Exception:
+            logger.bind(component="runner").exception("could not schedule requested refresh")
+
     async def _check_trigger_flag(self) -> None:
         """Off-cycle trigger watcher.
 

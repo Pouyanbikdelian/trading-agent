@@ -358,10 +358,33 @@ def _h_fx_convert(cmd: Command, broker: Broker) -> dict[str, Any]:
     )
 
 
+#: Dropped by /refresh, picked up by the runner. Same pattern as
+#: ``trigger_now.flag``, for the same reason: the command processor has
+#: no handle on the runner's scheduler.
+REFRESH_FLAG = "refresh_requested.flag"
+
+
 def _h_refresh_data(_cmd: Command, _broker: Broker) -> dict[str, Any]:
-    # No-op placeholder — the runner picks up REFRESH commands separately
-    # and re-runs the data fetch via its own pipeline.
-    return {"note": "refresh queued; runner will pick it up on next cycle"}
+    """Ask the runner to top up the price cache now.
+
+    This used to be a no-op that returned "refresh queued; runner will
+    pick it up on next cycle". Nothing picked it up. The parquet cache is
+    refreshed by an independent scheduled job at 21:40 UTC, which runs
+    whether or not anyone asked — so ``/refresh`` reported success and
+    changed nothing, and an operator refreshing before a manual ``/cycle``
+    got stale data and a green tick.
+
+    Now it drops a flag the runner watches. Deliberately does NOT do the
+    fetch here: this runs inside the 5-second command-processor job with
+    ``max_instances=1``, and a full universe pass takes ~2 minutes — which
+    would block ``/halt`` and ``/flatten`` behind a data refresh.
+    """
+    from trading.core.config import settings as _s
+
+    path = Path(_s.state_dir) / REFRESH_FLAG
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(datetime.now(tz=timezone.utc).isoformat())
+    return {"note": "price-cache refresh requested; the runner starts it within ~5s"}
 
 
 def _h_reconnect_broker(_cmd: Command, broker: Broker) -> dict[str, Any]:
