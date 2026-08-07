@@ -138,9 +138,7 @@ class TestTheTwoSleevesAreIndependent:
 
 
 class TestThePMsCashDecisionSurvives:
-    def test_weights_are_not_renormalised_to_fill_the_sleeve(
-        self, cycle, monkeypatch
-    ) -> None:
+    def test_weights_are_not_renormalised_to_fill_the_sleeve(self, cycle, monkeypatch) -> None:
         """The PM holding 67% invested and 33% cash is a decision. Scaling
         its gross up to fill the sleeve would overrule it."""
         patch_strategy_sleeve(monkeypatch, 0.0)
@@ -218,9 +216,7 @@ class TestDisabledAndRefusals:
         assert out is base
         assert any("96.0h" in m for m in cycle.alerts.error_msgs)
 
-    def test_the_bridge_raising_does_not_take_the_cycle_down(
-        self, cycle, monkeypatch
-    ) -> None:
+    def test_the_bridge_raising_does_not_take_the_cycle_down(self, cycle, monkeypatch) -> None:
         import trading.agents.pm_signal as mod
 
         def boom(*a, **k):
@@ -319,14 +315,68 @@ class TestAttribution:
         )
         assert out.strategy == "top_k_momentum+agent_pm"
 
-    def test_the_sleeve_and_drops_are_recorded_on_the_signal(
-        self, cycle, monkeypatch
-    ) -> None:
-        patch_bridge(
-            monkeypatch, make_result({"equity:NVDA": 0.1}, sleeve=0.1, dropped=["XLK"])
-        )
+    def test_the_sleeve_and_drops_are_recorded_on_the_signal(self, cycle, monkeypatch) -> None:
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.1}, sleeve=0.1, dropped=["XLK"]))
         out = cycle._merge_pm_signal(
             strategy_signal(**{"equity:AAPL": 0.9}), instruments_by_key={}, ts=NOW
         )
         assert out.metadata["pm_sleeve_pct"] == "0.1000"
         assert out.metadata["pm_dropped"] == "XLK"
+
+
+class TestThePMCanExitWhatItBought:
+    """A target weight of zero is how a book says "get out". A name the PM
+    has DROPPED is absent from its weights, not zero — and an absent key
+    gets no delta, so no order, so the position stays.
+
+    The mechanical strategy masks this for S&P names: its weight vector
+    spans the universe, so anything unpicked carries an explicit 0.0. The
+    PM's ETF shelf is outside that universe, and those are exactly what it
+    uses to hedge. Left alone the PM's book ratchets — add, never remove —
+    while the stranded position keeps eating the sleeve.
+    """
+
+    def test_a_dropped_name_gets_an_explicit_zero(self, cycle, monkeypatch) -> None:
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        result = make_result({"equity:NVDA": 0.10}, sleeve=0.11)
+        result = result.__class__(**{**result.__dict__, "exiting": {"etf:GLD"}})
+        patch_bridge(monkeypatch, result)
+
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}),
+            instruments_by_key={"equity:NVDA": object(), "etf:GLD": object()},
+            ts=NOW,
+        )
+
+        assert out.target_weights["etf:GLD"] == 0.0
+
+    def test_an_unpriceable_exit_is_reported_not_silently_skipped(self, cycle, monkeypatch) -> None:
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        result = make_result({"equity:NVDA": 0.10}, sleeve=0.11)
+        result = result.__class__(**{**result.__dict__, "exiting": {"etf:GLD"}})
+        patch_bridge(monkeypatch, result)
+
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}),
+            instruments_by_key={"equity:NVDA": object()},  # no GLD
+            ts=NOW,
+        )
+
+        # No bogus zero on something the risk manager would reject anyway.
+        assert "etf:GLD" not in out.target_weights
+
+    def test_an_exit_never_overrides_a_strategy_position(self, cycle, monkeypatch) -> None:
+        """If the mechanical book still wants the name, the PM leaving is
+        not a reason to sell the strategy's shares."""
+        patch_strategy_sleeve(monkeypatch, 1.0)
+        result = make_result({"equity:NVDA": 0.10}, sleeve=0.11)
+        result = result.__class__(**{**result.__dict__, "exiting": {"equity:AAPL"}})
+        patch_bridge(monkeypatch, result)
+
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 0.5}),
+            instruments_by_key={"equity:NVDA": object(), "equity:AAPL": object()},
+            ts=NOW,
+        )
+
+        assert out.target_weights["equity:AAPL"] == 0.5

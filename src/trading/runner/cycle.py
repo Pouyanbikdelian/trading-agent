@@ -853,19 +853,23 @@ class Cycle:
                 return instruments
 
             from trading.agents.pm import UNIVERSE as PM_ETF_SHELF
-            from trading.agents.pm_signal import pm_decision_path
+            from trading.agents.pm_signal import load_previous_targets, pm_decision_path
             from trading.core.types import AssetClass, Instrument
 
             raw = json.loads(pm_decision_path(_s.state_dir).read_text())
             if not raw.get("ok"):
                 return instruments
             targets = {str(s).upper().strip() for s in (raw.get("weights") or {})}
+            # Also price what the PM held LAST cycle. A name it has
+            # dropped needs a zero target to be sold, and a zero target on
+            # an unpriced instrument is rejected ("no positive last_price")
+            # — so without this the exit is computed and then discarded.
+            targets |= {k.split(":", 1)[-1] for k in load_previous_targets(_s.state_dir)}
         except FileNotFoundError:
             return instruments
         except Exception:
             logger.bind(component="cycle").exception(
-                "could not read PM targets; its off-universe picks will be "
-                "dropped this cycle"
+                "could not read PM targets; its off-universe picks will be dropped this cycle"
             )
             return instruments
 
@@ -926,9 +930,7 @@ class Cycle:
         from trading.core.config import settings as _s
 
         try:
-            result = load_pm_signal(
-                _s.state_dir, now=ts, tradeable_keys=set(instruments_by_key)
-            )
+            result = load_pm_signal(_s.state_dir, now=ts, tradeable_keys=set(instruments_by_key))
         except Exception:
             logger.bind(component="cycle").exception(
                 "PM bridge raised; continuing on the mechanical strategy alone"
@@ -952,19 +954,47 @@ class Cycle:
             # sized down — or, at strat 0, trade a book meant to be
             # benchmark-only.
             return signal.model_copy(
-                update={
-                    "target_weights": {
-                        k: w * strat for k, w in signal.target_weights.items()
-                    }
-                }
+                update={"target_weights": {k: w * strat for k, w in signal.target_weights.items()}}
             )
 
         sleeve = result.sleeve_pct
-        merged: dict[str, float] = {
-            k: w * strat for k, w in signal.target_weights.items()
-        }
+        merged: dict[str, float] = {k: w * strat for k, w in signal.target_weights.items()}
         for k, w in result.signal.target_weights.items():
             merged[k] = merged.get(k, 0.0) + w
+
+        # Names the PM held last cycle and no longer wants. Absent is not
+        # the same as flat: an absent key gets no delta, so no order, so
+        # the position stays. Only ever ADD a zero — if the mechanical
+        # strategy still wants the name, its weight is the answer and the
+        # PM exiting is not a reason to sell the strategy's position.
+        exited: list[str] = []
+        for k in sorted(result.exiting):
+            if k in merged:
+                continue
+            if k not in instruments_by_key:
+                # Unpriceable this cycle; the zero would be rejected
+                # downstream anyway. Say so — a position nothing can reach
+                # is exactly the thing that goes unnoticed for months.
+                logger.bind(component="cycle").warning(
+                    f"PM wants out of {k} but it is not priceable this cycle — "
+                    "position left untouched"
+                )
+                continue
+            merged[k] = 0.0
+            exited.append(k)
+        if exited:
+            logger.bind(component="cycle").info(f"PM exit targets set to zero: {exited}")
+
+        # Record what the PM directs NOW, so the next cycle can exit
+        # whatever it drops. Written only on the tradeable path.
+        try:
+            from trading.agents.pm_signal import save_targets
+
+            save_targets(_s.state_dir, set(result.signal.target_weights))
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "could not record PM targets; next cycle may not be able to exit them"
+            )
 
         logger.bind(component="cycle").info(
             f"PM bridge: pm sleeve {sleeve:.1%}, strategy sleeve {strat:.1%}, "
@@ -976,9 +1006,7 @@ class Cycle:
         return signal.model_copy(
             update={
                 "target_weights": merged,
-                "strategy": (
-                    "agent_pm" if strat <= 0 else f"{signal.strategy}+agent_pm"
-                ),
+                "strategy": ("agent_pm" if strat <= 0 else f"{signal.strategy}+agent_pm"),
                 "metadata": {
                     **(signal.metadata or {}),
                     "pm_sleeve_pct": f"{sleeve:.4f}",

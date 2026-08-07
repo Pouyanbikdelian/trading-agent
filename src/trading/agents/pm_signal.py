@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,6 +57,7 @@ from trading.core.types import AssetClass, Instrument, Signal
 
 #: Producer name, for attribution in the journal and the order ledger.
 STRATEGY_NAME = "agent_pm"
+
 
 def _setting(name: str, env: str, fallback: float) -> float:
     """Read a tunable from Settings, falling back to the environment.
@@ -105,6 +107,11 @@ class PMSignalResult:
     #: to scale the strategy side down by the same amount, so the two
     #: books sum to one account rather than to 1 + sleeve.
     sleeve_pct: float = 0.0
+    #: Instrument keys the PM held last cycle and does NOT want now. The
+    #: caller must give these an explicit 0.0 target, or the PM can buy
+    #: but never sell. Empty whenever no signal was produced — a refused
+    #: cycle means "we don't know what it wants", not "sell everything".
+    exiting: set[str] = field(default_factory=set)
 
     @property
     def ok(self) -> bool:
@@ -113,6 +120,63 @@ class PMSignalResult:
 
 def pm_decision_path(state_dir: Path | str) -> Path:
     return Path(state_dir) / "agent_pm" / "last_run.json"
+
+
+def previous_targets_path(state_dir: Path | str) -> Path:
+    return Path(state_dir) / "agent_pm" / "last_targets.json"
+
+
+def load_previous_targets(state_dir: Path | str) -> set[str]:
+    """Instrument keys the PM directed on its last TRADEABLE cycle.
+
+    Without this the PM cannot sell. A target weight of zero is how a
+    book says "get out", but a name the PM has dropped is ABSENT from its
+    weights, not zero — and an absent key gets no delta, so no order, so
+    the position stays.
+
+    The mechanical strategy hides this for S&P names: its weight vector
+    spans the whole universe, so anything it did not pick carries an
+    explicit 0.0. The PM's ETF shelf sits outside that universe, and
+    those are precisely the instruments it uses to express a hedge. Its
+    first live decision was GLD 0.15 + XLV 0.12. Left alone, the PM's
+    book would ratchet — add, never remove — while the stranded position
+    kept counting toward equity and gross and quietly ate the sleeve.
+    """
+    path = previous_targets_path(state_dir)
+    if not path.exists():
+        return set()
+    try:
+        payload = json.loads(path.read_text())
+        return {str(k) for k in payload.get("keys", [])}
+    except Exception:
+        logger.bind(component="pm_signal").warning(
+            f"{path} unreadable — the PM will not be able to exit last cycle's names"
+        )
+        return set()
+
+
+def save_targets(state_dir: Path | str, keys: set[str]) -> Path:
+    """Record what the PM directed, so the next cycle can zero the rest.
+
+    Only ever called for a signal that actually reached the market. A
+    refused cycle must NOT overwrite this: if staleness wiped the record,
+    the next good cycle would have nothing left to exit and the stranded
+    positions would become permanent.
+    """
+    path = previous_targets_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(
+            {
+                "keys": sorted(keys),
+                "saved_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+            f,
+            indent=2,
+        )
+    os.replace(tmp, path)
+    return path
 
 
 def _instrument_for(symbol: str) -> Instrument:
@@ -219,6 +283,15 @@ def load_pm_signal(
             dropped=sorted(dropped),
         )
 
+    # Everything the PM directed last cycle and no longer wants. These
+    # need an explicit zero downstream; absent is not the same as flat.
+    # Computed only on the tradeable path — see PMSignalResult.exiting.
+    exiting = load_previous_targets(state_dir) - set(keyed)
+    if exiting:
+        logger.bind(component="pm_signal").info(
+            f"PM exiting {len(exiting)} name(s) held last cycle: {sorted(exiting)}"
+        )
+
     gross = sum(keyed.values())
     signal = Signal(
         ts=decided_at,
@@ -237,8 +310,7 @@ def load_pm_signal(
         },
     )
     logger.bind(component="pm_signal").info(
-        f"PM signal: {len(keyed)} name(s), gross {gross:.2%} of account, "
-        f"decision {age_h:.1f}h old"
+        f"PM signal: {len(keyed)} name(s), gross {gross:.2%} of account, decision {age_h:.1f}h old"
     )
     return PMSignalResult(
         signal,
@@ -248,6 +320,7 @@ def load_pm_signal(
         dropped=sorted(dropped),
         gross=gross,
         sleeve_pct=sleeve_pct,
+        exiting=exiting,
     )
 
 
