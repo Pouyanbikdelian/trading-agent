@@ -123,11 +123,11 @@ the scope narrowed to PM-only.
 
 ---
 
-## 2026-08-07 (evening) — Three defects found by auditing the live order path
+## 2026-08-07 (evening) — Five defects found by auditing the live order path
 
 **TL;DR:** No incident. After standing down from the morning's live
 session, an audit of the code between a decision and an order found
-three defects, all on paths that execute. Two were visible in the
+five defects, all on paths that execute. Two were visible in the
 `halt.json` the account was sitting on at the time.
 
 ### 1. `/halt` promised a liquidation it never performed
@@ -185,12 +185,54 @@ nothing about an order submitted an hour ago that is still working.
 Fixed in `risk/presubmit.py`, enforced at the last point before the
 broker against IBKR's own `openTrades`.
 
+### 4. The PM could buy but never sell
+
+A target weight of zero is how every book here says "get out". A name the
+PM has **dropped** is absent from its weights, not zero — and an absent
+key gets no delta in `signal_to_orders`, so no order, so the position
+stays.
+
+The mechanical strategy masks this for S&P names: its weight vector
+spans the whole universe, so anything unpicked carries an explicit 0.0.
+The PM's ETF shelf is outside that universe, and those are exactly what
+it uses to express a hedge. Its first live decision was GLD 0.15 + XLV
+0.12. `_add_pm_targets` compounded it by pricing only the PM's *current*
+picks, so a dropped name was not even in `instruments_by_key` and a zero
+target would have been rejected as unpriceable.
+
+Net effect: the PM's book ratchets — adds, never removes — while the
+stranded position keeps counting toward equity and gross and quietly
+eats the sleeve. It would not have surfaced as an error anywhere; a
+position no code path reaches is not a failure, it is an absence.
+
+The PM now records the keys it directed on each tradeable cycle, prices
+that set alongside the current one, and zeroes what it has dropped.
+
+### 5. `/cancel` reported success for orders it had not cancelled
+
+`cancel_order` matched on `orderRef` alone. `get_open_orders` — the
+source for `/orders`, which is what the operator reads — falls back to
+`broker-{orderId}` for anything without an orderRef, i.e. every order
+placed in TWS by hand or by an older build. So the id on screen was one
+`cancel` could not match. The miss was a silent no-op, while
+`_h_cancel_order` returned `{"cancelled": True}` regardless.
+
+Closes a loop with defect 3's fix, which tells the operator to "cancel
+the working order first" — advice that would have failed silently. The
+`Simulator` had raised on an unknown id all along; the two broker
+implementations had quietly disagreed about the contract.
+
 ### Lessons
 
 1. **A test that asserts a flag was written proves nothing about whether
    it is read.** `flatten_on_next_cycle` had coverage and no consumer.
    For anything safety-critical, the test that matters names the
    behaviour — "the book is flat afterwards" — not the byte on disk.
+
+1b. **Absent is not zero.** Twice in one audit — the PM's dropped names,
+   and the halt file's missing baselines. Any map keyed by "what we want"
+   needs an explicit answer for the things we *stopped* wanting, or the
+   omission reads as "no opinion" and nothing happens.
 
 2. **A partial write to a shared state file is a silent reset of every
    field it omits.** Pydantic defaults turned three missing keys into
