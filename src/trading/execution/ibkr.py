@@ -635,15 +635,44 @@ class IbkrBroker(Broker):
         return out
 
     def cancel_order(self, client_order_id: str) -> None:
+        """Cancel a working order. Raises if nothing was cancelled.
+
+        Two bugs used to live here, and they compounded.
+
+        Matching was on ``orderRef`` alone. ``get_open_orders`` — what
+        ``/orders`` shows the operator — falls back to ``broker-{orderId}``
+        for any order without an orderRef, i.e. anything placed in TWS by
+        hand or by an older build. So the operator was shown an id that
+        ``cancel_order`` could not possibly match.
+
+        And a miss was a silent no-op, logged at warning level, while
+        ``_h_cancel_order`` returned ``{"cancelled": True}`` regardless.
+        The operator got a green tick for an order that was still working.
+
+        That closes a loop with the sell clamp added 2026-08-07, which
+        tells the operator to "cancel the working order first" — advice
+        that would have failed silently and left them stuck.
+        """
         self._ensure_connected()
         open_trades = self._bounded("openTrades", self._ib.openTrades)
+        seen: list[str] = []
         for trade in open_trades:
-            if getattr(trade.order, "orderRef", None) == client_order_id:
+            order = trade.order
+            ref = str(getattr(order, "orderRef", "") or "")
+            oid = str(getattr(order, "orderId", "") or "")
+            perm = str(getattr(order, "permId", "") or "")
+            # Every id this order could plausibly be addressed by — the
+            # synthesized form is the one /orders actually displays.
+            aliases = {ref, oid, perm, f"broker-{oid}"} - {""}
+            seen.extend(sorted(aliases))
+            if client_order_id in aliases:
                 self._bounded("cancelOrder", lambda t=trade: self._ib.cancelOrder(t.order))
+                logger.bind(broker=self.name).info(f"cancelled {client_order_id!r}")
                 return
-        # Already terminal or never seen — non-fatal.
-        logger.bind(broker=self.name).warning(
-            f"no open trade matches client_order_id={client_order_id!r}; treating cancel as a no-op"
+        raise BrokerError(
+            f"nothing cancelled — no working order matches {client_order_id!r}. "
+            f"It has probably already filled or been cancelled. "
+            f"Currently working: {sorted(set(seen)) or 'none'}"
         )
 
     # ------------------------------------------------------------- state

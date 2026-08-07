@@ -215,8 +215,20 @@ def test_cancel_finds_order_by_orderref(
     assert len(fake_ib.cancelled) == 1
 
 
-def test_cancel_unknown_is_no_op(broker: IbkrBroker, fake_ib: _FakeIb) -> None:
-    broker.cancel_order("never-placed")  # warns, doesn't raise
+def test_cancel_unknown_raises_rather_than_reporting_success(
+    broker: IbkrBroker, fake_ib: _FakeIb
+) -> None:
+    """This used to be ``test_cancel_unknown_is_no_op`` — it warned and
+    returned, while ``_h_cancel_order`` replied ``cancelled: True``
+    regardless. The operator got a green tick for an order still working
+    at the broker. Since ``get_open_orders`` shows ``broker-{orderId}``
+    for anything without an orderRef, and cancel matched orderRef alone,
+    the ids on screen were often ones cancel could never match.
+    """
+    from trading.execution.base import BrokerError
+
+    with pytest.raises(BrokerError, match="nothing cancelled"):
+        broker.cancel_order("never-placed")
     assert fake_ib.cancelled == []
 
 
