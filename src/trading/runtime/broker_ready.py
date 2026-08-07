@@ -77,6 +77,113 @@ def format_not_ready_alert(result: dict[str, Any], *, minutes_to_cycle: int) -> 
     )
 
 
+#: The currency US equities settle in. The account's BASE currency is CHF;
+#: these are not the same thing, and the gap is the whole problem below.
+QUOTE_CCY = "USD"
+
+#: Headroom on the funding estimate. Prices move between this check and
+#: the cycle, and a basket sized at exactly the cash available leaves no
+#: room for the last order. Cheap insurance against a near-miss.
+FUNDING_BUFFER = 1.05
+
+
+def check_trade_currency_funding(
+    broker: Any,
+    *,
+    gross_exposure_pct: float,
+    quote_ccy: str = QUOTE_CCY,
+) -> dict[str, Any]:
+    """Is there enough USD to fund the basket the cycle is about to size?
+
+    The account is CHF-based; US equities settle in USD. Buying them from
+    a CHF balance creates a USD debit — i.e. borrowing. With
+    ``max_margin_borrowing_pct = 0.0`` (the default, and the right setting
+    for a cash account) the risk manager REJECTS any order that pushes a
+    currency's cash below zero.
+
+    The failure mode that makes this worth a scheduled check: the cycle
+    runs, proposes a full basket, the risk manager refuses all of it, and
+    the result is a completed cycle that bought nothing. In a position
+    report that is indistinguishable from a strategy that saw no
+    opportunities. Paper never showed it, because paper has accumulated
+    USD over months of trading.
+
+    Checked an hour ahead so there is still time to convert. Never raises.
+    """
+    out: dict[str, Any] = {"ok": True, "reason": "ok", "quote_ccy": quote_ccy}
+    try:
+        snap = broker.get_account()
+        equity = float(getattr(snap, "equity", 0.0) or 0.0)
+    except Exception as e:
+        return {**out, "ok": True, "reason": f"skipped: account unavailable ({type(e).__name__})"}
+
+    if equity <= 0:
+        return {**out, "reason": "skipped: no equity"}
+
+    balances: dict[str, float] = {}
+    try:
+        balances = {k: float(v) for k, v in (broker.get_balances() or {}).items()}
+    except Exception as e:
+        # Degrade to "cannot tell" rather than to a false alarm. A weekly
+        # cry-wolf alert is worse than no alert.
+        return {**out, "reason": f"skipped: balances unavailable ({type(e).__name__})"}
+
+    if quote_ccy not in balances:
+        return {**out, "reason": f"skipped: broker reports no {quote_ccy} balance line"}
+
+    rates: dict[str, float] = {}
+    try:
+        rates = {k: float(v) for k, v in (broker.get_fx_rates() or {}).items()}
+    except Exception:
+        rates = {}
+    # Rates are quoted as "one unit of X in base currency". Absent a rate
+    # we assume parity, which OVERSTATES nothing and understates the USD
+    # need only if USD is worth less than base — acceptable for a warning.
+    rate = rates.get(quote_ccy) or 1.0
+
+    need_base = equity * max(0.0, gross_exposure_pct) * FUNDING_BUFFER
+    need_quote = need_base / rate if rate else need_base
+    have_quote = balances.get(quote_ccy, 0.0)
+
+    out.update(
+        {
+            "equity": equity,
+            "required": need_quote,
+            "available": have_quote,
+            "shortfall": max(0.0, need_quote - have_quote),
+            "rate": rate,
+            "balances": balances,
+        }
+    )
+    if have_quote + 1e-9 < need_quote:
+        out["ok"] = False
+        out["reason"] = (
+            f"{quote_ccy} cash {have_quote:,.0f} < {need_quote:,.0f} needed "
+            f"for {gross_exposure_pct:.1%} gross"
+        )
+        logger.bind(component="broker_ready").warning(f"funding shortfall: {out['reason']}")
+    return out
+
+
+def format_funding_alert(result: dict[str, Any], *, minutes_to_cycle: int) -> str:
+    """Names the number to convert, because 'insufficient USD' without an
+    amount still leaves the operator doing arithmetic under time pressure."""
+    ccy = result.get("quote_ccy", QUOTE_CCY)
+    short = result.get("shortfall", 0.0)
+    have = result.get("available", 0.0)
+    need = result.get("required", 0.0)
+    return (
+        f"🟠 *Not enough {ccy} to fund the basket — cycle in {minutes_to_cycle} min*\n"
+        f"have `{have:,.0f}` · need `{need:,.0f}` · short `{short:,.0f}` {ccy}\n\n"
+        f"The account is CHF-based and US equities settle in {ccy}. With margin "
+        "borrowing set to 0, the risk manager will REJECT the whole basket "
+        "rather than borrow — the cycle will complete having bought nothing, "
+        "which looks exactly like a strategy that saw nothing worth buying.\n\n"
+        f"*Do now:* convert about `{short * 1.02:,.0f}` CHF to {ccy} in Client "
+        "Portal (or raise MAX_MARGIN_BORROWING_PCT if you intend to borrow)."
+    )
+
+
 def format_ready_note(result: dict[str, Any], *, minutes_to_cycle: int) -> str:
     """Quiet confirmation. Sent only when it had previously failed —
     a green message every week is a message nobody reads."""

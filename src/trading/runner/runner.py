@@ -1416,6 +1416,37 @@ class Runner:
                     format_not_ready_alert(result, minutes_to_cycle=self.PRECYCLE_LEAD_MINUTES)
                 )
                 return
+
+            # Funding check. A reachable broker is necessary but not
+            # sufficient: a CHF-based account with no USD cash will have
+            # every US equity order rejected by the margin limit, and the
+            # cycle then completes having bought nothing — which reads, in
+            # a position report, exactly like a strategy that found no
+            # opportunities. Checked here because an hour is enough time
+            # to convert; at cycle time it would only be an explanation.
+            try:
+                from trading.runtime.broker_ready import (
+                    check_trade_currency_funding,
+                    format_funding_alert,
+                )
+
+                funding = await asyncio.to_thread(
+                    check_trade_currency_funding,
+                    self.cycle.broker,
+                    gross_exposure_pct=settings.max_gross_exposure,
+                )
+                if not funding["ok"]:
+                    self.alerts.critical(
+                        format_funding_alert(
+                            funding, minutes_to_cycle=self.PRECYCLE_LEAD_MINUTES
+                        )
+                    )
+                elif funding.get("reason", "ok") != "ok":
+                    logger.bind(component="broker_ready").info(
+                        f"funding check {funding['reason']}"
+                    )
+            except Exception:
+                logger.bind(component="broker_ready").exception("funding check failed")
             if flag.exists():
                 flag.unlink(missing_ok=True)
                 self.alerts.info(
