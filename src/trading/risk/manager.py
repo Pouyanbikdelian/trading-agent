@@ -66,6 +66,9 @@ class RiskManager:
         self.limits = limits
         self._halt_path = Path(halt_state_path) if halt_state_path else None
         self._state = self._load_state()
+        #: Set when start_of_day repairs an implausible baseline; drained
+        #: by take_baseline_note() so the runner alerts once.
+        self._last_baseline_note: str | None = None
 
     # ------------------------------------------------------ persistence
 
@@ -167,12 +170,72 @@ class RiskManager:
             halted_at=disk.halted_at,
         )
 
-    def start_of_day(self, account: AccountSnapshot) -> None:
-        """Stamp today's opening equity. Idempotent within a day — only the
-        first call on a new date mutates state."""
+    def baseline_divergence(self, equity: float) -> float | None:
+        """|equity − stored daily open| as a fraction of the stored open.
+
+        None when there is nothing to compare against. Pure — exposed so
+        the runner and its tests can ask the same question the kill
+        switch asks, without reaching into private state.
+        """
+        base = self._state.daily_equity_open
+        if base <= 0 or equity <= 0:
+            return None
+        return abs(equity - base) / base
+
+    def start_of_day(self, account: AccountSnapshot) -> str | None:
+        """Stamp today's opening equity.
+
+        Idempotent within a day — with one exception. Idempotency is what
+        turned a one-hour configuration slip into a halt on 2026-08-07: a
+        paper cycle stamped the day, so when the live session opened an
+        hour later ``last_day`` already equalled today and the baseline
+        was never re-taken. The kill switch then measured a live account
+        against a paper one.
+
+        So the date is no longer the only thing that decides. If the
+        stored baseline is implausibly far from actual equity, it is
+        re-stamped whatever the date says, and BOTH figures go: the
+        high-water mark matters as much as the daily open, because at
+        ``max_drawdown_pct=0.02`` an 87k account against a 1.07M
+        high-water mark re-halts the instant the daily figure is cleared.
+
+        Returns a human-readable note when it re-stamped an implausible
+        baseline, else None. Callers should surface it — a baseline
+        silently repaired is a baseline nobody investigates.
+        """
         today = account.ts.date()
-        if self._state.last_day == today:
-            return
+        divergence = self.baseline_divergence(account.equity)
+        implausible = (
+            divergence is not None and divergence > self.limits.baseline_sanity_divergence_pct
+        )
+
+        if self._state.last_day == today and not implausible:
+            return None
+
+        if implausible:
+            stale_open = self._state.daily_equity_open
+            stale_hwm = self._state.equity_high_watermark
+            note = (
+                f"baseline re-stamped: stored daily open {stale_open:,.0f} is "
+                f"{divergence:.0%} from actual equity {account.equity:,.0f} — "
+                f"beyond the {self.limits.baseline_sanity_divergence_pct:.0%} "
+                "sanity limit, so it describes a different account, currency or "
+                f"funding level rather than a loss. High-water mark {stale_hwm:,.0f} "
+                "reset with it."
+            )
+            # Reset, do not max(): a high-water mark carried over from a
+            # baseline we have just declared bogus is equally bogus, and
+            # keeping it would halt on drawdown one bar later.
+            self._state = self._state.replace(
+                last_day=today,
+                daily_equity_open=account.equity,
+                equity_high_watermark=account.equity,
+            )
+            self._save_state()
+            logger.bind(component="risk").warning(note)
+            self._last_baseline_note = note
+            return note
+
         new_hwm = max(self._state.equity_high_watermark, account.equity)
         self._state = self._state.replace(
             last_day=today,
@@ -180,6 +243,14 @@ class RiskManager:
             equity_high_watermark=new_hwm,
         )
         self._save_state()
+        return None
+
+    def take_baseline_note(self) -> str | None:
+        """Pop the last baseline-repair note, if any. Read-once so the
+        runner alerts on the repair rather than on every cycle after it."""
+        note = getattr(self, "_last_baseline_note", None)
+        self._last_baseline_note = None
+        return note
 
     # ------------------------------------------------------ intraday
 
@@ -195,8 +266,9 @@ class RiskManager:
         if self._state.halted:
             return RiskDecision(action="halt", reason=f"already halted: {self._state.reason}")
 
-        # Roll the daily baseline. start_of_day() is idempotent within a
-        # day (no-ops when last_day == today), so call it unconditionally.
+        # Roll the daily baseline. start_of_day() no-ops when last_day is
+        # already today AND the stored baseline is plausible, so call it
+        # unconditionally.
         # The previous "lazy" guard (only when state was empty) meant the
         # baseline stamped on the FIRST ever cycle was never rolled
         # forward — the daily-loss kill switch spent 7 weeks comparing

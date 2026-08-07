@@ -61,6 +61,22 @@ class RiskLimits(BaseModel):
     accounts buying USD stocks need either a pre-trade FX or this limit
     > 0 — otherwise IBKR's auto-loan kicks in and we're on margin."""
 
+    baseline_sanity_divergence_pct: float = Field(default=0.5, gt=0.0, le=10.0)
+    """How far today's equity may sit from the stored daily-open baseline
+    before the baseline itself is judged to be the broken thing.
+
+    The kill switches only mean anything if the number they compare
+    against describes the same account. On 2026-08-07 it did not: a paper
+    cycle had stamped CHF 1,068,862 into a live state directory, and the
+    live session — 87,413 of equity — halted instantly at "daily loss
+    -91.82%". A real intraday move of this size does not happen; a
+    baseline from the wrong account, a currency mix-up, or a large
+    deposit or withdrawal all do. Every one of those calls for
+    re-stamping the baseline and telling the operator, not for halting.
+
+    Set generously (50%) so it can only ever catch the absurd. Below it
+    the kill switches behave exactly as before."""
+
     @classmethod
     def from_settings(cls, settings: Settings) -> RiskLimits:
         """Default factory honoring values from ``.env``."""
@@ -70,6 +86,7 @@ class RiskLimits(BaseModel):
             max_daily_loss_pct=settings.max_daily_loss_pct,
             max_drawdown_pct=settings.max_drawdown_pct,
             max_margin_borrowing_pct=settings.max_margin_borrowing_pct,
+            baseline_sanity_divergence_pct=settings.baseline_sanity_divergence_pct,
         )
 
 

@@ -361,6 +361,18 @@ class Cycle:
 
         # 4. Intraday kill switches (daily-loss, drawdown).
         intraday = self.risk_manager.evaluate_intraday(account)
+        # A repaired baseline is not an error, but it IS the loudest thing
+        # that happened this cycle: it means the figure the kill switches
+        # were about to measure against belonged to another account. The
+        # alternative — repairing it silently — is how the 2026-08-07
+        # baseline poisoning would have gone unnoticed on a day when it
+        # did not happen to trip a limit.
+        try:
+            note = self.risk_manager.take_baseline_note()
+            if note:
+                self.alerts.critical(f"⚠️ Risk baseline repaired — {note}")
+        except Exception:
+            logger.bind(component="cycle").exception("baseline note alert failed")
         if intraday.action == "halt":
             self.alerts.critical(f"HALT: {intraday.reason}")
             return CycleReport(

@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     # Set to 0.0 explicitly for live trading from a CHF base account
     # buying USD-denominated stocks without an FX pre-trade.
     max_margin_borrowing_pct: float = Field(default=0.0, alias="MAX_MARGIN_BORROWING_PCT")
+    # A stored daily-open baseline this far from actual equity is not a
+    # loss — it is a baseline from another account, another currency, or
+    # from before a deposit. The kill switch re-stamps and alerts instead
+    # of halting. 0.5 = 50%, i.e. only the absurd. See risk/limits.py.
+    baseline_sanity_divergence_pct: float = Field(
+        default=0.5, alias="BASELINE_SANITY_DIVERGENCE_PCT", gt=0.0, le=10.0
+    )
     # When true, every cycle pauses for operator approval via Telegram
     # before submitting orders. Default off in research/paper; flip on
     # alongside live trading.
