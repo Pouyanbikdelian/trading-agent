@@ -75,8 +75,145 @@ def status() -> None:
     t.add_row("max_daily_loss_pct", f"{settings.max_daily_loss_pct:.2%}")
     t.add_row("max_drawdown_pct", f"{settings.max_drawdown_pct:.2%}")
 
+    # Which environment owns the state directory. Surfaced here because
+    # the one time it disagreed with trading_env it cost a live session
+    # (2026-08-07) and there was nowhere to look it up.
+    from trading.core.state_env import read_stamp
+
+    stamped = read_stamp(settings.state_dir)
+    if stamped is None:
+        t.add_row("state_dir env", "[dim]unstamped (adopted on next start)[/dim]")
+    elif stamped == settings.trading_env:
+        t.add_row("state_dir env", stamped)
+    else:
+        t.add_row(
+            "state_dir env",
+            f"[red bold]{stamped} — MISMATCH, runners will refuse to start[/red bold]",
+        )
+
     console.print(t)
     logger.debug("status command completed")
+
+
+state_app = typer.Typer(help="State-directory ownership and inspection.")
+app.add_typer(state_app, name="state")
+
+
+@state_app.command("stamp")
+def _state_stamp(
+    env: str = typer.Option(..., "--env", help="research | paper | live"),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-stamp even when the directory already belongs to another env.",
+    ),
+) -> None:
+    """Declare which environment owns ``STATE_DIR``.
+
+    Only needed to migrate a directory between environments, and only
+    safe once the stale baseline is gone: halt.json, runner.db* and
+    orders.db* all carry figures from the previous account.
+    """
+    from trading.core.state_env import read_stamp, write_stamp
+
+    if env not in ("research", "paper", "live"):
+        raise typer.BadParameter("env must be one of: research, paper, live")
+
+    state_dir = settings.state_dir
+    current = read_stamp(state_dir)
+    if current and current != env and not force:
+        console.print(
+            f"[red]{state_dir} is stamped {current!r}.[/red] Re-stamping it {env!r} makes "
+            "this process treat another account's equity, high-water mark and order "
+            "ledger as its own.\n"
+            "Remove halt.json, runner.db* and orders.db* first, then re-run with --force."
+        )
+        raise typer.Exit(code=1)
+
+    write_stamp(state_dir, env)
+    console.print(f"[green]stamped[/green] {state_dir} as {env!r}")
+
+
+preflight_app = typer.Typer(help="Pre-arm checks — run these BEFORE flipping the live gates.")
+app.add_typer(preflight_app, name="preflight")
+
+
+def _preflight_broker() -> object:
+    """The broker the live runner would use. Connects; caller must be
+    ready for it to fail when the gateway is down."""
+    from trading.execution.ibkr import IbkrBroker
+
+    broker = IbkrBroker()
+    broker.connect()
+    return broker
+
+
+@preflight_app.command("check")
+def _preflight_check() -> None:
+    """List every position nothing is protecting.
+
+    The rebalance sells anything with a zero target weight; the position
+    guards trail a stop on every position in the account whoever opened
+    it. ``/hold`` is the only thing that blocks both.
+    """
+    from trading.runtime.broker_ready import check_unheld_positions
+
+    result = check_unheld_positions(_preflight_broker(), state_dir=settings.state_dir)
+    if result.get("held"):
+        console.print(f"[green]held[/green]: {', '.join(result['held'])}")
+    if result.get("acked"):
+        console.print(f"[dim]acknowledged[/dim]: {', '.join(result['acked'])}")
+    if result["ok"]:
+        console.print(f"[green]ok[/green] — {result['reason']}")
+        return
+    console.print(f"[red bold]UNPROTECTED[/red bold]: {', '.join(result['unheld'])}")
+    console.print(
+        "\nThese will be sold by the rebalance (zero target weight) or exited by "
+        "the position guards (ATR trailing stop, applies account-wide).\n"
+        "`GUARDS_ENABLED=false` closes only the second path.\n\n"
+        "Fix with `/hold SYMBOL` for each, or accept with `trading preflight ack`."
+    )
+    raise typer.Exit(code=1)
+
+
+@preflight_app.command("ack")
+def _preflight_ack(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Accept that the system may trade the account's current positions.
+
+    Records the exact symbol set, so a position opened afterwards raises
+    the question again rather than inheriting the acknowledgement.
+    """
+    from trading.runtime.broker_ready import check_unheld_positions, save_unheld_ack
+
+    result = check_unheld_positions(_preflight_broker(), state_dir=settings.state_dir)
+    unheld = set(result.get("unheld", []))
+    if not unheld:
+        console.print("[green]nothing to acknowledge[/green]")
+        return
+    console.print(f"[yellow]Acknowledging[/yellow]: {', '.join(sorted(unheld))}")
+    console.print("The rebalance and the position guards may sell these.")
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+    path = save_unheld_ack(settings.state_dir, unheld | set(result.get("acked", [])))
+    console.print(f"[green]written[/green] {path}")
+
+
+@state_app.command("check")
+def _state_check() -> None:
+    """Would a runner start against this STATE_DIR right now?"""
+    from trading.core.state_env import explain_mismatch, verify_state_dir
+
+    check = verify_state_dir(settings.state_dir, settings.trading_env, adopt=False)
+    if check.ok:
+        console.print(
+            f"[green]ok[/green] — {settings.state_dir} "
+            f"({check.stamped_env or 'unstamped'} vs env {check.running_env})"
+        )
+        return
+    console.print(f"[red]{explain_mismatch(check, settings.state_dir)}[/red]")
+    raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------------

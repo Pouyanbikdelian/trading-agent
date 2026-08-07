@@ -234,6 +234,15 @@ class Runner:
         settings.ensure_dirs()
         state_dir = settings.state_dir
 
+        # Before anything reads a baseline off disk: does this directory
+        # belong to the environment we are running as? A paper cycle that
+        # wrote into state/live is what halted the first live session at
+        # -91.82% (2026-08-07). Raises StateEnvMismatchError — deliberately
+        # fatal, deliberately not self-healing.
+        from trading.core.state_env import assert_state_dir_env
+
+        assert_state_dir_env(state_dir, settings.trading_env)
+
         cache = ParquetCache(settings.data_dir)
         order_store = OrderStore(config.order_db_path or (state_dir / "orders.db"))
         runner_store = RunnerStore(config.state_db_path or (state_dir / "runner.db"))
@@ -289,8 +298,42 @@ class Runner:
 
     # -------------------------------------------------- scheduler
 
+    def preflight_unheld(self) -> None:
+        """Refuse to arm live while positions sit unprotected.
+
+        Only on the live path, and only once at startup — a paper runner
+        trading a simulated book has nothing personal to protect, and a
+        mid-session check would block a restart during market hours.
+
+        Raises ``RuntimeError``. That is deliberately blunt: on
+        2026-08-07 the guards sold a personal VST position seven minutes
+        into the first live session, and the runbook step that would have
+        prevented it ("resolve WMT/VST with /hold") had been dropped when
+        the scope narrowed. A checklist item that can be dropped is not a
+        gate.
+        """
+        from trading.runtime.broker_ready import check_unheld_positions, format_unheld_alert
+
+        result = check_unheld_positions(self.cycle.broker, state_dir=settings.state_dir)
+        if result["ok"]:
+            return
+        message = format_unheld_alert(result)
+        try:
+            self.alerts.critical(message)
+        except Exception:
+            logger.bind(component="preflight").exception("unheld alert failed to send")
+        raise RuntimeError(
+            "refusing to start live with unprotected positions: "
+            + ", ".join(result["unheld"])
+            + " — /hold them, or `trading preflight ack` to accept that the "
+            "system may trade them"
+        )
+
     async def run_forever(self) -> None:
         """Start APScheduler and block until SIGINT / SIGTERM."""
+        if settings.is_live_armed():
+            self.preflight_unheld()
+
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
 
