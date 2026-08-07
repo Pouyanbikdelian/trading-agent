@@ -258,6 +258,26 @@ services:
       # Same for config/ so /signal can resolve UNIVERSE -> symbols.
       - ./config:/app/config:ro
     command: ["bot", "run"]
+    # The image's baked-in healthcheck reads /app/state/heartbeat.json,
+    # which the bot does not write — only the runner does. So this has
+    # always been a PROXY for "is the runner cycling", not "is the bot
+    # answering Telegram", and it broke outright once STATE_DIR moved to
+    # /app/state/live: the bot sat permanently unhealthy while working
+    # perfectly. Following STATE_DIR restores the previous behaviour.
+    #
+    # Still the wrong question. A wedged bot with a healthy runner reports
+    # green, and the bot is the operator's /halt path — the one component
+    # whose failure must not be silent. A real check needs the bot to
+    # write its own liveness file on each Telegram poll. Tracked; not
+    # worth changing the bot's internals on live day.
+    healthcheck:
+      test:
+        ["CMD", "python", "/app/docker/healthcheck.py",
+         "${STATE_DIR:-/app/state}/heartbeat.json", "300"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
     networks:
       - trading
 
@@ -280,6 +300,28 @@ services:
     ports:
       - "8787:8787"
     command: ["dashboard", "run"]
+    # Unlike the bot, the dashboard HAS its own observable liveness: it
+    # either serves on 8787 or it does not. So probe the socket rather
+    # than inheriting the runner's heartbeat, which said nothing about
+    # whether this process was actually up and went permanently red the
+    # moment STATE_DIR moved.
+    #
+    # socket.connect_ex over bash+/dev/tcp because the runtime image is
+    # python-slim and python is the one interpreter guaranteed present.
+    healthcheck:
+      # Block sequence, not a flow sequence: YAML does not concatenate
+      # adjacent quoted scalars the way Python does, so splitting the
+      # -c payload across lines inside [...] is a parse error that takes
+      # the whole compose file down.
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import socket,sys; s=socket.socket(); s.settimeout(3); sys.exit(0 if s.connect_ex(('127.0.0.1',8787))==0 else 1)"
+      interval: 60s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     networks:
       - trading
 

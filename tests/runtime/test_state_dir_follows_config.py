@@ -30,6 +30,11 @@ COMPOSE = Path(__file__).resolve().parents[2] / "docker-compose.yml"
 #: Services that run the trading image and therefore write a heartbeat.
 RUNNER_SERVICES = ("trader", "trader-live")
 
+#: Every service built on the trading image. All four inherit the
+#: Dockerfile healthcheck unless they override it, and that baked-in
+#: check hardcodes /app/state.
+IMAGE_SERVICES = ("trader", "trader-live", "bot", "dashboard")
+
 
 @pytest.fixture(scope="module")
 def compose_text() -> str:
@@ -69,6 +74,40 @@ class TestHeartbeatHealthcheck:
         '/heartbeat.json' would be worse than the bug it replaces."""
         test = " ".join(compose_doc["services"][service]["healthcheck"]["test"])
         assert "${STATE_DIR:-/app/state}" in test
+
+
+class TestNoServiceInheritsTheHardcodedCheck:
+    """The first pass at this fixed `trader` and `trader-live` and left
+    `bot` and `dashboard` inheriting the image default. Both went
+    permanently unhealthy the moment STATE_DIR moved — working fine, shown
+    red. Two constant red lights during live supervision is exactly the
+    alarm fatigue the fix existed to prevent."""
+
+    @pytest.mark.parametrize("service", IMAGE_SERVICES)
+    def test_every_image_service_defines_its_own_healthcheck(
+        self, compose_doc: dict, service: str
+    ) -> None:
+        assert "healthcheck" in compose_doc["services"][service], (
+            f"{service} inherits the Dockerfile healthcheck (hardcoded "
+            "/app/state/heartbeat.json) and breaks when STATE_DIR moves"
+        )
+
+    @pytest.mark.parametrize("service", IMAGE_SERVICES)
+    def test_no_healthcheck_hardcodes_the_paper_state_dir(
+        self, compose_doc: dict, service: str
+    ) -> None:
+        test = " ".join(compose_doc["services"][service]["healthcheck"]["test"])
+        bare = test.replace("${STATE_DIR:-/app/state}", "")
+        assert "/app/state" not in bare, f"{service} pins a state path: {test}"
+
+    def test_the_dashboard_probes_itself_rather_than_the_runner(
+        self, compose_doc: dict
+    ) -> None:
+        """It has real observable liveness — it serves on 8787 or it does
+        not. Borrowing the runner's heartbeat said nothing about whether
+        this process was up."""
+        test = " ".join(compose_doc["services"]["dashboard"]["healthcheck"]["test"])
+        assert "8787" in test and "heartbeat" not in test
 
 
 class TestOfeliaHygieneJobs:
