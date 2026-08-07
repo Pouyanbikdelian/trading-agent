@@ -382,7 +382,18 @@ services:
       IBKR_HOST: 127.0.0.1
       IBKR_PORT: ${IBKR_PORT:-4001}
       TRADING_ENV: live
-      ALLOW_LIVE_TRADING: "true"
+      # Was hardcoded "true". A compose `environment:` value OVERRIDES the
+      # `env_file:` above, so setting ALLOW_LIVE_TRADING=false in .env and
+      # recreating the container did nothing at all — this service stayed
+      # armed while `grep ALLOW_LIVE_TRADING .env` said otherwise
+      # (2026-08-07: the operator believed they had disarmed for the
+      # evening and had not; only the halt was holding).
+      #
+      # Defaulting to false is the safer failure: a missing .env value now
+      # means "not armed" rather than "armed". Arming is one edit in ONE
+      # place, which is the point — a gate you cannot read from the file
+      # you edit is not a gate.
+      ALLOW_LIVE_TRADING: "${ALLOW_LIVE_TRADING:-false}"
       # Distinct client id — IBKR drops the older session when two
       # connections share one, which on live day looks like a dead broker.
       IBKR_CLIENT_ID: ${IBKR_LIVE_CLIENT_ID:-37}

@@ -78,3 +78,42 @@ class TestModeFollowsConfiguration:
         start = gateway["healthcheck"]["start_period"]
         assert start.endswith("s")
         assert int(start.rstrip("s")) >= 120
+
+
+@pytest.fixture(scope="module")
+def services() -> dict:
+    return yaml.safe_load(COMPOSE.read_text())["services"]
+
+
+class TestTheArmingFlagIsOperable:
+    """`trader-live` hardcoded ``ALLOW_LIVE_TRADING: "true"``.
+
+    A compose ``environment:`` value overrides the ``env_file:`` above it,
+    so on 2026-08-07 the operator set ``ALLOW_LIVE_TRADING=false`` in
+    ``.env``, recreated the container, and the service stayed armed —
+    while ``grep ALLOW_LIVE_TRADING .env`` reported false. They believed
+    they had two layers between them and the market (disarmed + halted)
+    and had one.
+
+    A gate you cannot read from the file you edit is not a gate.
+    """
+
+    def test_arming_is_governed_by_the_env_file(self, services: dict) -> None:
+        value = str(services["trader-live"]["environment"]["ALLOW_LIVE_TRADING"])
+        assert "${ALLOW_LIVE_TRADING" in value, (
+            "hardcoding this makes .env a lie — interpolate it instead"
+        )
+
+    def test_the_default_is_disarmed(self, services: dict) -> None:
+        """A missing value must mean 'not armed', never 'armed'."""
+        value = str(services["trader-live"]["environment"]["ALLOW_LIVE_TRADING"])
+        assert ":-false}" in value
+
+    def test_the_live_service_still_reads_the_env_file(self, services: dict) -> None:
+        assert ".env" in services["trader-live"]["env_file"]
+
+    def test_no_service_hardcodes_arming_on(self, services: dict) -> None:
+        """Belt and braces across every service, present and future."""
+        for name, svc in services.items():
+            raw = str((svc.get("environment") or {}).get("ALLOW_LIVE_TRADING", ""))
+            assert raw.lower() not in ("true", "1", "yes"), f"{name} hardcodes arming ON"
