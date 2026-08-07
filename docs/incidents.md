@@ -123,6 +123,87 @@ the scope narrowed to PM-only.
 
 ---
 
+## 2026-08-07 (evening) — Three defects found by auditing the live order path
+
+**TL;DR:** No incident. After standing down from the morning's live
+session, an audit of the code between a decision and an order found
+three defects, all on paths that execute. Two were visible in the
+`halt.json` the account was sitting on at the time.
+
+### 1. `/halt` promised a liquidation it never performed
+
+`/halt` replied *"Next cycle will force-flatten positions"* and wrote
+`flatten_on_next_cycle: true`. **Nothing read that key.** The only
+force-flatten in the system comes from a playbook regime rule. The one
+test that mentioned the flag asserted the bot had *written* it — which
+is how a flag can be covered by a test and still do nothing.
+
+Harmless the day it was found, because a flatten was not wanted. The
+cost is the day someone halts in an emergency, reads the confirmation,
+and walks away believing the book is closing.
+
+Removed rather than implemented (Yan's call): halting is reversible,
+liquidating is not, and one word should not market-sell a book. The
+reply now states what is true, and names whether the guards are on —
+"halted" reads like "safe", and a halted book with `GUARDS_ENABLED=false`
+has nothing watching it at all.
+
+### 2. Every halt and every resume wiped both kill-switch baselines
+
+Four writers overwrote `halt.json` with a four-key dict. `HaltState`
+carries three more — `equity_high_watermark`, `daily_equity_open`,
+`last_day` — and neither forbids extra keys nor requires the missing
+ones, so all three silently reloaded as `0.0 / 0.0 / None`.
+
+The daily-loss switch skips a zero baseline outright
+(`if daily_equity_open > 0`); the drawdown switch restarts its peak from
+wherever equity happens to be. So **neither kill switch could fire on a
+decline spanning a halt** — exactly the situation that someone halted
+for. It is also, by accident, what cleared the poisoned CHF 1,068,862
+watermark that morning.
+
+All four writers now go through `risk/halt_file.set_halted`, which
+read-modify-writes under the existing lock. The runner's auto-halt also
+stopped stamping a naive `datetime.now()`.
+
+### 3. `/close` and `/flatten` never got the 2026-07-15 fix
+
+Netting working orders before sizing, and clamping sells so they cannot
+cross zero, was applied to the **cycle only**. `/sell all`, `/close` and
+`/flatten` size off settled shares and call `submit_order` directly, so
+an order already working at the broker is invisible to them.
+
+The guards make it reachable rather than theoretical: they run every 15
+minutes through 20:59 UTC — past the US close — so their exits queue to
+the next open. An operator who sees "🛑 Trailing stop VST — closing" and
+reaches for `/close VST` sells the position twice, and a long-only
+system ends up short. That is the morning's sequence plus one keystroke.
+
+The execution lock does not help. It serialises *submissions*; it says
+nothing about an order submitted an hour ago that is still working.
+
+Fixed in `risk/presubmit.py`, enforced at the last point before the
+broker against IBKR's own `openTrades`.
+
+### Lessons
+
+1. **A test that asserts a flag was written proves nothing about whether
+   it is read.** `flatten_on_next_cycle` had coverage and no consumer.
+   For anything safety-critical, the test that matters names the
+   behaviour — "the book is flat afterwards" — not the byte on disk.
+
+2. **A partial write to a shared state file is a silent reset of every
+   field it omits.** Pydantic defaults turned three missing keys into
+   three plausible zeros. `extra="forbid"` would not have caught this;
+   only round-tripping the *whole* record does.
+
+3. **A fix applied to one path is not applied to the invariant.** The
+   long-only rule was enforced in the risk manager and, separately, not
+   enforced in three command handlers that reach the same broker. Worth
+   asking of every past fix: which other paths reach this?
+
+---
+
 ## 2026-07-15 — Paper book goes SHORT two names at the open
 
 **TL;DR:** Three independent order batches (a guard full-close and two
