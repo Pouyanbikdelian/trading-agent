@@ -109,6 +109,22 @@ services:
       TWOFA_TIMEOUT_ACTION: "restart"
       # Bypass the "running outside the live system" warning at startup.
       BYPASS_WARNING: "yes"
+      # When IBKR reports a session already open under these credentials,
+      # IBC raises an "Existing session detected" modal. Its DEFAULT is
+      # `manual` — wait for a human to click. On a headless box nobody ever
+      # clicks, so IBC blocks forever: the container stays "up", the API
+      # port is never opened, and the runner crash-loops on connection
+      # refused. Hit on 2026-08-07 simply by recreating the gateway twice
+      # in quick succession, because IBKR had not yet released the prior
+      # session.
+      #
+      # `primary` = take the session over. Correct here because this box is
+      # the only automated trader; a stale session from a container we just
+      # replaced must not be able to lock out its successor. The risk it
+      # accepts is that a TWS session the operator has open elsewhere gets
+      # disconnected — much cheaper than a cycle that cannot reach the
+      # broker at all.
+      EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primary}
     volumes:
       - ib_settings:/home/ibgateway/Jts
 
