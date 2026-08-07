@@ -1123,51 +1123,28 @@ def _halt(
     reason: str = typer.Option(
         "manual", "--reason", "-r", help="Free-text reason recorded in halt.json."
     ),
-    flatten: bool = typer.Option(
-        True,
-        "--flatten/--no-flatten",
-        help="Also write a flatten flag so the next cycle force-closes positions.",
-    ),
 ) -> None:
-    """Force the runner to halt on its next cycle.
+    """Stop the runner trading. Does NOT close positions.
 
     Writes ``state/halt.json`` atomically — the risk manager reads this
     file on every cycle and refuses to act when halted. Safe to call
     while the runner is alive; safe to call when it isn't.
+
+    The old ``--flatten`` flag is gone. It wrote a key that nothing read,
+    so ``trading halt`` and ``/halt`` both claimed a liquidation that
+    never happened. Use ``trading flatten`` (or ``/flatten``) to exit.
     """
-    import json
-    import tempfile
-    from datetime import datetime, timezone
+    from trading.risk.halt_file import describe_exposure, set_halted
 
     state_dir = settings.state_dir
     state_dir.mkdir(parents=True, exist_ok=True)
     halt_path = state_dir / "halt.json"
 
-    payload = {
-        "halted": True,
-        "reason": reason,
-        "halted_at": datetime.now(tz=timezone.utc).isoformat(),
-        "flatten_on_next_cycle": flatten,
-    }
-    # Atomic write — partial files would be misread by the runner.
-    fd, tmp = tempfile.mkstemp(dir=state_dir, prefix="halt.", suffix=".json")
-    try:
-        with open(fd, "w") as f:
-            json.dump(payload, f, indent=2)
-        import os
-
-        os.replace(tmp, halt_path)
-    except Exception:
-        import os
-
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    set_halted(state_dir, halted=True, reason=reason)
 
     console.print(f"[red bold]HALTED[/red bold] — reason: {reason}")
     console.print(f"  wrote {halt_path}")
-    if flatten:
-        console.print("  next cycle will force-flatten all positions")
+    console.print(f"  {describe_exposure(state_dir)}")
     logger.bind(reason=reason).warning("operator halted runner")
 
 
@@ -1183,8 +1160,7 @@ def _resume(
     came from the risk manager itself (daily-loss cap, drawdown cap),
     clear the cause first — otherwise the same cycle will re-halt.
     """
-    import json
-    import tempfile
+    from trading.risk.halt_file import set_halted
 
     state_dir = settings.state_dir
     halt_path = state_dir / "halt.json"
@@ -1193,28 +1169,17 @@ def _resume(
         return
     # Fall through and write a clean "not halted" file anyway.
 
-    payload = {
-        "halted": False,
-        "reason": "",
-        "halted_at": None,
-        "flatten_on_next_cycle": False,
-    }
     state_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=state_dir, prefix="halt.", suffix=".json")
-    try:
-        with open(fd, "w") as f:
-            json.dump(payload, f, indent=2)
-        import os
-
-        os.replace(tmp, halt_path)
-    except Exception:
-        import os
-
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    # Read-modify-write: the daily-open and high-water baselines must
+    # survive a resume. Overwriting them was how both kill switches lost
+    # their memory every time the operator halted (found 2026-08-07).
+    new = set_halted(state_dir, halted=False)
 
     console.print("[green]RESUMED[/green] — halt cleared")
+    console.print(
+        f"  baselines kept: daily open {new.daily_equity_open:,.0f}, "
+        f"high-water {new.equity_high_watermark:,.0f}"
+    )
     logger.info("operator resumed runner")
 
 

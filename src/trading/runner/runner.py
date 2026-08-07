@@ -712,9 +712,7 @@ class Runner:
         # whether one had actually armed was to wait and see whether it
         # ever fired. One line at startup answers it instead.
         for _job in sorted(self._scheduler.get_jobs(), key=lambda j: j.id):
-            logger.bind(component="runner").info(
-                f"  job {_job.id:<18} next={_job.next_run_time}"
-            )
+            logger.bind(component="runner").info(f"  job {_job.id:<18} next={_job.next_run_time}")
 
         # Startup reconciliation. Today (May 2026) we shipped a bug where
         # broker.get_account silently returned a zero-position snapshot on
@@ -999,25 +997,22 @@ class Runner:
         if self._consecutive_errors < self.AUTO_HALT_AFTER:
             return
         try:
-            import json as _json
-            import os as _os
-            import tempfile as _tmp
+            # Was a bare four-key overwrite with a NAIVE datetime.now().
+            # Two bugs in three lines: it erased the kill-switch baselines
+            # (so an auto-halt reset the drawdown peak — after a run of
+            # failures, exactly when you want it intact), and it stamped a
+            # timezone-less timestamp that nobody could interpret from a
+            # UTC-scheduled container. set_halted does both correctly.
+            from trading.risk.halt_file import set_halted
 
-            halt_path = settings.state_dir / "halt.json"
-            halt_path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = _tmp.mkstemp(dir=halt_path.parent, prefix=f"{halt_path.name}.")
-            with _os.fdopen(fd, "w") as f:
-                _json.dump(
-                    {
-                        "halted": True,
-                        "reason": f"auto-halt after {self._consecutive_errors} consecutive failures: {reason}",
-                        "halted_at": datetime.now().isoformat(),
-                        "flatten_on_next_cycle": False,  # don't flatten reflexively
-                    },
-                    f,
-                    indent=2,
-                )
-            _os.replace(tmp, halt_path)
+            settings.state_dir.mkdir(parents=True, exist_ok=True)
+            set_halted(
+                settings.state_dir,
+                halted=True,
+                reason=(
+                    f"auto-halt after {self._consecutive_errors} consecutive failures: {reason}"
+                ),
+            )
         except Exception:
             logger.bind(component="runner").exception("auto-halt write failed")
         self.alerts.critical(
@@ -1480,14 +1475,10 @@ class Runner:
                 )
                 if not funding["ok"]:
                     self.alerts.critical(
-                        format_funding_alert(
-                            funding, minutes_to_cycle=self.PRECYCLE_LEAD_MINUTES
-                        )
+                        format_funding_alert(funding, minutes_to_cycle=self.PRECYCLE_LEAD_MINUTES)
                     )
                 elif funding.get("reason", "ok") != "ok":
-                    logger.bind(component="broker_ready").info(
-                        f"funding check {funding['reason']}"
-                    )
+                    logger.bind(component="broker_ready").info(f"funding check {funding['reason']}")
             except Exception:
                 logger.bind(component="broker_ready").exception("funding check failed")
             if flag.exists():

@@ -290,24 +290,23 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _cmd_halt(args: list[str]) -> str:
-    from trading.core.file_lock import file_lock
+    """Stop trading. Does NOT liquidate — see risk/halt_file.py.
+
+    This used to reply "Next cycle will force-flatten positions" while
+    writing a flag that nothing read. An operator who halted in an
+    emergency would have walked away believing the book was being
+    closed. The reply now states what is actually true, including
+    whether anything is still watching the positions.
+    """
+    from trading.risk.halt_file import describe_exposure, set_halted
 
     reason = " ".join(args) if args else "telegram"
-    halt_path = settings.state_dir / "halt.json"
-    # Lock the halt file across processes — audit fix #9 prevents racing
-    # writes from /halt and the risk manager's auto-halt or /resume.
-    with file_lock(halt_path):
-        _atomic_write_json(
-            halt_path,
-            {
-                "halted": True,
-                "reason": reason,
-                "halted_at": datetime.now(tz=timezone.utc).isoformat(),
-                "flatten_on_next_cycle": True,
-            },
-        )
+    # set_halted read-modify-writes under the cross-process file lock, so
+    # the kill-switch baselines survive (audit fix #9 kept, plus the
+    # baseline-erasure bug found 2026-08-07).
+    set_halted(settings.state_dir, halted=True, reason=reason)
     logger.bind(reason=reason).warning("telegram halt")
-    return f"🛑 *HALTED* — reason: `{reason}`\nNext cycle will force-flatten positions."
+    return f"🛑 *HALTED* — reason: `{reason}`\nNo new orders will be submitted.\n{describe_exposure(settings.state_dir)}"
 
 
 def _cmd_hold(args: list[str]) -> str:
@@ -823,8 +822,6 @@ def _halt_state() -> tuple[bool, str]:
 
 
 def _cmd_resume() -> str:
-    from trading.core.file_lock import file_lock
-
     # Report the state rather than acting on a no-op. "✅ RESUMED" when
     # nothing was halted reads as confirmation that a halt was lifted,
     # which is exactly the wrong thing to believe on a phone.
@@ -842,17 +839,12 @@ def _cmd_resume() -> str:
         # A live failure counter is still worth clearing even unhalted:
         # it is what would trip the next auto-halt.
 
-    halt_path = settings.state_dir / "halt.json"
-    with file_lock(halt_path):
-        _atomic_write_json(
-            halt_path,
-            {
-                "halted": False,
-                "reason": "",
-                "halted_at": None,
-                "flatten_on_next_cycle": False,
-            },
-        )
+    from trading.risk.halt_file import set_halted
+
+    # Preserves daily_equity_open / equity_high_watermark / last_day. The
+    # old four-key overwrite reset both kill switches on every resume,
+    # so a drawdown spanning a halt could never trip the drawdown cap.
+    set_halted(settings.state_dir, halted=False)
 
     # Reset the consecutive-error counter. Without this, an operator who
     # auto-halted at N failures and /resume'd would re-halt on the first

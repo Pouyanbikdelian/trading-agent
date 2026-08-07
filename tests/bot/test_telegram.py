@@ -78,7 +78,24 @@ def test_cmd_halt_writes_halt_file(tmp_path: Path, monkeypatch) -> None:
     payload = json.loads((tmp_path / "halt.json").read_text())
     assert payload["halted"] is True
     assert "bad news" in payload["reason"]
-    assert payload["flatten_on_next_cycle"] is True
+
+
+def test_cmd_halt_does_not_promise_a_flatten(tmp_path: Path, monkeypatch) -> None:
+    """This test used to assert ``flatten_on_next_cycle is True``, which
+    pinned a flag that nothing anywhere read. /halt therefore replied
+    "Next cycle will force-flatten positions" and no cycle ever did — an
+    operator halting in an emergency would have believed the book was
+    being closed. Halting stops trading; /flatten exits.
+    """
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+
+    out = _cmd_halt(["bad", "news"])
+
+    payload = json.loads((tmp_path / "halt.json").read_text())
+    assert "flatten_on_next_cycle" not in payload
+    assert "flatten" not in out.lower().split("`/flatten`")[0]
+    # And it must say what a halt does NOT do.
+    assert "still fully exposed" in out
 
 
 def test_cmd_resume_clears_halt_file(tmp_path: Path, monkeypatch) -> None:
