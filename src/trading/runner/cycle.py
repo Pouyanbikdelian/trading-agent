@@ -983,8 +983,33 @@ class Cycle:
 
         sleeve = result.sleeve_pct
         merged: dict[str, float] = {k: w * strat for k, w in signal.target_weights.items()}
+        # The operator's mode applies to the PM sleeve too. Step 6b
+        # reshapes the MECHANICAL strategy's weights and the PM is merged
+        # in here, afterwards — so before this, `/mode flatten` zeroed the
+        # strategy, left the PM fully invested, and still replied
+        # "mode active: flatten".
+        #
+        # At STRATEGY_SLEEVE_PCT=0.0 — the live configuration — that was
+        # not a partial gap. The strategy contributes nothing, the PM is
+        # the only book that trades, and the one command that reads as
+        # "get out of the market" did nothing whatsoever.
+        #
+        # Scaled HERE rather than on the combined book, because the
+        # strategy side has already had its scale applied and doing it
+        # again downstream would cut it twice.
+        mode_scale, mode_name = self._pm_mode_scale()
         for k, w in result.signal.target_weights.items():
-            merged[k] = merged.get(k, 0.0) + w
+            merged[k] = merged.get(k, 0.0) + (w if mode_scale is None else w * mode_scale)
+        if mode_scale is not None:
+            pm_gross = sum(result.signal.target_weights.values())
+            logger.bind(component="cycle").warning(
+                f"mode {mode_name}: PM sleeve scaled by {mode_scale:.2f} "
+                f"({pm_gross:.1%} → {pm_gross * mode_scale:.1%} of account)"
+            )
+            self.alerts.info(
+                f"🛡 mode *{mode_name}* also applied to the PM sleeve: "
+                f"{pm_gross:.1%} → {pm_gross * mode_scale:.1%} of account"
+            )
 
         # Names the PM held last cycle and no longer wants. Absent is not
         # the same as flat: an absent key gets no delta, so no order, so
@@ -2097,6 +2122,57 @@ class Cycle:
             f"(set by {state.set_by} at {state.set_at[:19] if state.set_at else '?'})"
         )
         return adjusted
+
+    #: Fraction of its weight each name keeps under DEFENSE / BEAR, applied
+    #: to the COMBINED book after the PM merge. Deliberately reuses the
+    #: strategy-side gross targets from ModePolicy so "defense" means one
+    #: thing across both books.
+    def _mode_scale(self, mode: Any) -> float | None:
+        """Scale factor this mode implies for an already-built book.
+
+        FLATTEN -> 0.0. DEFENSE / BEAR -> their strategy gross target.
+        BULL / NEUTRAL -> None (leave the book alone).
+
+        Note this applies the SCALING half of the mode only. The
+        defensive-ETF sleeve that ``apply_mode`` adds is a strategy-side
+        construction that needs a price frame; rotating the PM's
+        discretionary book into ETFs on its behalf would be inventing a
+        decision it did not make. Cutting exposure is a risk action and
+        belongs to the operator; choosing replacements is not.
+        """
+        from trading.runtime.mode import Mode
+        from trading.selection.mode_overlay import ModePolicy
+
+        policy = ModePolicy()
+        if mode == Mode.FLATTEN:
+            return 0.0
+        if mode == Mode.DEFENSE:
+            return float(policy.defense_strategy_gross)
+        if mode == Mode.BEAR:
+            return float(policy.bear_strategy_gross)
+        return None
+
+    def _pm_mode_scale(self) -> tuple[float | None, str]:
+        """The active mode's scale for the PM sleeve, and its name.
+
+        Applied to the PM's contribution ONLY, inside the merge. The
+        strategy side is already reshaped at step 6b — scaling the
+        combined book afterwards would scale the strategy twice.
+
+        Never raises: the operator sets a mode precisely when they are
+        already nervous, and an overlay that throws must not stop a cycle.
+        """
+        try:
+            from trading.core.config import settings as _s
+            from trading.runtime.mode import read_mode
+
+            state = read_mode(Path(_s.state_dir) / "mode.json")
+            return self._mode_scale(state.mode), state.mode.value
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "could not read operator mode; PM sleeve left unscaled"
+            )
+            return None, "unknown"
 
     def _generate_combined_weights(
         self,

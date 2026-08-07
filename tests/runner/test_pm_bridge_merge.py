@@ -46,6 +46,8 @@ class _Cycle:
 
     _merge_pm_signal = _Real._merge_pm_signal
     _add_pm_targets = _Real._add_pm_targets
+    _mode_scale = _Real._mode_scale
+    _pm_mode_scale = _Real._pm_mode_scale
 
 
 def strategy_signal(**weights: float) -> Signal:
@@ -380,3 +382,99 @@ class TestThePMCanExitWhatItBought:
         )
 
         assert out.target_weights["equity:AAPL"] == 0.5
+
+
+class TestTheOperatorModeReachesThePMSleeve:
+    """`/mode flatten` reads as "get out of the market".
+
+    The mode overlay reshapes the MECHANICAL strategy's weights, and the
+    PM is merged in afterwards — so it zeroed the strategy, left the PM
+    fully invested, and still replied "mode active: flatten".
+
+    At STRATEGY_SLEEVE_PCT=0.0 (the live configuration on 2026-08-07)
+    that was total, not partial: the strategy contributes nothing, the PM
+    is the only book that trades, and the command did nothing at all.
+    """
+
+    def _with_mode(self, monkeypatch, cycle, mode_value: str | None):
+        from trading.runtime.mode import Mode
+
+        if mode_value is None:
+            monkeypatch.setattr(cycle, "_pm_mode_scale", lambda: (None, "neutral"))
+            return
+        mode = Mode(mode_value)
+        monkeypatch.setattr(cycle, "_pm_mode_scale", lambda: (cycle._mode_scale(mode), mode_value))
+
+    def test_flatten_zeroes_the_pm_sleeve(self, cycle, monkeypatch) -> None:
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.11}, sleeve=0.11))
+        self._with_mode(monkeypatch, cycle, "flatten")
+
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}),
+            instruments_by_key={"equity:NVDA": object()},
+            ts=NOW,
+        )
+
+        assert out.target_weights["equity:NVDA"] == 0.0
+
+    def test_defense_cuts_the_pm_sleeve_without_zeroing_it(self, cycle, monkeypatch) -> None:
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.10}, sleeve=0.11))
+        self._with_mode(monkeypatch, cycle, "defense")
+
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}),
+            instruments_by_key={"equity:NVDA": object()},
+            ts=NOW,
+        )
+
+        w = out.target_weights["equity:NVDA"]
+        assert 0.0 < w < 0.10
+
+    def test_neutral_leaves_the_pm_untouched(self, cycle, monkeypatch) -> None:
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.10}, sleeve=0.11))
+        self._with_mode(monkeypatch, cycle, None)
+
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}),
+            instruments_by_key={"equity:NVDA": object()},
+            ts=NOW,
+        )
+
+        assert out.target_weights["equity:NVDA"] == 0.10
+
+    def test_the_strategy_side_is_not_scaled_twice(self, cycle, monkeypatch) -> None:
+        """Step 6b already applied the mode to the strategy frame. Scaling
+        the combined book here would cut it again."""
+        patch_strategy_sleeve(monkeypatch, 1.0)
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.10}, sleeve=0.11))
+        self._with_mode(monkeypatch, cycle, "defense")
+
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 0.5}),
+            instruments_by_key={"equity:NVDA": object(), "equity:AAPL": object()},
+            ts=NOW,
+        )
+
+        assert out.target_weights["equity:AAPL"] == 0.5
+
+    def test_an_unreadable_mode_leaves_the_pm_unscaled(self, cycle, monkeypatch) -> None:
+        """A broken overlay must not stop a cycle — the operator sets a
+        mode precisely when they are already nervous."""
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.10}, sleeve=0.11))
+
+        def boom():
+            raise RuntimeError("mode.json is a banana")
+
+        monkeypatch.setattr(cycle, "_pm_mode_scale", lambda: (None, "unknown"))
+
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}),
+            instruments_by_key={"equity:NVDA": object()},
+            ts=NOW,
+        )
+
+        assert out.target_weights["equity:NVDA"] == 0.10
