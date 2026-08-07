@@ -390,6 +390,43 @@ class OrderStore:
             ),
         )
 
+    #: Tolerance when comparing cumulative fills to order size. Fractional
+    #: share quantities are floats; an exact == would leave fully-filled
+    #: orders looking partial forever.
+    _FILL_EPS = 1e-6
+
+    def settle_status(self, client_order_id: str) -> OrderStatus | None:
+        """Set FILLED or PARTIAL from the fills actually recorded.
+
+        The cycle used to mark an order FILLED on its first fill event.
+        IBKR reports each execution separately, so a 63-share order that
+        filled 20 then 43 went terminal after the first 20.
+
+        That is worse than a cosmetic ledger error, because
+        ``oldest_open_created_at`` drives the reconciliation window: a
+        terminal order stops widening it, so the remaining 43 could fill
+        after the window had already closed and never be recorded at all.
+        ``OrderStatus.PARTIAL`` existed and sat in ``OPEN_STATUSES`` for
+        exactly this, and nothing had ever set it.
+
+        Returns the status written, or None if the order is unknown.
+        """
+        row = self.conn.execute(
+            "SELECT quantity FROM orders WHERE client_order_id = ?", (client_order_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        ordered = float(row["quantity"])
+        filled = float(
+            self.conn.execute(
+                "SELECT COALESCE(SUM(quantity), 0) AS q FROM fills WHERE order_id = ?",
+                (client_order_id,),
+            ).fetchone()["q"]
+        )
+        status = OrderStatus.FILLED if filled + self._FILL_EPS >= ordered else OrderStatus.PARTIAL
+        self.update_status(client_order_id, status)
+        return status
+
     def load_fills(
         self,
         *,

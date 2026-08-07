@@ -196,3 +196,65 @@ class TestMigratingADeployedLedger:
         store.save_fill(f, client_order_id="o-1")
 
         assert _count(store) == 2
+
+
+class TestPartialFills:
+    """``OrderStatus.PARTIAL`` was defined, listed in ``OPEN_STATUSES``, and
+    set by nothing. The cycle marked an order FILLED on its first fill
+    event, and IBKR reports each execution separately.
+
+    Not merely cosmetic: ``oldest_open_created_at`` drives the
+    reconciliation window, so an order going terminal early stops holding
+    it open — and the remainder of a partial fill could then arrive after
+    the window had closed and never be recorded at all.
+    """
+
+    def test_a_partial_fill_leaves_the_order_open(self, tmp_path):
+        from trading.core.types import OrderStatus
+
+        store = OrderStore(tmp_path / "orders.db")
+        _order(store)  # 63 shares
+
+        store.save_fill(_fill(quantity=20.0, exec_id="e1"), client_order_id="o-1")
+        status = store.settle_status("o-1")
+
+        assert status == OrderStatus.PARTIAL
+        assert store.oldest_open_created_at() is not None
+
+    def test_the_completing_fill_closes_it(self, tmp_path):
+        from trading.core.types import OrderStatus
+
+        store = OrderStore(tmp_path / "orders.db")
+        _order(store)
+
+        store.save_fill(_fill(quantity=20.0, exec_id="e1"), client_order_id="o-1")
+        store.settle_status("o-1")
+        store.save_fill(_fill(quantity=43.0, exec_id="e2"), client_order_id="o-1")
+        status = store.settle_status("o-1")
+
+        assert status == OrderStatus.FILLED
+        assert store.oldest_open_created_at() is None
+
+    def test_a_single_full_fill_goes_straight_to_filled(self, tmp_path):
+        from trading.core.types import OrderStatus
+
+        store = OrderStore(tmp_path / "orders.db")
+        _order(store)
+
+        store.save_fill(_fill(quantity=63.0, exec_id="e1"), client_order_id="o-1")
+
+        assert store.settle_status("o-1") == OrderStatus.FILLED
+
+    def test_float_dust_does_not_leave_it_forever_partial(self, tmp_path):
+        from trading.core.types import OrderStatus
+
+        store = OrderStore(tmp_path / "orders.db")
+        _order(store)
+
+        store.save_fill(_fill(quantity=63.0 - 1e-12, exec_id="e1"), client_order_id="o-1")
+
+        assert store.settle_status("o-1") == OrderStatus.FILLED
+
+    def test_an_unknown_order_is_reported_not_guessed(self, tmp_path):
+        store = OrderStore(tmp_path / "orders.db")
+        assert store.settle_status("never-existed") is None

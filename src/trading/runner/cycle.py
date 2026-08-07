@@ -303,7 +303,9 @@ class Cycle:
             for fill in fills:
                 try:
                     self.order_store.save_fill(fill, client_order_id=fill.order_id)
-                    self.order_store.update_status(fill.order_id, OrderStatus.FILLED)
+                    # Derive the status from cumulative fills, not from the
+                    # arrival of one execution — see store.settle_status.
+                    self.order_store.settle_status(fill.order_id)
                 except Exception:
                     logger.bind(component="cycle").exception("save_fill failed")
         try:
@@ -776,7 +778,12 @@ class Cycle:
         for fill in fills:
             try:
                 self.order_store.save_fill(fill, client_order_id=fill.order_id)
-                self.order_store.update_status(fill.order_id, OrderStatus.FILLED)
+                # FILLED only when the cumulative fills cover the order.
+                # Marking it terminal on the first execution stopped
+                # oldest_open_created_at from holding the reconciliation
+                # window open, so the rest of a partial fill could arrive
+                # after the window closed and never be recorded.
+                self.order_store.settle_status(fill.order_id)
             except Exception:
                 logger.bind(component="cycle").exception("save_fill failed")
         self._warn_on_stale_open_orders(ts_start)
