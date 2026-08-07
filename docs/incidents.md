@@ -123,11 +123,11 @@ the scope narrowed to PM-only.
 
 ---
 
-## 2026-08-07 (evening) — Five defects found by auditing the live order path
+## 2026-08-07 (evening) — Nine defects found by auditing the live order path
 
 **TL;DR:** No incident. After standing down from the morning's live
 session, an audit of the code between a decision and an order found
-five defects, all on paths that execute. Two were visible in the
+nine defects, all on paths that execute. Two were visible in the
 `halt.json` the account was sitting on at the time.
 
 ### 1. `/halt` promised a liquidation it never performed
@@ -222,12 +222,74 @@ the working order first" — advice that would have failed silently. The
 `Simulator` had raised on an unknown id all along; the two broker
 implementations had quietly disagreed about the contract.
 
+### 6. Force-flatten was the *third* path missing the netting fix
+
+`force_flatten_orders` — reached by the playbook's regime rule and by
+`/approve flat` — built a full-size close for every position with no
+regard for orders already working. A close on top of a queued close
+crosses zero: the panic button leaving you short the names you were
+exiting.
+
+Same bug as §3 and as 2026-07-15. Fixed in the cycle then, in the
+command handlers this morning, here an hour later. The lesson written up
+two entries above says to ask which other paths reach the invariant —
+and it was written before this one was found.
+
+### 7. Approvals never checked which cycle they belonged to
+
+The bot stamps the pending cycle's id into every decision file. Nothing
+compared it — written and discarded, exactly like `flatten_on_next_cycle`.
+Inline keyboards already refuse a tap minted for another basket, but a
+**typed** `/approve` had no equivalent, so scrolling back to an older
+prompt could approve today's book. `_request_cycle_approval` also had no
+tests at all, despite being the control the operator leans on for live.
+
+### 8. The fill ledger stored the same execution once per reconciliation pass
+
+`save_fill` was a plain INSERT with no uniqueness, and `_reconcile_from`
+deliberately widens the window back to the oldest still-open order so an
+overnight fill is not missed. Those two multiply: while any order is
+open, every cycle re-reads and re-stores every fill in the window.
+
+Not an edge case — `CRON=5 21 * * FRI` against a 20:00 UTC close means
+orders queue to the next open most weeks.
+
+The duplicates were silent and not inert. `fills` feeds
+`fills_with_symbols` → `realized_by_symbol` (the Live tab's realized PnL
+and fees) and `memory/episodes.py` (the historian's trade
+reconstruction). Both counted the same execution repeatedly, so realized
+PnL was wrong in an unpredictable direction — it depends on whether the
+duplicated leg was a buy or a sell.
+
+`Fill` now carries IBKR's `execId`; the ledger has a UNIQUE `dedupe_key`
+and `INSERT OR IGNORE`. **The migration deletes existing duplicate rows**
+— the realized-PnL figure on the dashboard will move when this deploys,
+and that movement is the correction.
+
+### 9. An order went terminal on its FIRST execution
+
+`OrderStatus.PARTIAL` was defined, listed in `OPEN_STATUSES`, and set by
+nothing. The cycle marked an order FILLED on any fill event; IBKR reports
+each execution separately, so a 63-share order filling 20 then 43 went
+terminal after 20.
+
+`oldest_open_created_at` drives the reconciliation window, so an order
+going terminal early stops holding it open — and the remaining 43 could
+arrive after the window closed and never be recorded. Same divergence
+`_reconcile_from` was built to prevent, reached by another route.
+
 ### Lessons
 
 1. **A test that asserts a flag was written proves nothing about whether
    it is read.** `flatten_on_next_cycle` had coverage and no consumer.
    For anything safety-critical, the test that matters names the
    behaviour — "the book is flat afterwards" — not the byte on disk.
+
+1c. **An enum member nothing ever assigns is a design that was planned
+   and not finished.** `OrderStatus.PARTIAL` was defined AND wired into
+   `OPEN_STATUSES` — the machinery to keep the window open on a partial
+   fill existed and was simply unreachable. Grepping for writes of each
+   state is a cheap audit that would have found it years earlier.
 
 1b. **Absent is not zero.** Twice in one audit — the PM's dropped names,
    and the halt file's missing baselines. Any map keyed by "what we want"
