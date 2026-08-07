@@ -140,8 +140,19 @@ When APScheduler fires (e.g. every Friday at market close):
 
 Once `halt.json` says halted, the next cycle:
 1. Refuses any new orders
-2. If `flatten_on_next_cycle: true`, force-closes existing positions
-3. Stays halted until you explicitly `/resume` or `trading resume`
+2. Stays halted until you explicitly `/resume` or `trading resume`
+
+**A halt does NOT close positions.** Step 2 above used to read "If
+`flatten_on_next_cycle: true`, force-closes existing positions" — that
+key was written by `/halt` and read by nothing, so the flatten never
+happened while `/halt` replied "Next cycle will force-flatten positions".
+Removed 2026-08-07; halting is reversible and liquidating is not, so one
+word should not market-sell a book. Use `/flatten` to exit.
+
+Note what that means: halting stops trading, it does not reduce
+exposure. Neither do the daily-loss and drawdown kill switches — they
+halt too. The position guards are the only thing that exits on its own,
+and they are off by default.
 
 The risk manager itself **never auto-unhalts**. By design — an
 automatic recovery on a partially-understood failure is how money
