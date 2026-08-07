@@ -72,6 +72,15 @@ CREATE INDEX IF NOT EXISTS idx_fills_order_id ON fills(order_id);
 CREATE INDEX IF NOT EXISTS idx_fills_ts       ON fills(ts);
 """
 
+#: Added 2026-08-07. Reconciliation re-reads a window of fills on purpose,
+#: so without an identity column every pass re-inserted the same
+#: executions. Applied after _SCHEMA because it must repair existing rows
+#: before the UNIQUE index can be created.
+_FILLS_DEDUPE_MIGRATION = (
+    "ALTER TABLE fills ADD COLUMN exec_id TEXT",
+    "ALTER TABLE fills ADD COLUMN dedupe_key TEXT",
+)
+
 
 def _ts_to_epoch(ts: datetime) -> float:
     if ts.tzinfo is None:
@@ -129,7 +138,70 @@ class OrderStore:
                     )
                 self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate_fills_dedupe(self._conn)
         return self._conn
+
+    @staticmethod
+    def _migrate_fills_dedupe(conn: sqlite3.Connection) -> None:
+        """Give every fill a stable identity, and repair rows that lost it.
+
+        Three steps, all idempotent:
+
+        1. Add ``exec_id`` / ``dedupe_key`` if missing (append-only ALTER,
+           per this module's migration rule).
+        2. Backfill ``dedupe_key`` for existing rows from the composite.
+        3. Delete exact duplicates, keeping the lowest ``id``, then create
+           the UNIQUE index.
+
+        Step 3 is the only destructive statement in this file and it is
+        deliberate: the UNIQUE index cannot be created while duplicates
+        exist, and the duplicates are — by construction — the same
+        execution stored more than once by successive reconciliation
+        passes. One row of each survives. It is logged loudly because a
+        deployed ledger will lose rows here, and the realized-PnL figure on
+        the dashboard will move as a result. That movement is the
+        correction, not a new error.
+        """
+        import contextlib
+
+        from trading.core.logging import logger as _logger
+
+        for stmt in _FILLS_DEDUPE_MIGRATION:
+            # Already present on a migrated DB — SQLite has no
+            # ADD COLUMN IF NOT EXISTS.
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.execute(stmt)
+
+        conn.execute(
+            """
+            UPDATE fills
+               -- Must render EXACTLY as _fill_dedupe_key does in Python,
+               -- or a backfilled row and a freshly-saved one disagree and
+               -- the duplicate slips through. printf('%g') matches
+               -- Python's f"{x:g}" for the magnitudes we store.
+               SET dedupe_key = COALESCE(
+                     exec_id,
+                     order_id || '|' || printf('%.6f', ts) || '|' ||
+                     printf('%g', quantity) || '|' || printf('%g', price)
+                   )
+             WHERE dedupe_key IS NULL
+            """
+        )
+
+        removed = conn.execute(
+            """
+            DELETE FROM fills
+             WHERE id NOT IN (SELECT MIN(id) FROM fills GROUP BY dedupe_key)
+            """
+        ).rowcount
+        if removed and removed > 0:
+            _logger.bind(component="order_store").warning(
+                f"fills ledger: removed {removed} duplicate execution row(s) left by "
+                "repeated reconciliation. Realized PnL and fee totals will change — "
+                "the new figures are the correct ones."
+            )
+
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_dedupe ON fills(dedupe_key)")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -269,11 +341,42 @@ class OrderStore:
 
     # ------------------------------------------------------------ fills
 
+    @staticmethod
+    def _fill_dedupe_key(fill: Fill, client_order_id: str) -> str:
+        """Stable identity for one execution.
+
+        The broker's ``execId`` when we have it; otherwise a composite of
+        the fields that describe the execution. The composite can in
+        principle collapse two genuinely identical partial fills — same
+        order, same microsecond, same size, same price — which IBKR does
+        not produce and the Simulator cannot.
+        """
+        if fill.exec_id:
+            return str(fill.exec_id)
+        return f"{client_order_id}|{_ts_to_epoch(fill.ts):.6f}|{fill.quantity:g}|{fill.price:g}"
+
     def save_fill(self, fill: Fill, *, client_order_id: str) -> None:
+        """Persist a fill exactly once.
+
+        ``INSERT OR IGNORE`` against a UNIQUE dedupe key, because this is
+        called from reconciliation and reconciliation re-reads on purpose:
+        ``_reconcile_from`` widens the window back to the oldest STILL-OPEN
+        order so an overnight fill is not missed. A plain INSERT therefore
+        re-stored every fill in that window on every cycle — and with a
+        Friday 21:05 cron against a 20:00 close, an order queued to the
+        next open is the normal case, not the exception.
+
+        The duplicates were silent and they were not inert: the ledger
+        feeds ``fills_with_symbols`` -> ``realized_by_symbol`` (the Live
+        tab's realized PnL and fees) and ``memory/episodes.py`` (the
+        historian's trade reconstruction). Both counted the same execution
+        repeatedly.
+        """
         self.conn.execute(
             """
-            INSERT INTO fills (order_id, ts, quantity, price, commission, venue)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO fills
+                (order_id, ts, quantity, price, commission, venue, exec_id, dedupe_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 client_order_id,
@@ -282,6 +385,8 @@ class OrderStore:
                 fill.price,
                 fill.commission,
                 fill.venue,
+                fill.exec_id,
+                self._fill_dedupe_key(fill, client_order_id),
             ),
         )
 

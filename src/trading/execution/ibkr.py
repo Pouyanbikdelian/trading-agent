@@ -962,6 +962,11 @@ class IbkrBroker(Broker):
                     price=float(exec_.price),
                     commission=float(getattr(f.commissionReport, "commission", 0.0) or 0.0),
                     venue=getattr(exec_, "exchange", None),
+                    # IBKR's own id for this execution. Reconciliation
+                    # re-reads a window of fills every cycle by design, so
+                    # this is what stops the same execution being written
+                    # to the ledger again on every pass.
+                    exec_id=str(getattr(exec_, "execId", "") or "") or None,
                 )
             )
         return out

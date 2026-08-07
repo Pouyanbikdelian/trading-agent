@@ -184,6 +184,13 @@ class Fill(BaseModel):
     price: float
     commission: float = 0.0
     venue: str | None = None
+    #: The broker's own execution id (IBKR ``execution.execId``). The only
+    #: thing that distinguishes one execution from another: reconciliation
+    #: deliberately re-reads a window of fills every cycle, so without a
+    #: stable identity the same execution is stored again on every pass.
+    #: None for brokers that do not supply one — the store then falls back
+    #: to a composite key.
+    exec_id: str | None = None
 
 
 class Position(BaseModel):
