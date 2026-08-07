@@ -94,6 +94,19 @@ class MonitorConfig:
     # Recovery — how many consecutive clean bars before suggesting return to NEUTRAL
     recovery_clean_bars: int = 5
 
+    # Entry confirmation for the SLOW trigger only. `_confirmed` was
+    # written for this and never wired, so entering a risk regime took one
+    # bar while leaving it took five — an asymmetry nothing intended, and
+    # backwards: it made the sentinel quick to alarm and slow to relax.
+    #
+    # Applied to slow_grind ONLY, on purpose. A 50/200 SMA cross that
+    # lasts one day is noise, and waiting a day to say so costs nothing.
+    # The fast triggers stay immediate: a crash confirmed a day late is
+    # the expensive direction, and a VIX jump is a one-day event by
+    # definition — requiring two consecutive +50% days would mean it
+    # never fires at all.
+    slow_grind_confirm_bars: int = 2
+
 
 def _confirmed(series: pd.Series, window: int) -> pd.Series:
     """Boolean series, True iff all of the last ``window`` bars are True.
@@ -130,12 +143,20 @@ def evaluate(
     iso = as_of.isoformat()
 
     # --- slow grind ----------------------------------------------------
+    # Both conditions are evaluated as SERIES and then confirmed over
+    # `slow_grind_confirm_bars`, rather than read off the last bar. A
+    # 50/200 cross that lasts a single day is noise; this is the trigger
+    # where waiting one more bar costs nothing and buys a lot of quiet.
     sma_long = spy.rolling(cfg.slow_grind_sma_long, min_periods=cfg.slow_grind_sma_long).mean()
     sma_fast = spy.rolling(cfg.slow_grind_sma_fast, min_periods=cfg.slow_grind_sma_fast).mean()
-    cross_below = (sma_fast.iloc[-1] < sma_long.iloc[-1]) and np.isfinite(sma_long.iloc[-1])
 
-    ret_60 = float(spy.iloc[-1] / spy.iloc[-cfg.slow_grind_ret_window] - 1.0)
-    grind_ret_hit = ret_60 < cfg.slow_grind_ret_threshold
+    n = max(1, int(cfg.slow_grind_confirm_bars))
+    cross_series = (sma_fast < sma_long) & np.isfinite(sma_long)
+    cross_below = bool(_confirmed(cross_series, n).iloc[-1])
+
+    ret_series = spy / spy.shift(cfg.slow_grind_ret_window) - 1.0
+    ret_60 = float(ret_series.iloc[-1])
+    grind_ret_hit = bool(_confirmed(ret_series < cfg.slow_grind_ret_threshold, n).iloc[-1])
 
     if cross_below or grind_ret_hit:
         causes = []

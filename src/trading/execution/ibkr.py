@@ -825,30 +825,12 @@ class IbkrBroker(Broker):
                 out[str(ccy)] = rate
         return out
 
-    def get_fx_rate(self, base_ccy: str, quote_ccy: str) -> float:
-        r"""Spot rate ``base_ccy``/``quote_ccy`` — i.e. how many units of
-        ``quote_ccy`` one unit of ``base_ccy`` buys right now.
-
-        Uses yfinance for the reference quote (free, slightly delayed).
-        Not used for trade execution — that uses IBKR's market price.
-        This is purely for showing rates to the operator before they
-        confirm a conversion.
-        """
-        import yfinance as yf
-
-        symbol = f"{base_ccy}{quote_ccy}=X"
-        df = yf.download(symbol, period="5d", auto_adjust=True, progress=False)
-        if df.empty:
-            raise BrokerError(f"no FX quote available for {symbol}")
-        close = df["Close"]
-        # yfinance can return either Series or 1-col DataFrame here.
-        if hasattr(close, "iloc"):
-            try:
-                val = float(close.iloc[-1])
-            except TypeError:
-                val = float(close.iloc[-1, 0])
-            return val
-        return float(close[-1])
+    # NOTE: ``get_fx_rate(base, quote)`` used to live here — a yfinance
+    # reference lookup whose docstring said it existed "for showing rates
+    # to the operator before they confirm a conversion". Nothing called
+    # it. The bot's ``/fx-rate`` reimplements the same yfinance query
+    # inline, so this was a second copy of live code with no callers.
+    # Removed 2026-08-07; ``/fx-rate`` is the surviving implementation.
 
     def convert_currency(self, *, from_ccy: str, to_ccy: str, from_amount: float) -> dict[str, Any]:
         r"""Spend ``from_amount`` of ``from_ccy`` at market to receive ``to_ccy``.

@@ -95,3 +95,81 @@ def test_is_clean_false_during_active_trigger() -> None:
     down = np.linspace(300, 180, 200).tolist()
     spy = _make_spy(up + down)
     assert is_clean(spy) is False
+
+
+class TestSlowGrindNeedsConfirmation:
+    """`_confirmed` was written as the hysteresis operator for entering a
+    risk regime — "True iff all of the last N bars are True", with a
+    docstring referring to a call site that did not exist.
+
+    So entering took ONE bar while leaving took five (`recovery_clean_bars`).
+    That asymmetry is backwards: quick to alarm, slow to relax.
+
+    Applied to slow_grind only. A crash confirmed a day late is the
+    expensive direction, and a VIX jump is a one-day event by definition
+    — requiring two consecutive +50% days would mean it never fires.
+    """
+
+    def _series(self, values):
+        import pandas as pd
+
+        idx = pd.date_range("2024-01-01", periods=len(values), freq="B", tz="UTC")
+        return pd.Series(values, index=idx)
+
+    def _flat_then(self, tail):
+        """250 flat bars (so the SMAs are defined), then the tail."""
+        return self._series([100.0] * 250 + list(tail))
+
+    def test_a_one_day_dip_below_the_sma_does_not_fire(self) -> None:
+        from trading.runtime.risk_monitor import MonitorConfig, evaluate
+
+        spy = self._flat_then([80.0])
+        cfg = MonitorConfig(slow_grind_confirm_bars=2)
+
+        names = {t.name for t in evaluate(spy, cfg=cfg)}
+
+        assert "slow_grind" not in names
+
+    def test_two_consecutive_bars_do_fire(self) -> None:
+        from trading.runtime.risk_monitor import MonitorConfig, evaluate
+
+        spy = self._flat_then([80.0, 80.0])
+        cfg = MonitorConfig(slow_grind_confirm_bars=2)
+
+        names = {t.name for t in evaluate(spy, cfg=cfg)}
+
+        assert "slow_grind" in names
+
+    def test_confirmation_of_one_is_the_old_behaviour(self) -> None:
+        """So the change is a config away from being reverted."""
+        from trading.runtime.risk_monitor import MonitorConfig, evaluate
+
+        spy = self._flat_then([80.0])
+        cfg = MonitorConfig(slow_grind_confirm_bars=1)
+
+        names = {t.name for t in evaluate(spy, cfg=cfg)}
+
+        assert "slow_grind" in names
+
+    def test_the_fast_crash_trigger_is_still_immediate(self) -> None:
+        """Waiting a bar to confirm a crash is the expensive direction."""
+        from trading.runtime.risk_monitor import MonitorConfig, evaluate
+
+        spy = self._flat_then([100.0, 100.0, 100.0, 100.0, 88.0])
+        vix = self._series([15.0] * 254 + [35.0])
+        cfg = MonitorConfig(slow_grind_confirm_bars=2)
+
+        names = {t.name for t in evaluate(spy, vix, cfg=cfg)}
+
+        assert "fast_crash" in names
+
+    def test_an_extreme_vix_print_is_still_immediate(self) -> None:
+        from trading.runtime.risk_monitor import MonitorConfig, evaluate
+
+        spy = self._flat_then([100.0])
+        vix = self._series([15.0] * 250 + [45.0])
+        cfg = MonitorConfig(slow_grind_confirm_bars=2)
+
+        names = {t.name for t in evaluate(spy, vix, cfg=cfg)}
+
+        assert "vol_spike" in names
