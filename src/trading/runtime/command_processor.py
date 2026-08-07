@@ -249,6 +249,16 @@ def _h_sell(cmd: Command, broker: Broker) -> dict[str, Any]:
     else:
         qty = float(qty_arg)
 
+    # Long-only invariant. The cycle nets working orders before sizing
+    # (2026-07-15); this path never did, so a sell already queued at the
+    # broker was invisible here. Guards fire on a 15-minute cadence
+    # through 20:59 UTC, past the close, so their exits sit unfilled
+    # overnight — and an operator who sees "🛑 Trailing stop VST" and
+    # reaches for /close sells the position twice.
+    from trading.risk.presubmit import clamp_sell
+
+    qty, clamp_note = clamp_sell(broker, sym, qty)
+
     instrument = Instrument(symbol=sym, asset_class=AssetClass.EQUITY)
     order = Order(
         client_order_id=f"manual-{_short_id(cmd.id)}",
@@ -261,7 +271,7 @@ def _h_sell(cmd: Command, broker: Broker) -> dict[str, Any]:
         created_at=datetime.now(tz=timezone.utc),
     )
     broker.submit_order(order)
-    return {
+    out = {
         "symbol": sym,
         "qty": qty,
         "side": "SELL",
@@ -269,6 +279,11 @@ def _h_sell(cmd: Command, broker: Broker) -> dict[str, Any]:
         "limit": limit,
         "client_order_id": order.client_order_id,
     }
+    if clamp_note:
+        # Surfaced to the operator: a sell that silently shrinks is
+        # indistinguishable from a partial fill.
+        out["clamped"] = clamp_note
+    return out
 
 
 def _h_close(cmd: Command, broker: Broker) -> dict[str, Any]:
@@ -286,17 +301,34 @@ def _h_close(cmd: Command, broker: Broker) -> dict[str, Any]:
 
 
 def _h_flatten(_cmd: Command, broker: Broker) -> dict[str, Any]:
+    """Panic button — closes everything, ignoring /hold by design.
+
+    Still netted against working orders. Flatten stays unconditional in
+    every other respect, but a panic button that can leave you SHORT the
+    names you were trying to exit is not an exit: if a sell for the full
+    position is already queued, a second one crosses zero. Netting only
+    ever makes flatten sell LESS, never less complete.
+    """
+    from trading.risk.presubmit import sellable_quantity
+
     closed: list[str] = []
     skipped: list[str] = []
     for pos in broker.get_positions():
         if pos.quantity == 0:
             continue
         side = Side.SELL if pos.quantity > 0 else Side.BUY
+        qty = abs(pos.quantity)
+        if pos.quantity > 0:
+            r = sellable_quantity(broker, pos.instrument.symbol)
+            if r.blocked:
+                skipped.append(f"{pos.instrument.symbol} (already fully covered by a working sell)")
+                continue
+            qty = min(qty, r.sellable)
         order = Order(
             client_order_id=f"flatten-{pos.instrument.symbol}-{_short_id('x' * 8)}",
             instrument=pos.instrument,
             side=side,
-            quantity=abs(pos.quantity),
+            quantity=qty,
             order_type=OrderType.MARKET,
             tif=TimeInForce.DAY,
             created_at=datetime.now(tz=timezone.utc),
