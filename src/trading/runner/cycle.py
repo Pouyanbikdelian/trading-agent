@@ -251,6 +251,22 @@ class Cycle:
             updates["strategy_params"] = dict(rule.strategy_params)
         return self.config.model_copy(update=updates), bool(rule.force_flatten)
 
+    def _working_orders(self) -> list[Any]:
+        """Orders live at the broker right now, or [] if it cannot say.
+
+        Degrading to [] restores the old un-netted behaviour rather than
+        blocking — this feeds the flatten path, and a panic button that
+        refuses during a broker wobble is worse than one that may
+        double-sell.
+        """
+        try:
+            return list(self.broker.get_open_orders() or [])
+        except Exception:
+            logger.bind(component="cycle").warning(
+                "could not read working orders; flatten will not be netted"
+            )
+            return []
+
     def _run_force_flatten(self, ts_start: datetime) -> CycleReport:
         """Playbook said this regime = stay flat. Generate closing orders for
         every open position, submit, and skip strategy generation entirely."""
@@ -259,6 +275,7 @@ class Cycle:
         orders = self.risk_manager.force_flatten_orders(
             positions,
             ts=ts_start,
+            working_orders=self._working_orders(),
             **({"order_id_factory": self._order_id_factory} if self._order_id_factory else {}),
         )
 
@@ -1733,6 +1750,24 @@ class Cycle:
             )
             return []
 
+        # The bot stamps the pending cycle's id into every decision. Until
+        # now nothing checked it — the id was written and discarded, the
+        # same shape as the flatten flag. The inline keyboards already
+        # refuse a tap minted for another basket; a TYPED /approve had no
+        # equivalent, and the file is the last place to catch a decision
+        # that belongs to a cycle other than this one.
+        decided_id = str(decision.get("id") or "")
+        if decided_id and decided_id != cycle_id:
+            self.alerts.warning(
+                f"⚠️ ignoring an approval for cycle `{decided_id[:8]}` — "
+                f"this is cycle `{cycle_id[:8]}`. No orders submitted.\n"
+                "_Re-issue against the current basket if you still want it._"
+            )
+            logger.bind(component="cycle").warning(
+                f"approval id mismatch: decision {decided_id!r} vs cycle {cycle_id!r}"
+            )
+            return []
+
         action = str(decision.get("action", "reject")).lower()
         if action == "reject":
             self.alerts.info(f"❌ cycle `{cycle_id[:8]}` rejected by operator.")
@@ -1745,7 +1780,9 @@ class Cycle:
 
             positions: list[Position] = list((account.positions or {}).values())
             return self.risk_manager.force_flatten_orders(
-                positions, ts=datetime.now(tz=timezone.utc)
+                positions,
+                ts=datetime.now(tz=timezone.utc),
+                working_orders=self._working_orders(),
             )
         if action == "scale":
             factor = float(decision.get("scale_factor", 1.0))

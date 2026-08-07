@@ -638,21 +638,64 @@ class RiskManager:
         *,
         ts: datetime | None = None,
         order_id_factory: Callable[[], str] = new_client_order_id,
+        working_orders: list[Order] | None = None,
     ) -> list[Order]:
-        """Build market orders that close every non-zero position. Bypasses
-        all limits (this is the emergency exit) but cannot be called while
-        halted to a *different* reason — operator must unhalt first."""
+        """Build market orders that close every non-zero position.
+
+        Bypasses every exposure limit — this is the emergency exit — and
+        deliberately ignores ``/hold``: a panic button that silently skips
+        positions is a trap.
+
+        It does NOT bypass the long-only invariant. ``working_orders`` are
+        the orders already live at the broker; their signed quantity is
+        netted out, because a full-size close on top of a full-size close
+        already working crosses zero and leaves a SHORT in the name you
+        were trying to exit. That is the 2026-07-15 stacking bug, and this
+        was the third path still missing the fix (the cycle got it then,
+        the command handlers on 2026-08-07, this one an hour later).
+
+        Netting can only ever make a flatten sell LESS, never leave it
+        less complete: the shares are already on their way out.
+
+        Omitting ``working_orders`` keeps the old unnetted behaviour, so a
+        caller with no way to ask the broker still flattens.
+        """
         ts = ts or datetime.now(timezone.utc)
+
+        def _norm(key: str) -> str:
+            return f"equity:{key.split(':', 1)[1]}" if key.startswith("etf:") else key
+
+        # Signed remaining quantity per instrument, from every source.
+        pending: dict[str, float] = {}
+        for wo in working_orders or []:
+            k = _norm(wo.instrument.key)
+            pending[k] = pending.get(k, 0.0) + (
+                wo.quantity if wo.side == Side.BUY else -wo.quantity
+            )
+
         orders: list[Order] = []
         for pos in positions:
             if abs(pos.quantity) < _EPS_QTY:
+                continue
+            # What still needs closing once the working orders land.
+            remaining = pos.quantity + pending.get(_norm(pos.instrument.key), 0.0)
+            if abs(remaining) < _EPS_QTY:
+                logger.bind(component="risk").info(
+                    f"force-flatten: {pos.instrument.symbol} already fully covered "
+                    "by working orders — not duplicating"
+                )
+                continue
+            # Never flip the sign: if working orders would OVERSHOOT, close
+            # only what we actually hold rather than opening the opposite side.
+            if remaining * pos.quantity < 0:
+                remaining = 0.0
                 continue
             orders.append(
                 Order(
                     client_order_id=order_id_factory(),
                     instrument=pos.instrument,
                     side=Side.SELL if pos.quantity > 0 else Side.BUY,
-                    quantity=abs(pos.quantity),
+                    quantity=abs(remaining),
                     order_type=OrderType.MARKET,
                     tif=TimeInForce.DAY,
                     created_at=ts,
