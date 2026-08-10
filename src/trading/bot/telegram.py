@@ -328,15 +328,20 @@ def _cmd_hold(args: list[str]) -> str:
         f"_Manual `/sell {sym} ...` and `/flatten` still work. "
         f"`/unhold {sym}` to release._"
     )
-    # Ghost pins were one of the six defects found in the July 2026 audit:
-    # a pin on a symbol we don't own still reserves a basket slot, so the
-    # cycle quietly buys one name fewer. Flag it at the moment it's made,
-    # when the operator can still say "that wasn't what I meant".
+    # Ghost pins were one of the six defects found in the July 2026 audit.
+    # The SLOT half was fixed then — apply_runtime_overrides now ignores a
+    # pin with no position, so the basket is no longer one name short.
+    # This message still said it "reserves a basket slot" until 2026-08-10,
+    # describing behaviour that had been gone for a month.
+    #
+    # What remains true is the part operators actually trip over: a hold
+    # freezes a symbol in BOTH directions. Pinning something you do not
+    # own does not protect anything — it stops the cycle ever buying it.
     if not _holds_position(sym):
         msg += (
-            f"\n\n⚠️ `{sym}` isn't in the current book. The pin still reserves "
-            "a basket slot, so the cycle will hold one position fewer. "
-            f"`/unhold {sym}` if that wasn't intended."
+            f"\n\n⚠️ `{sym}` isn't in the current book, so there's nothing to "
+            "protect. A hold blocks BUYS as well as sells, so this stops the "
+            f"cycle ever opening `{sym}` until you `/unhold {sym}`."
         )
     return msg
 
