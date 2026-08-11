@@ -231,9 +231,18 @@ def check_unheld_positions(broker: Any, *, state_dir: Path | str) -> dict[str, A
     }
     held = load_holds(state_dir)
     acked = _load_unheld_ack(state_dir)
-    unheld = sorted(symbols - held - acked)
+    # Positions the desk opened itself are not "unprotected" — they are
+    # the book. See desk_opened_symbols for what this cost when missing.
+    ours = desk_opened_symbols(state_dir)
+    unheld = sorted(symbols - held - acked - ours)
 
-    out.update({"held": sorted(held & symbols), "acked": sorted(acked & symbols)})
+    out.update(
+        {
+            "held": sorted(held & symbols),
+            "acked": sorted(acked & symbols),
+            "desk_opened": sorted(ours & symbols),
+        }
+    )
     if unheld:
         out["ok"] = False
         out["unheld"] = unheld
@@ -241,6 +250,53 @@ def check_unheld_positions(broker: Any, *, state_dir: Path | str) -> dict[str, A
             unheld
         )
         logger.bind(component="broker_ready").warning(out["reason"])
+    return out
+
+
+def desk_opened_symbols(state_dir: Path | str) -> set[str]:
+    """Symbols this desk has itself submitted an order for.
+
+    The unheld check exists to catch positions that arrived from OUTSIDE
+    the system — the operator's own WMT, a transfer, the VST that the
+    guards sold on 2026-08-07. A position the desk opened is one the desk
+    is meant to manage: the rebalance selling it later is the design, not
+    a hazard, and there is nothing for the operator to protect.
+
+    Without this the check inverted the moment it mattered. On
+    2026-08-11 the first live cycle bought the PM basket, the runner
+    restarted, preflight found ten positions absent from holds.json and
+    ``preflight_unheld`` raised — so ``restart: unless-stopped`` produced
+    a loop of identical CRITICAL alerts and a live runner that could
+    never start again. Trading successfully had locked the system out.
+
+    Reads the order ledger, not fills: an order we placed and that filled
+    only partially still means the position is ours.
+    """
+    path = Path(state_dir) / "orders.db"
+    if not path.exists():
+        return set()
+    out: set[str] = set()
+    try:
+        import json
+        import sqlite3
+
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            rows = conn.execute("SELECT DISTINCT instrument_json FROM orders").fetchall()
+        finally:
+            conn.close()
+        for (raw,) in rows:
+            try:
+                sym = json.loads(raw).get("symbol")
+            except Exception:
+                continue
+            if sym:
+                out.add(str(sym).upper())
+    except Exception as e:
+        # A missing table is the normal state of a freshly-armed account.
+        # Degrade to "we opened nothing", which is the CAUTIOUS direction:
+        # everything stays flagged rather than silently waved through.
+        logger.bind(component="broker_ready").debug(f"order ledger unreadable: {e}")
     return out
 
 
