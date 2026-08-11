@@ -67,7 +67,9 @@ def _read_fresh_json(
         gaps.append(f"{label}: reading carries no timestamp")
         return {}
     try:
-        age_h = (datetime.now(tz=timezone.utc) - datetime.fromisoformat(stamp)).total_seconds() / 3600
+        age_h = (
+            datetime.now(tz=timezone.utc) - datetime.fromisoformat(stamp)
+        ).total_seconds() / 3600
     except Exception:
         gaps.append(f"{label}: unreadable timestamp {stamp!r}")
         return {}
@@ -249,6 +251,22 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         ]
     except Exception as e:
         logger.bind(component="agents").warning(f"context: memory unavailable ({e})")
+
+    # --- what LEFT the book, and what the tape was doing that day.
+    # Until now the desk decided from the present state alone: it could
+    # not see whether the last trade in a name made or lost money, why the
+    # name left, or that the guards had sold anything. `exits_done` is
+    # private to runtime.guards and gates re-EXIT, not re-ENTRY — so a
+    # standing decision would re-buy a name stopped out that morning.
+    try:
+        from trading.agents.exits import exits_note, recent_exits
+
+        exits = recent_exits(state_dir, data_dir)
+        if exits:
+            ctx["recent_exits"] = exits
+            ctx["recent_exits_note"] = exits_note()
+    except Exception as e:
+        logger.bind(component="agents").warning(f"context: recent exits unavailable ({e})")
 
     # --- the ranked candidate ladder: the ONLY channel through which a
     # name the desk doesn't already own can reach an agent. Without it the

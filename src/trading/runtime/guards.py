@@ -159,6 +159,48 @@ def _price_is_sane(quoted: float, mark: float | None, tol_pct: float) -> bool:
     return abs(quoted - mark) / mark * 100.0 <= tol_pct
 
 
+def _exit_record(
+    symbol: str, reason: str, price: float, qty: float, entry: float
+) -> dict[str, Any]:
+    """The numbers the operator needs to decide what to do next.
+
+    Module-level rather than a closure over the loop: the values are
+    passed explicitly so the record cannot silently capture a later
+    iteration's symbol.
+    """
+    return {
+        "symbol": symbol,
+        "reason": reason,
+        "price": price,
+        "qty": qty,
+        "proceeds": qty * price,
+        "entry": entry,
+        "pnl_pct": (price / entry - 1.0) * 100.0 if entry else 0.0,
+        "pnl_usd": (price - entry) * qty,
+    }
+
+
+def exit_stamp(entry: Any) -> str | None:
+    """ISO timestamp from a guards ``exits_done`` entry, either shape.
+
+    Was a bare ISO string; now ``{"at": iso, "reason": ...}`` so the desk
+    can be told WHY a name left, not just that it did. Deployed state
+    files still hold the old shape, and a migration that silently reset
+    every cooldown would let a name stop out twice in one session.
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        v = entry.get("at")
+        return v if isinstance(v, str) else None
+    return None
+
+
+def exit_reason(entry: Any) -> str | None:
+    """Why a name left, or None for pre-migration entries."""
+    return entry.get("reason") if isinstance(entry, dict) else None
+
+
 def check_guards(
     state_dir: Path,
     data_dir: Path,
@@ -225,7 +267,7 @@ def check_guards(
 
         if sym in holds:
             continue  # operator pinned it; guards keep hands off
-        last_exit = exits_done.get(sym)
+        last_exit = exit_stamp(exits_done.get(sym))
         if last_exit:
             try:
                 age_h = (now - datetime.fromisoformat(last_exit)).total_seconds() / 3600
@@ -262,20 +304,10 @@ def check_guards(
         # save the roll-up from re-deriving what is already in scope.
         qty = abs(float(p.get("qty", 0.0)))
 
-        def _record(reason: str) -> dict[str, Any]:
-            return {
-                "symbol": sym,
-                "reason": reason,
-                "price": px,
-                "qty": qty,
-                "proceeds": qty * px,
-                "entry": avg,
-                "pnl_pct": (px / avg - 1.0) * 100.0 if avg else 0.0,
-                "pnl_usd": (px - avg) * qty,
-            }
-
         if px <= stop_level:
-            exit_orders.append({**_record("trailing_stop"), "hwm": float(st["hwm"])})
+            exit_orders.append(
+                {**_exit_record(sym, "trailing_stop", px, qty, avg), "hwm": float(st["hwm"])}
+            )
             msg = (
                 f"🛑 *Trailing stop* {sym}: {px:.2f} ≤ stop {stop_level:.2f} "
                 f"(HWM {float(st['hwm']):.2f} − {eff_pct:.1f}%"
@@ -283,13 +315,13 @@ def check_guards(
             )
             alerts.append(msg)
             exit_alerts.append(msg)
-            exits_done[sym] = now.isoformat()
+            exits_done[sym] = {"at": now.isoformat(), "reason": "trailing_stop"}
         elif tp_pct and px >= avg * (1.0 + tp_pct / 100.0):
-            exit_orders.append(_record("take_profit"))
+            exit_orders.append(_exit_record(sym, "take_profit", px, qty, avg))
             msg = f"🎯 *Take profit* {sym}: {px:.2f} ≥ +{tp_pct:.0f}% from {avg:.2f} — closing"
             alerts.append(msg)
             exit_alerts.append(msg)
-            exits_done[sym] = now.isoformat()
+            exits_done[sym] = {"at": now.isoformat(), "reason": "take_profit"}
 
     # Drop state for positions no longer held (re-entries start fresh).
     for sym in list(pos_state):
@@ -336,7 +368,9 @@ def check_guards(
         "exits": exit_orders,
         "alerts": alerts,
         "exit_alerts": exit_alerts,
-        "rollup": format_exit_rollup(exit_orders, equity=equity, remaining_value=remaining, now=now),
+        "rollup": format_exit_rollup(
+            exit_orders, equity=equity, remaining_value=remaining, now=now
+        ),
     }
 
 
@@ -405,8 +439,10 @@ def format_exit_rollup(
         f"*To cash* {_money(proceeds)}   *Realized* {_money(realized)}",
     ]
     if equity:
-        lines.append(f"*Still deployed* {_money(remaining_value)} of {_money(equity)} "
-                     f"({remaining_value / equity * 100:.0f}%)")
+        lines.append(
+            f"*Still deployed* {_money(remaining_value)} of {_money(equity)} "
+            f"({remaining_value / equity * 100:.0f}%)"
+        )
     lines += [
         "",
         "⚠️ *Nothing redeploys automatically.* The desk has not seen these exits.",

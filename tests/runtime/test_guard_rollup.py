@@ -105,9 +105,7 @@ class TestItReadsWell:
         assert body.index("BIG") < body.index("SMALL")
 
     def test_the_reason_mix_is_named(self) -> None:
-        mixed = format_exit_rollup(
-            [_exit("A"), _exit("B", reason="take_profit")], equity=88_000.0
-        )
+        mixed = format_exit_rollup([_exit("A"), _exit("B", reason="take_profit")], equity=88_000.0)
         allstops = format_exit_rollup([_exit("A"), _exit("B")], equity=88_000.0)
 
         assert "1 stop, 1 target" in mixed
@@ -150,3 +148,31 @@ class TestWiring:
 
         assert 'rollup = result.get("rollup")' in src
         assert "if rollup and msg in exit_msgs:" in src
+
+
+class TestExitRecordsCarryTheirReason:
+    """``exits_done`` was a bare ISO string. It now carries WHY, so the
+    desk can be told a guard sold — but deployed state files still hold
+    the old shape, and a migration that silently reset every cooldown
+    would let a name stop out twice in one session."""
+
+    def test_the_old_bare_string_shape_is_still_understood(self) -> None:
+        from trading.runtime.guards import exit_reason, exit_stamp
+
+        assert exit_stamp("2026-08-07T15:21:00+00:00") == "2026-08-07T15:21:00+00:00"
+        assert exit_reason("2026-08-07T15:21:00+00:00") is None
+
+    def test_the_new_shape_carries_both(self) -> None:
+        from trading.runtime.guards import exit_reason, exit_stamp
+
+        e = {"at": "2026-08-11T14:35:00+00:00", "reason": "trailing_stop"}
+
+        assert exit_stamp(e) == "2026-08-11T14:35:00+00:00"
+        assert exit_reason(e) == "trailing_stop"
+
+    def test_junk_does_not_raise(self) -> None:
+        from trading.runtime.guards import exit_reason, exit_stamp
+
+        for junk in (None, 7, [], {}):
+            assert exit_stamp(junk) is None
+            assert exit_reason(junk) is None

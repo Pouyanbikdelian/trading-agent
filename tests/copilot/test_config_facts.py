@@ -40,9 +40,9 @@ class TestItReadsTheLiveSettings:
 
     def test_a_changed_setting_is_reflected_immediately(self, monkeypatch) -> None:
         """The whole point: no cached snapshot to go stale."""
-        assert _cfg(monkeypatch, AGENT_PM_SLEEVE_PCT=0.25)["who_trades"][
-            "agent_pm_sleeve_pct"
-        ] == 0.25
+        assert (
+            _cfg(monkeypatch, AGENT_PM_SLEEVE_PCT=0.25)["who_trades"]["agent_pm_sleeve_pct"] == 0.25
+        )
 
     def test_risk_limits_are_present(self, monkeypatch) -> None:
         c = _cfg(monkeypatch, MAX_POSITION_PCT=0.03, MAX_DRAWDOWN_PCT=0.02)
@@ -51,9 +51,10 @@ class TestItReadsTheLiveSettings:
         assert c["risk_limits"]["max_drawdown_pct"] == 0.02
 
     def test_the_dollar_cap_is_reported(self, monkeypatch) -> None:
-        assert _cfg(monkeypatch, PM_SLEEVE_CAPITAL_USD=12000)["who_trades"][
-            "pm_sleeve_capital_usd"
-        ] == 12000.0
+        assert (
+            _cfg(monkeypatch, PM_SLEEVE_CAPITAL_USD=12000)["who_trades"]["pm_sleeve_capital_usd"]
+            == 12000.0
+        )
 
 
 class TestGuardSettings:
