@@ -57,7 +57,12 @@ def fills_with_symbols(orders_db: Path) -> list[dict[str, Any]]:
                ORDER BY f.ts ASC"""
         ).fetchall()
     except sqlite3.Error as e:
-        logger.bind(component="dashboard").warning(f"fills query failed: {e}")
+        # A brand-new live ledger is a zero-byte file with no schema until
+        # the first order is written. That is the expected state of a
+        # freshly-armed account, not a fault — logging it as a WARNING
+        # twice per refresh buries the errors that do matter.
+        level = "debug" if "no such table" in str(e) else "warning"
+        getattr(logger.bind(component="dashboard"), level)(f"fills query failed: {e}")
         return []
     finally:
         conn.close()

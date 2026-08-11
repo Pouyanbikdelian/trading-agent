@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from trading.core.clock import artifact_age_seconds
 from trading.core.logging import logger
 
 STATE_FILENAME = "ops_watch.json"
@@ -242,7 +243,12 @@ def check_health(state_dir: Path, *, now: datetime | None = None) -> list[str]:
         if not p.exists():
             issues.append(f"{label}: missing ({rel})")
             continue
-        age_h = (now.timestamp() - p.stat().st_mtime) / 3600.0
+        # WAL-aware: runner.db's own mtime is the last checkpoint, not
+        # the last write. See core.clock.artifact_age_seconds.
+        _secs = artifact_age_seconds(p, now=now.timestamp())
+        if _secs is None:
+            continue
+        age_h = _secs / 3600.0
         if age_h > max_h:
             issues.append(f"{label}: stale ({age_h:.0f}h old, limit {max_h:.0f}h)")
 

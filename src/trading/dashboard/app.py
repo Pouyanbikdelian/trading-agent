@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from trading.core.clock import artifact_age_seconds
 from trading.core.logging import logger
 
 
@@ -216,23 +217,8 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
             return int((now - p.stat().st_mtime) / 60) if p.exists() else None
 
         def _db_age(p: Path) -> int | None:
-            """Age of a SQLite store, WAL included.
-
-            ``_age(runner.db)`` alone reported 90h on a runner that was
-            writing a snapshot every 60 seconds: in WAL mode the writes
-            land in ``runner.db-wal`` and the main file is only touched
-            on checkpoint, so its mtime says when SQLite last
-            checkpointed, not when the desk last heard from the broker.
-            An operator reading "broker snapshot 90h ago" on a live
-            account will either distrust a working system or go looking
-            for a fault that is not there.
-            """
-            stamps = [
-                q.stat().st_mtime
-                for q in (p, p.with_suffix(p.suffix + "-wal"), p.with_suffix(p.suffix + "-shm"))
-                if q.exists()
-            ]
-            return int((now - max(stamps)) / 60) if stamps else None
+            secs = artifact_age_seconds(p, now=now)
+            return None if secs is None else int(secs / 60)
 
         halt = {}
         hp = state_dir / "halt.json"

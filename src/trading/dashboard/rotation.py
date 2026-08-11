@@ -264,6 +264,30 @@ def classify_regimes(econ: dict[str, Any]) -> dict[str, Any]:
 _cache: dict[str, Any] = {"t": 0.0, "payload": None}
 
 
+def _daily_utc(s: pd.Series) -> pd.Series:
+    """Index normalized to tz-aware UTC midnight.
+
+    ``_load_history`` draws from two sources: the parquet cache, whose
+    index is tz-aware (the house rule), and a yfinance fallback for
+    whatever is not cached, whose index is tz-naive. Mixing them made
+    ``pd.DataFrame(closes)`` raise "Cannot join tz-naive with tz-aware
+    DatetimeIndex" and take the entire Rotation tab down — and because
+    several sector ETFs are outside the traded universe, they were ALWAYS
+    fetched, so the mix was permanent rather than occasional.
+
+    Normalizing to midnight rather than merely unifying the tz is
+    deliberate: the cache stores daily bars stamped at the close while
+    yfinance stamps them at midnight, so aligning the timezone alone
+    would leave two rows per day and every cross-symbol comparison
+    reading NaN.
+    """
+    out = s.copy()
+    idx = pd.DatetimeIndex(out.index)
+    idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    out.index = idx.normalize()
+    return out[~out.index.duplicated(keep="last")]
+
+
 def _load_history(data_dir: Path) -> tuple[pd.DataFrame, dict[str, float]]:
     """Daily closes for SECTOR_ETFS + SPY: parquet cache first, one
     yfinance batch for whatever's missing. Also returns a 90-day average
@@ -300,6 +324,8 @@ def _load_history(data_dir: Path) -> tuple[pd.DataFrame, dict[str, float]]:
                     dollar_vol[sym] = float((px.reindex(vol.index) * vol).mean())
             except Exception:
                 continue
+    # Normalize BEFORE the frame is built — this is the join that failed.
+    closes = {k: _daily_utc(v) for k, v in closes.items()}
     return pd.DataFrame(closes), dollar_vol
 
 

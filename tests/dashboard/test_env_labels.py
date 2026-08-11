@@ -122,6 +122,7 @@ class TestCronParsing:
 class TestSnapshotAgeSeesWalWrites:
     def test_the_age_helper_is_wal_aware(self) -> None:
         assert '"snapshot": _db_age(state_dir / "runner.db")' in APP
+        assert "artifact_age_seconds(p, now=now)" in APP
         assert '"snapshot": _age(state_dir / "runner.db")' not in APP
 
     def test_a_wal_write_counts_as_fresh(self, tmp_path) -> None:
@@ -157,3 +158,36 @@ class TestSnapshotAgeSeesWalWrites:
             return int((time.time() - max(stamps)) / 60) if stamps else None
 
         assert db_age(tmp_path / "nope.db") is None
+
+
+class TestOneImplementationOfArtifactAge:
+    """The dashboard fix alone left the ops watchdog still telling the
+    operator 'broker snapshot 91h old' about a runner writing every 60s.
+    A fix applied to one path is not a fix to the invariant."""
+
+    def test_the_watchdog_uses_the_shared_helper(self) -> None:
+        src = Path("src/trading/runtime/ops_watch.py").read_text()
+
+        assert "from trading.core.clock import artifact_age_seconds" in src
+        assert "p.stat().st_mtime" not in src
+
+    def test_the_dashboard_uses_the_shared_helper(self) -> None:
+        assert "from trading.core.clock import artifact_age_seconds" in APP
+
+    def test_the_helper_sees_a_wal_write(self, tmp_path) -> None:
+        import os
+
+        from trading.core.clock import artifact_age_seconds
+
+        db = tmp_path / "runner.db"
+        sqlite3.connect(db).close()
+        old = time.time() - 91 * 3600
+        os.utime(db, (old, old))
+        (tmp_path / "runner.db-wal").write_bytes(b"x")
+
+        assert artifact_age_seconds(db) < 60  # seconds, not 327600
+
+    def test_the_helper_returns_none_when_absent(self, tmp_path) -> None:
+        from trading.core.clock import artifact_age_seconds
+
+        assert artifact_age_seconds(tmp_path / "nope.db") is None
