@@ -215,6 +215,25 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         def _age(p: Path) -> int | None:
             return int((now - p.stat().st_mtime) / 60) if p.exists() else None
 
+        def _db_age(p: Path) -> int | None:
+            """Age of a SQLite store, WAL included.
+
+            ``_age(runner.db)`` alone reported 90h on a runner that was
+            writing a snapshot every 60 seconds: in WAL mode the writes
+            land in ``runner.db-wal`` and the main file is only touched
+            on checkpoint, so its mtime says when SQLite last
+            checkpointed, not when the desk last heard from the broker.
+            An operator reading "broker snapshot 90h ago" on a live
+            account will either distrust a working system or go looking
+            for a fault that is not there.
+            """
+            stamps = [
+                q.stat().st_mtime
+                for q in (p, p.with_suffix(p.suffix + "-wal"), p.with_suffix(p.suffix + "-shm"))
+                if q.exists()
+            ]
+            return int((now - max(stamps)) / 60) if stamps else None
+
         halt = {}
         hp = state_dir / "halt.json"
         if hp.exists():
@@ -227,11 +246,27 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
                 "market_watch": _age(state_dir / "market_watch.json"),
                 "committee": _age(state_dir / "last_committee.json"),
                 "pm_book": _age(state_dir / "agent_pm" / "portfolio.json"),
-                "snapshot": _age(state_dir / "runner.db"),
+                "snapshot": _db_age(state_dir / "runner.db"),
             },
         }
     except Exception:
         out["ops"] = {}
+
+    # The environment and the real cron, so the page can stop guessing.
+    # Every "(paper)" label and every NEXT UP time below used to be a
+    # hardcoded string; on a live account they said "paper" and named a
+    # rebalance time (Fri 21:05) the runner had not used since the cron
+    # moved to 19:00. A dashboard that describes a different system than
+    # the one running is worse than no dashboard.
+    try:
+        from trading.core.config import get_settings
+
+        _s = get_settings()
+        out["env"] = getattr(_s, "trading_env", "") or ""
+        out["cycle_cron"] = os.getenv("CRON", "") or getattr(_s, "schedule_cron", "") or ""
+    except Exception:
+        out["env"] = ""
+        out["cycle_cron"] = ""
 
     # Memory vitals.
     try:
@@ -375,7 +410,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 </div></div>
 
 <div class="tab" id="tab-portfolio"><div class="grid">
- <div class="card big"><h2>Equity (paper) <span id="eqret" style="float:right"></span></h2>
+ <div class="card big"><h2>Equity (<span class="envlbl">paper</span>) <span id="eqret" style="float:right"></span></h2>
   <div id="ranges">
    <button data-r="today">Today</button><button data-r="1w">1W</button>
    <button data-r="1m">1M</button><button data-r="3m">3M</button>
@@ -393,7 +428,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
       read its neighbour's positions as its own and "exited" a cluster it
       never held (see agents/pm.py OPERATOR_ACCOUNT_KEYS); a human reading
       these side by side has exactly the same problem. Name the book. -->
- <div class="card"><h2>Account <span class="muted" style="text-transform:none;letter-spacing:0">— traded book (paper)</span></h2><div id="account"></div><h2 style="margin-top:12px">Positions</h2><div id="positions"></div></div>
+ <div class="card"><h2>Account <span class="muted" style="text-transform:none;letter-spacing:0">— traded book (<span class="envlbl">paper</span>)</span></h2><div id="account"></div><h2 style="margin-top:12px">Positions</h2><div id="positions"></div></div>
  <div class="card"><h2>Agent PM · holdings <span class="muted" style="text-transform:none;letter-spacing:0">— separate sim sleeve, not the traded book</span></h2><div id="pmholds"></div></div>
  <div class="card"><h2>Committee (latest) <span class="muted" style="text-transform:none;letter-spacing:0">— debates the traded book</span></h2><div id="committee"></div>
   <h2 style="margin-top:14px">Posture history <span class="muted" style="text-transform:none;letter-spacing:0">— dot color = posture, height = dissent</span></h2>
@@ -593,7 +628,7 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    const m={};pts.forEach(p=>m[p.t]=p[key]);  // last same-day point wins
    const base=pts[0][key];
    return {label,data:dates.map(dt=>m[dt]!=null?100*m[dt]/base:null),borderColor:color,spanGaps:true};};
-  const sets=[mk(paper,'v','momentum top-k (paper)','#4cc38a'),
+  const sets=[mk(paper,'v','momentum top-k ('+(d.env||'paper')+')','#4cc38a'),
               mk(pm,'v','agent PM (sim)','#b07cf6'),
               mk(spy,'spy','SPY','#8b98a5')].filter(Boolean);
   if(raceChart){raceChart.destroy();raceChart=null;}
@@ -728,14 +763,35 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   '<span class="muted">no headlines collected yet</span>';
 
  // Schedule: next occurrences of the recurring jobs (computed in UTC).
+ // The cycle and the PM run are DERIVED from the runner's actual cron
+ // (CRON in .env); the PM fires 45 min ahead of it, exactly as
+ // runner._precycle_trigger does. These were hardcoded to Fri 21:05 and
+ // Mon 14:30 and kept saying so long after the cron moved to 19:00.
+ const DOWMAP={SUN:0,MON:1,TUE:2,WED:3,THU:4,FRI:5,SAT:6};
+ const parseCron=t=>{ // "M H * * FRI" / "M H * * 1-5" -> {h,m,dow[]}
+  const p=String(t||'').trim().split(/[ ]+/); if(p.length<5) return null;
+  const m=parseInt(p[0],10), h=parseInt(p[1],10); if(isNaN(m)||isNaN(h)) return null;
+  const f=p[4].toUpperCase(); let dow=[];
+  if(f==='*') dow=[0,1,2,3,4,5,6];
+  else f.split(',').forEach(part=>{
+   const r=part.split('-').map(x=>DOWMAP[x]!==undefined?DOWMAP[x]:parseInt(x,10));
+   if(r.length===2&&!isNaN(r[0])&&!isNaN(r[1])){for(let i=r[0];i<=r[1];i++)dow.push(i%7);}
+   else if(!isNaN(r[0])) dow.push(r[0]%7);});
+  return dow.length?{h,m,dow}:null;};
+ const shift=(c,mins)=>{const t=c.h*60+c.m-mins; return t<0?null:{h:Math.floor(t/60),m:t%60,dow:c.dow};};
+ const cyc=parseCron(d.cycle_cron);
+ const envl=d.env||'paper';
  const jobs=[
   {n:'🏛 committee',dow:[1,2,3,4,5],h:14,m:0},
   {n:'📰 news watch',dow:[1,2,3,4,5],h:13,m:40},
-  {n:'🧪 PM rebalance',dow:[1],h:14,m:30},
   {n:'📊 PM daily mark',dow:[1,2,3,4,5],h:21,m:15},
-  {n:'⚖️ rebalance (paper)',dow:[5],h:21,m:5},
   {n:'🎓 prediction grading',dow:[0,1,2,3,4,5,6],h:22,m:30},
   {n:'📜 historian',dow:[5],h:22,m:45}];
+ if(cyc){
+  const pm=shift(cyc,45);
+  if(pm) jobs.push({n:'🧪 PM rebalance',...pm});
+  jobs.push({n:'⚖️ rebalance ('+envl+')',...cyc});
+ }
  const nowU=new Date();
  const nextOf=j=>{for(let i=0;i<8;i++){
    const c=new Date(Date.UTC(nowU.getUTCFullYear(),nowU.getUTCMonth(),nowU.getUTCDate()+i,j.h,j.m));
@@ -745,6 +801,9 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    const mins=Math.round((c-nowU)/6e4);
    const rel=mins<60?mins+'m':mins<2880?Math.round(mins/60)+'h':Math.round(mins/1440)+'d';
    return `<div class="ev"><span>${j.n}</span><span class="muted">${String(c.getUTCHours()).padStart(2,'0')}:${String(c.getUTCMinutes()).padStart(2,'0')} · in ${rel}</span></div>`;}).join('');
+
+ document.querySelectorAll('.envlbl').forEach(e=>{e.textContent=d.env||'paper';
+  if((d.env||'')==='live') e.style.color='var(--warn,#d08700)';});
 
  // Ops: halt + freshness.
  const ops=d.ops||{};const ages=ops.ages_min||{};
