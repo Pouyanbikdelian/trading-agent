@@ -1708,6 +1708,34 @@ def _cmd_reconnect() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _cmd_gateway(args: list[str]) -> str:
+    r"""``/gateway stop|start|status`` — release or retake the IBKR session.
+
+    IBC runs with ``ExistingSessionDetectedAction=primary``, so the
+    container holds the account's ONE session and the operator cannot log
+    into TWS or the mobile app while it is up. Stopping it is the only way
+    to trade by hand — and doing that previously required an SSH client on
+    the phone.
+
+    ``status`` answers locally (the bot has no docker socket, only the
+    runner does) by asking the runner's last known container state via the
+    command pipeline like everything else.
+    """
+    action = (args[0].lower() if args else "").strip()
+    if action not in ("stop", "start", "status"):
+        return (
+            "usage: `/gateway stop` · `/gateway start` · `/gateway status`\n"
+            "_`stop` halts trading and frees your IBKR session so you can "
+            "log into TWS or mobile. `start` brings it back (~90s + 2FA) "
+            "and leaves trading HALTED until you `/resume`._"
+        )
+    if action == "status":
+        return _cmd_health()
+    if action == "stop":
+        return _queue_command("gateway_stop", {})
+    return _queue_command("gateway_start", {})
+
+
 def _cmd_signal(args: list[str]) -> str:
     r"""``/signal [N]`` — top-N candidates the strategy would consider RIGHT NOW.
 
@@ -2224,6 +2252,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_refresh()
     if cmd == "/reconnect":
         return _cmd_reconnect()
+    if cmd == "/gateway":
+        return _cmd_gateway(args)
     if cmd in ("/forget", "/newtopic"):
         return _cmd_forget()
     if cmd in ("/mandates", "/notes"):

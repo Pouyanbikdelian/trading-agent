@@ -413,6 +413,12 @@ services:
       - logs:/app/logs
       - state:/app/state
       - ./config:/app/config:ro
+      # The socket the paper trader has always had and this service never
+      # did, despite carrying group_add for it. Without it the gateway
+      # auto-restart (IbkrBroker, for a wedged API session) is dead code on
+      # LIVE, and /gateway stop|start cannot work — the two places an
+      # unreachable gateway hurts most.
+      - /var/run/docker.sock:/var/run/docker.sock
     group_add:
       - "${DOCKER_GID:-999}"
     # `-p rebalance=` mirrors the paper command deliberately: live must run

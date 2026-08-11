@@ -73,6 +73,56 @@ def _age_seconds(cmd: Command) -> float | None:
     return (datetime.now(tz=timezone.utc) - ts).total_seconds()
 
 
+class _RecordingBroker:
+    """Broker proxy that writes every submitted order to the ledger.
+
+    Command handlers called ``broker.submit_order`` directly and NOTHING
+    wrote to orders.db, so an operator ``/buy``, ``/sell``, ``/close`` or
+    ``/flatten`` was invisible to ``/orders``, to ``/pending``, to fill
+    reconciliation, to realized P&L, and to ``agents.exits.recent_exits``.
+    Observed 2026-08-11: `/sell UNH` submitted at 14:14:43 and `/orders`
+    a minute later listed only the ten cycle buys.
+
+    The cycle already saved its orders (``cycle.py``), so the gap was
+    exactly the operator's own trades — the ones least likely to be
+    reconstructable from memory later.
+
+    Wrapping the broker rather than patching each handler is deliberate:
+    six handlers submit orders today and the seventh would have been
+    missed. ``__getattr__`` delegates everything else untouched.
+
+    Saved BEFORE submitting, matching ``Cycle.force_flatten_orders``: an
+    order that was sent and then lost to a crash is worse than a PENDING
+    row with no fill, which reconciliation simply never closes.
+    """
+
+    def __init__(self, inner: Any, store: Any) -> None:
+        self._inner = inner
+        self._store = store
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def submit_order(self, order: Any) -> Any:
+        try:
+            self._store.save_order(order)
+        except Exception as e:  # never block a trade on bookkeeping
+            logger.bind(component="command_processor").exception(
+                f"could not record {getattr(order, 'client_order_id', '?')} to the ledger: {e}"
+            )
+        return self._inner.submit_order(order)
+
+
+def _recording(broker: Broker, state_dir: Path) -> Any:
+    try:
+        from trading.execution.store import OrderStore
+
+        return _RecordingBroker(broker, OrderStore(Path(state_dir) / "orders.db"))
+    except Exception as e:
+        logger.bind(component="command_processor").exception(f"ledger unavailable: {e}")
+        return broker
+
+
 def process_pending(
     broker: Broker,
     state_dir: Path,
@@ -182,11 +232,14 @@ def _execute_one(
     # because "try again" is only useful if you know what to wait for.
     needs_lock = cmd.type in _ORDER_SUBMITTING_COMMANDS
     try:
+        # Order-submitting commands go through the recording proxy so the
+        # operator's own trades reach the ledger like the cycle's do.
+        used = _recording(broker, state_dir) if needs_lock else broker
         if needs_lock:
             with execution_lock(state_dir, holder=f"command:{cmd.type.value}"):
-                result = handler(cmd, broker)
+                result = handler(cmd, used)
         else:
-            result = handler(cmd, broker)
+            result = handler(cmd, used)
         mark_executed(cmd, state_dir, status="ok", result=result)
         alerts.info(_format_success(cmd, result))
     except ExecutionBusyError as e:
@@ -206,6 +259,48 @@ def _execute_one(
 # ---------------------------------------------------------------------------
 # Handlers — one per CommandType
 # ---------------------------------------------------------------------------
+
+
+def _h_gateway_stop(_cmd: Command, _broker: Broker) -> dict[str, Any]:
+    """Stop the gateway container, freeing the operator's IBKR session.
+
+    Halts first. IBC holds the account's only session, so while this
+    container is up the operator cannot log into TWS or mobile — and the
+    moment it is down the desk has no broker. Trading is stopped BEFORE
+    the session is released so the runner does not spend the manual
+    session failing order submissions against a dead socket.
+    """
+    from trading.core.config import settings
+    from trading.risk.halt_file import set_halted
+    from trading.runtime.docker_ctl import GATEWAY_CONTAINER, docker_action
+
+    set_halted(settings.state_dir, halted=True, reason="gateway stopped for manual trading")
+    result = docker_action(GATEWAY_CONTAINER, "stop")
+    return {
+        "container": GATEWAY_CONTAINER,
+        "action": "stop",
+        "result": result,
+        "note": "trading HALTED; your IBKR session is free — /gateway start when done",
+    }
+
+
+def _h_gateway_start(_cmd: Command, _broker: Broker) -> dict[str, Any]:
+    """Start the gateway again. Does NOT resume trading.
+
+    Login takes ~90s including 2FA, and the halt stays set on purpose:
+    the operator has just traded by hand, so the desk's view of the book
+    is stale until the next snapshot. Resuming is a separate, deliberate
+    /resume.
+    """
+    from trading.runtime.docker_ctl import GATEWAY_CONTAINER, docker_action
+
+    result = docker_action(GATEWAY_CONTAINER, "start")
+    return {
+        "container": GATEWAY_CONTAINER,
+        "action": "start",
+        "result": result,
+        "note": "logging in (~90s, 2FA). Still HALTED — send /resume when you are ready",
+    }
 
 
 def _h_buy(cmd: Command, broker: Broker) -> dict[str, Any]:
@@ -434,6 +529,8 @@ def _h_reconnect_broker(_cmd: Command, broker: Broker) -> dict[str, Any]:
 
 
 _HANDLERS = {
+    CommandType.GATEWAY_STOP: _h_gateway_stop,
+    CommandType.GATEWAY_START: _h_gateway_start,
     CommandType.BUY: _h_buy,
     CommandType.SELL: _h_sell,
     CommandType.CLOSE: _h_close,

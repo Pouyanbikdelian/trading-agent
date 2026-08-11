@@ -115,6 +115,12 @@ REGISTRY: tuple[Spec, ...] = (
     Spec("/cycle", "force a rebalance now", aliases=("/cycle_now",)),
     Spec("/refresh", "queue a data refresh"),
     Spec("/reconnect", "bounce the broker connection"),
+    Spec(
+        "/gateway",
+        "release or retake the IBKR session for manual trading",
+        usage="/gateway stop|start|status",
+        example="/gateway stop",
+    ),
     # --- copilot
     Spec(
         "/ask", "ask about past decisions or state", usage="/ask QUESTION", example="/ask why MU?"

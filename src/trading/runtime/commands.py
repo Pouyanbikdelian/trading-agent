@@ -68,6 +68,11 @@ class CommandType(str, Enum):
     FX_CONVERT = "fx_convert"
     REFRESH_DATA = "refresh_data"
     RECONNECT_BROKER = "reconnect_broker"
+    # Release / retake the IBKR session so the operator can trade by
+    # hand. NOT order-submitting: deliberately outside the execution
+    # lock, because the whole point is to act when the desk cannot.
+    GATEWAY_STOP = "gateway_stop"
+    GATEWAY_START = "gateway_start"
 
 
 @dataclass(frozen=True)
