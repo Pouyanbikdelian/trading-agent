@@ -317,17 +317,72 @@ class Runner:
         result = check_unheld_positions(self.cycle.broker, state_dir=settings.state_dir)
         if result["ok"]:
             return
-        message = format_unheld_alert(result)
-        try:
-            self.alerts.critical(message)
-        except Exception:
-            logger.bind(component="preflight").exception("unheld alert failed to send")
-        raise RuntimeError(
-            "refusing to start live with unprotected positions: "
-            + ", ".join(result["unheld"])
-            + " — /hold them, or `trading preflight ack` to accept that the "
-            "system may trade them"
+        # ALERT AND HALT — do not raise.
+        #
+        # This raised until 2026-08-11, and raising inside a service with
+        # `restart: unless-stopped` is what turns "we noticed something"
+        # into an outage: the container exits, docker restarts it, the
+        # check fails identically, and the operator gets one CRITICAL
+        # message per attempt. It happened three times in one afternoon —
+        # after the first cycle bought the PM basket, and again the moment
+        # the operator deliberately /unhold'ed a position.
+        #
+        # Worse than the noise: a refusal to start takes down the guards
+        # protecting every OTHER position, so one unprotected name
+        # disarmed the whole book.
+        #
+        # Halting achieves what the raise was reaching for — nothing can
+        # trade, including guard exits, which route through the same
+        # halt-aware command pipeline — while the runner stays up,
+        # observable, and able to receive the /hold or /resume that
+        # clears it.
+        unheld = ", ".join(result["unheld"])
+        if self._announce_unheld(set(result["unheld"])):
+            try:
+                self.alerts.critical(format_unheld_alert(result))
+            except Exception:
+                logger.bind(component="preflight").exception("unheld alert failed to send")
+
+        from trading.risk.halt_file import set_halted
+
+        set_halted(
+            settings.state_dir,
+            halted=True,
+            reason=f"unprotected positions: {unheld}",
         )
+        logger.bind(component="preflight").warning(
+            f"starting HALTED — unprotected positions: {unheld}. "
+            "/hold them or `trading preflight ack`, then /resume."
+        )
+
+    #: Remembers the last set we alerted about, so a restart with the same
+    #: unprotected names is silent. A CHANGED set re-alerts: a new
+    #: unprotected position is new information.
+    UNHELD_ALERT_FILE = "unheld_alerted.json"
+
+    def _announce_unheld(self, unheld: set[str]) -> bool:
+        """True when this exact set has not already been announced.
+
+        Squelching on the symbol set rather than on time: the operator
+        should hear immediately about a position that appeared, and never
+        twice about one they have already been told about and chosen to
+        leave alone.
+        """
+        import json
+
+        path = settings.state_dir / self.UNHELD_ALERT_FILE
+        try:
+            seen = set(json.loads(path.read_text()).get("symbols", []))
+        except Exception:
+            seen = set()
+        if seen == unheld:
+            return False
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"symbols": sorted(unheld)}))
+        except Exception:
+            logger.bind(component="preflight").exception("could not record the unheld alert")
+        return True
 
     async def run_forever(self) -> None:
         """Start APScheduler and block until SIGINT / SIGTERM."""
