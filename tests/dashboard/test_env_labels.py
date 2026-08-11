@@ -87,7 +87,7 @@ class TestCronParsing:
             dow = [0, 1, 2, 3, 4, 5, 6]
         else:
             for part in f.split(","):
-                r = [dowmap.get(x, None) if x in dowmap else int(x) for x in part.split("-")]
+                r = [dowmap.get(x) if x in dowmap else int(x) for x in part.split("-")]
                 if len(r) == 2:
                     dow.extend(i % 7 for i in range(r[0], r[1] + 1))
                 else:
