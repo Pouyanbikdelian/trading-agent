@@ -240,3 +240,39 @@ class TestTheComposeIsStructurallySane:
         """The mirror image — a gid orphaned into volumes."""
         for v in self._svc(name).get("volumes") or []:
             assert ":" in str(v), f"{name}: {v!r} in volumes is not a mount"
+
+
+class TestTelegramCanActuallyRenderIt:
+    """Legacy Markdown cannot nest a `code` span inside _italic_.
+
+    The bot logged "can't parse entities: Can't find end of the entity
+    starting at byte offset 161" on 2026-08-11 and silently retried as
+    plain text. The fallback saved the message, so the only cost was the
+    formatting — but a reply that has to be re-sent unformatted is a
+    reply written against a syntax the renderer does not accept.
+    """
+
+    @staticmethod
+    def _spans(fn_name: str) -> list[str]:
+        import re
+
+        body = BOT[BOT.index(f"def {fn_name}") :][:3000]
+        return re.findall(r'"((?:[^"\\]|\\.)*)"', body)
+
+    def test_no_code_span_sits_inside_an_italic_span(self) -> None:
+        risky = [s for s in self._spans("_cmd_gateway") if "`" in s and "_" in s]
+
+        assert risky == [], f"nested markdown entities: {risky}"
+
+    def test_backticks_pair_in_the_usage_text(self) -> None:
+        from trading.bot.telegram import _cmd_gateway
+
+        assert _cmd_gateway([]).count("`") % 2 == 0
+
+    def test_the_help_line_is_plain(self) -> None:
+        """HELP_TEXT is one long message — one bad span breaks all of it."""
+        from trading.bot.telegram import HELP_TEXT
+
+        line = next(ln for ln in HELP_TEXT.splitlines() if ln.startswith("/gateway"))
+
+        assert "`" not in line and "_" not in line

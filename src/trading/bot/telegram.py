@@ -1725,10 +1725,11 @@ def _cmd_gateway(args: list[str]) -> str:
     action = (args[0].lower() if args else "").strip()
     if action not in ("stop", "start", "status", "state"):
         return (
-            "usage: `/gateway stop` · `/gateway start` · `/gateway status`\n"
-            "_`stop` halts trading and frees your IBKR session so you can "
-            "log into TWS or mobile. `start` brings it back (~90s + 2FA) "
-            "and leaves trading HALTED until you `/resume`._"
+            "usage: `/gateway stop` · `/gateway start` · `/gateway status`\n\n"
+            "stop — halts trading and frees your IBKR session, so you can "
+            "log into TWS or the mobile app and trade by hand.\n"
+            "start — brings it back (~90s, approve the 2FA push). Trading "
+            "stays HALTED until you send /resume."
         )
     if action == "status":
         return _cmd_health()
@@ -1753,18 +1754,18 @@ def _cmd_gateway(args: list[str]) -> str:
             return (
                 f"🔌 {result}\n"
                 "Trading is HALTED and your IBKR session is free — log into TWS or "
-                "mobile now.\n_`/gateway start` when you are done._"
+                "mobile now.\n"
             )
         result = docker_action(GATEWAY_CONTAINER, "start")
         return (
             f"🔌 {result}\n"
             "Logging in (~90s, approve the 2FA push). Still HALTED — "
-            "`/health` to watch, then `/resume`."
+            "send /health to watch, then /resume."
         )
     except Exception as e:
         return (
-            f"⚠️ could not {action} the gateway: `{type(e).__name__}: {e}`\n"
-            "_On the VPS: `docker compose up -d ib-gateway`_"
+            f"⚠️ could not {action} the gateway: {type(e).__name__}: {e}\n"
+            "On the VPS: docker compose up -d ib-gateway"
         )
 
 
