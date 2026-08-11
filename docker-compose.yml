@@ -254,8 +254,6 @@ services:
       # one case it exists for. 2026-08-11: gateway down, runner
       # crash-looping, two /gateway stop commands stuck behind it.
       - /var/run/docker.sock:/var/run/docker.sock
-    group_add:
-      - "${DOCKER_GID:-999}"
       - logs:/app/logs
       # Read-only access to the parquet price cache so /signal,
       # /candidates and any other "what does the strategy see"
@@ -265,6 +263,10 @@ services:
       - data:/app/data:ro
       # Same for config/ so /signal can resolve UNIVERSE -> symbols.
       - ./config:/app/config:ro
+    # For the docker socket above: the bot runs as uid 10001 and the
+    # socket is root:docker, so it needs the host docker group.
+    group_add:
+      - "${DOCKER_GID:-999}"
     command: ["bot", "run"]
     # The image's baked-in healthcheck reads /app/state/heartbeat.json,
     # which the bot does not write — only the runner does. So this has

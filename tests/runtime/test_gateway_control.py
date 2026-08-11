@@ -195,3 +195,48 @@ class TestTheBotActsDirectly:
 
         assert any("docker.sock" in str(v) for v in (svc.get("volumes") or []))
         assert svc.get("group_add")
+
+
+class TestTheComposeIsStructurallySane:
+    """Valid YAML is not correct YAML.
+
+    Adding the docker socket to `bot` on 2026-08-11 inserted `group_add:`
+    in the MIDDLE of the volumes list, so logs, data and config were
+    orphaned into group_add. It parsed cleanly — which is exactly why the
+    yaml.safe_load check at the time passed — and the bot came up without
+    its mounts and stopped answering Telegram.
+
+    Checking the CONTENT of each list, not just that the file parses.
+    """
+
+    @staticmethod
+    def _svc(name: str) -> dict:
+        import yaml
+
+        return yaml.safe_load(COMPOSE)["services"][name]
+
+    @pytest.mark.parametrize("name", ["bot", "trader", "trader-live", "dashboard"])
+    def test_every_service_keeps_its_state_mount(self, name) -> None:
+        vols = [str(v) for v in (self._svc(name).get("volumes") or [])]
+
+        assert any(v.startswith("state:") for v in vols), f"{name} lost its state mount"
+
+    @pytest.mark.parametrize("name", ["bot", "trader", "trader-live"])
+    def test_the_long_running_services_keep_logs(self, name) -> None:
+        vols = [str(v) for v in (self._svc(name).get("volumes") or [])]
+
+        assert any(v.startswith("logs:") for v in vols), f"{name} lost its logs mount"
+
+    @pytest.mark.parametrize("name", ["bot", "trader", "trader-live", "dashboard"])
+    def test_group_add_contains_only_a_gid(self, name) -> None:
+        """The failure signature: a volume string ends up in group_add."""
+        for entry in self._svc(name).get("group_add") or []:
+            assert ":" not in str(entry).replace("${DOCKER_GID:-999}", ""), (
+                f"{name}: {entry!r} looks like a volume, not a group id"
+            )
+
+    @pytest.mark.parametrize("name", ["bot", "trader", "trader-live"])
+    def test_no_volume_entry_is_a_bare_gid(self, name) -> None:
+        """The mirror image — a gid orphaned into volumes."""
+        for v in self._svc(name).get("volumes") or []:
+            assert ":" in str(v), f"{name}: {v!r} in volumes is not a mount"
