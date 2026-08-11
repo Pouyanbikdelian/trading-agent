@@ -379,6 +379,20 @@ def answer(
             # deflected to "I'm read-only" when asked, which was true
             # about orders and irrelevant to the question.
             "NOW_lesson_book": facts.lessons_now(state_dir),
+            # Every setting that governs what the system will DO, read
+            # live from Settings and the guards' own env helpers.
+            #
+            # Included unconditionally rather than on a keyword match:
+            # "should I be worried about this drawdown" needs the limits
+            # as much as "what is our max position size" does, and the
+            # operator should never have to phrase a question a
+            # particular way to get a correct answer. Without this the
+            # copilot answered configuration questions from the model's
+            # priors — i.e. invented them (operator, 2026-08-10).
+            "NOW_configuration": facts.config_now(state_dir),
+            # How to operate it: the cycle pipeline in order, the command
+            # sequences, and which order arming must happen in.
+            "NOW_operating_manual": facts.operating_manual(),
         }
         if sym:
             now["NOW_market"] = facts.last_close(data_dir, sym)

@@ -9,6 +9,7 @@ carries its own timestamp so the engine can cite data ages honestly.
 from __future__ import annotations
 
 import json
+import os as _os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -278,3 +279,255 @@ def last_close(data_dir: Path, symbol: str) -> dict[str, Any]:
         }
     except Exception:
         return {"available": False, "symbol": symbol.upper()}
+
+
+def config_now(state_dir: Path) -> dict[str, Any]:
+    """Every setting that governs what the system will actually do.
+
+    The copilot could cite positions, orders, lessons and halt state — and
+    had NO source at all for configuration. Asked "what's our guard %" or
+    "how big is the PM sleeve", it answered from the model's general
+    knowledge, which is a polite way of saying it made something up. That
+    is the complaint that produced this function (operator, 2026-08-10).
+
+    Everything here is READ FROM THE LIVE OBJECTS — Settings, the guards'
+    own env helpers, the mode file — never from a hand-maintained copy.
+    That is deliberate and it is the lesson of the 2026-08-07 audit: this
+    project's most dangerous defects were all documentation describing
+    wiring that did not exist. A config summary maintained by hand would
+    become exactly that, and the copilot would state it with confidence.
+    """
+    # get_settings() rather than the module-level `settings` singleton.
+    # The singleton is bound at first import, so anything importing early
+    # would report a stale snapshot — the exact defect fixed in pm_signal
+    # on 2026-08-07 ("I changed the sleeve and nothing happened"). A
+    # config reporter that reports the config as it was at import time
+    # would be worse than useless: confidently wrong.
+    from trading.core.config import get_settings
+    from trading.runtime.guards import PRICE_SANITY_PCT, _env_f
+    from trading.runtime.guards import enabled as guards_enabled
+
+    s = get_settings()
+
+    out: dict[str, Any] = {}
+
+    out["environment"] = {
+        "trading_env": s.trading_env,
+        "live_armed": s.is_live_armed(),
+        "_armed_means": (
+            "both TRADING_ENV=live AND ALLOW_LIVE_TRADING=true. Note that "
+            "docker-compose `environment:` overrides .env — trust "
+            "`trading status`, not the file."
+        ),
+        "state_dir": str(s.state_dir),
+        "broker": f"IBKR {s.ibkr_host}:{s.ibkr_port}",
+        "_port_meaning": "4001 = LIVE gateway, 4002 = paper",
+    }
+
+    out["who_trades"] = {
+        "agent_pm_sleeve_pct": s.agent_pm_sleeve_pct,
+        "strategy_sleeve_pct": s.strategy_sleeve_pct,
+        "_meaning": (
+            "INDEPENDENT fractions of total account equity, one per book. "
+            "strategy_sleeve_pct=0.0 means the mechanical momentum strategy "
+            "still computes signals (for the benchmark and shadow ledger) "
+            "but every weight is multiplied by zero, so it CANNOT place an "
+            "order. At that setting the Agent PM is the only book trading."
+        ),
+        "pm_sleeve_capital_usd": s.pm_sleeve_capital_usd,
+        "_capital_cap_meaning": (
+            "Hard DOLLAR ceiling on the PM sleeve, on top of the fraction. "
+            "A fraction alone grows with the account; this does not. "
+            "Converted to base currency at the cycle's FX rate. 0 disables."
+        ),
+        "agent_pm_signal_max_age_h": s.agent_pm_signal_max_age_h,
+        "_freshness_meaning": (
+            "A PM decision older than this is REFUSED, not traded. So "
+            "`/pm run` must precede `/cycle` within this window."
+        ),
+    }
+
+    out["risk_limits"] = {
+        "max_gross_exposure": s.max_gross_exposure,
+        "max_position_pct": s.max_position_pct,
+        "max_daily_loss_pct": s.max_daily_loss_pct,
+        "max_drawdown_pct": s.max_drawdown_pct,
+        "max_margin_borrowing_pct": s.max_margin_borrowing_pct,
+        "_all_are": "fractions of TOTAL account equity, not of the sleeve",
+        "_kill_switches_HALT_they_do_not_sell": (
+            "max_daily_loss_pct and max_drawdown_pct stop trading. They "
+            "never liquidate. Nothing in this system reduces exposure "
+            "automatically except the position guards."
+        ),
+        "_config_risk_yaml_is_NOT_read": (
+            "config/risk.yaml is reference only — no loader exists. .env is "
+            "the single source for these numbers."
+        ),
+    }
+
+    ratchet_floor = _env_f("GUARD_TRAIL_FLOOR", None)
+    ratchet_tighten = _env_f("GUARD_TRAIL_TIGHTEN", None)
+    ratchet_on = (
+        ratchet_floor is not None
+        and ratchet_tighten is not None
+        and 0.0 < ratchet_floor < 1.0
+        and ratchet_tighten > 0.0
+    )
+    out["position_guards"] = {
+        "enabled": guards_enabled(),
+        "_what_they_are": (
+            "ATR-style TRAILING STOPS. The only mechanism in the system "
+            "that exits a position on its own. They apply to EVERY position "
+            "in the account regardless of who opened it — including "
+            "personal holdings. `/hold SYMBOL` is the only exemption."
+        ),
+        "atr_mult": _env_f("GUARD_ATR_MULT", 3.0),
+        "trail_min_pct": _env_f("GUARD_TRAIL_MIN_PCT", 8.0),
+        "trail_max_pct": _env_f("GUARD_TRAIL_MAX_PCT", 20.0),
+        "_stop_formula": (
+            "stop_distance = max(trail_min, min(trail_max, atr_mult x the "
+            "symbol's mean absolute daily move)). Measured DOWN FROM THE "
+            "HIGH-WATER MARK since entry, not from today's open, and the "
+            "stop only ever rises. Most S&P names land on the floor."
+        ),
+        "take_profit_pct": _env_f("GUARD_TP_PCT", None),
+        "profit_ratchet_on": ratchet_on,
+        "ratchet_floor": ratchet_floor,
+        "ratchet_tighten": ratchet_tighten,
+        "_ratchet_meaning": (
+            "When on, the stop TIGHTENS as a position gains: "
+            "effective = base x max(floor, 1 - tighten x gain). At "
+            "floor=0.4/tighten=1.2 a +50% winner sits on 0.4x its base "
+            "stop. When off, the trail stays at its full width."
+        ),
+        "price_sanity_pct": _env_f("GUARD_PRICE_SANITY_PCT", PRICE_SANITY_PCT),
+        "_price_sanity_meaning": (
+            "Guards refuse to exit when the yfinance quote disagrees with "
+            "the broker's own mark by more than this — a split or bad tick "
+            "otherwise reads as a crash."
+        ),
+        "cooldown_hours_per_symbol": 24.0,
+        "_after_a_guard_exit": (
+            "NOTHING is re-deployed automatically. The cash sits until the "
+            "next scheduled cycle. There is no post-stop-out policy."
+        ),
+    }
+
+    out["execution"] = {
+        "order_type": "MARKET",
+        "time_in_force": "DAY",
+        "_no_algos": (
+            "Every order the risk manager builds is a plain market order. "
+            "No VWAP, TWAP, limit, mid-price or IBKR Adaptive algo. Only "
+            "manual /buy and /sell accept an optional limit price."
+        ),
+        "long_only": True,
+        "_long_only_meaning": (
+            "Negative target weights clamp to 0 and sells clamp to the "
+            "position net of working orders. The system cannot go short."
+        ),
+    }
+
+    out["schedule"] = {
+        "cycle_cron_utc": _os.getenv("CRON", "(compose default)"),
+        "agent_pm_runs": "45 minutes before the cycle, derived from the same cron",
+        "broker_readiness_check": "1 hour before the cycle",
+        "_all_jobs_live_in_the_runner": (
+            "Every scheduled job — snapshots, macro, rotation, historian, "
+            "lessons, guards, PM, committee — runs inside the trader "
+            "container's scheduler. If no runner is up, NOTHING updates "
+            "and /cycle and /pm run write a flag nobody reads."
+        ),
+    }
+
+    out["approval_gate"] = {
+        "require_cycle_approval": s.require_cycle_approval,
+        "timeout_seconds": s.cycle_approval_timeout_s,
+        "_meaning": (
+            "When true the cycle computes the basket, shows it, and waits "
+            "for /approve, /approve N, /approve flat or /reject. No reply "
+            "within the timeout auto-REJECTS — it never auto-submits."
+        ),
+    }
+
+    try:
+        from trading.runtime.mode import read_mode
+
+        st = read_mode(Path(state_dir) / "mode.json")
+        out["operator_mode"] = {
+            "mode": st.mode.value,
+            "set_by": st.set_by,
+            "set_at": st.set_at,
+            "_meaning": (
+                "bull/neutral pass through. defense/bear scale the whole "
+                "book down. flatten zeroes all targets. Applies to the PM "
+                "sleeve as well as the mechanical strategy."
+            ),
+        }
+    except Exception:
+        out["operator_mode"] = {"mode": "unknown"}
+
+    try:
+        from trading.runner.holds import load_holds
+
+        held = sorted(load_holds(Path(state_dir)))
+        out["holds"] = {
+            "symbols": held,
+            "_meaning": (
+                "Pinned symbols. The cycle will neither sell NOR buy them — "
+                "frozen in both directions — and the guards skip them. "
+                "Manual /buy /sell /close /flatten still work. A hold on a "
+                "symbol you do not own blocks the system ever opening it."
+            ),
+        }
+    except Exception:
+        out["holds"] = {"symbols": []}
+
+    return out
+
+
+def operating_manual() -> dict[str, Any]:
+    """How to operate the system — the sequences, in order.
+
+    Mirrors ``Cycle._run_inner``. Kept next to ``config_now`` so the
+    copilot can answer "how do I refresh the PM" with the actual order of
+    operations rather than a plausible guess.
+    """
+    return {
+        "what_a_cycle_does_in_order": [
+            "1. Load the universe (~503 S&P symbols) and refresh prices from yfinance (~2 min)",
+            "1c. Add the PM's own picks so its off-universe ETFs are priceable",
+            "3. Fetch the broker account snapshot",
+            "4. Intraday kill switches (daily loss, drawdown) — halts, never sells",
+            "5. Mechanical strategy weights, scaled by STRATEGY_SLEEVE_PCT",
+            "6b. Operator mode overlay on the strategy weights",
+            "7c. Merge the Agent PM's targets, scaled by sleeve %, dollar cap and mode",
+            "8. Risk manager: target weights -> per-name delta orders, all caps applied",
+            "8d. Approval gate if REQUIRE_CYCLE_APPROVAL — shows the basket and waits",
+            "9. Submit under the execution lock, then reconcile fills",
+        ],
+        "refresh_the_pm_and_trade": [
+            "/pm run   — convenes the PM; it reassesses and writes a NEW decision (~1 min)",
+            "/pm       — read what it decided",
+            "/cycle    — turns that decision into orders (~4 min; refuses a decision older than AGENT_PM_SIGNAL_MAX_AGE_H)",
+        ],
+        "_pm_run_first": (
+            "/cycle ALONE re-trades the EXISTING decision. It does not ask "
+            "the PM to think again. /pm run is what makes it reassess."
+        ),
+        "_committee_is_separate": (
+            "/committee is the multi-agent debate that feeds context. It is "
+            "not required before /pm run and does not itself decide trades."
+        ),
+        "stopping_and_starting": {
+            "stand_down": "docker compose stop trader-live — a stopped container is unambiguous",
+            "halt": "/halt stops NEW trading. It does NOT close positions and does NOT flatten.",
+            "exit_everything": "/flatten — the only command that liquidates",
+            "resume": "/resume clears the halt",
+        },
+        "arming_order_matters": [
+            "Gateway to LIVE mode FIRST",
+            "THEN point STATE_DIR at the live directory",
+            "The reverse order wrote paper equity into the live kill-switch baseline on 2026-08-07 and halted the account at -91.82%. State dirs are now stamped and a mismatched runner refuses to start.",
+        ],
+    }
