@@ -149,3 +149,49 @@ class TestTheComposeMount:
             has_sock = any("docker.sock" in str(v) for v in (svc.get("volumes") or []))
             has_group = bool(svc.get("group_add"))
             assert has_sock == has_group, f"{name}: socket={has_sock} group_add={has_group}"
+
+
+class TestTheBotActsDirectly:
+    """The runner cannot be the executor of a command whose whole purpose
+    is to work when the runner is down.
+
+    2026-08-11: /gateway stop worked (runner alive), the gateway went
+    away, and cli.py connects the broker BEFORE starting the scheduler —
+    so the runner crash-looped, the command processor never ran, and two
+    /gateway stop commands sat in the queue waiting for a process that
+    could not come back. /gateway start was unreachable in the exact
+    situation it exists for.
+    """
+
+    def test_the_bot_does_not_queue_gateway_commands(self) -> None:
+        body = BOT[BOT.index("def _cmd_gateway") :][:3000]
+
+        assert '_queue_command("gateway_stop"' not in body
+        assert '_queue_command("gateway_start"' not in body
+
+    def test_the_bot_calls_docker_directly(self) -> None:
+        body = BOT[BOT.index("def _cmd_gateway") :][:3000]
+
+        assert 'docker_action(GATEWAY_CONTAINER, "stop")' in body
+        assert 'docker_action(GATEWAY_CONTAINER, "start")' in body
+
+    def test_stopping_still_halts_first(self) -> None:
+        body = BOT[BOT.index("def _cmd_gateway") :][:3000]
+
+        assert body.index("set_halted(") < body.index('docker_action(GATEWAY_CONTAINER, "stop")')
+
+    def test_a_docker_failure_is_reported_with_the_manual_fallback(self) -> None:
+        """If the socket is not mounted the operator needs the SSH line,
+        not a traceback."""
+        body = BOT[BOT.index("def _cmd_gateway") :][:3000]
+
+        assert "could not" in body
+        assert "docker compose up -d ib-gateway" in body
+
+    def test_the_bot_has_the_docker_socket(self) -> None:
+        import yaml
+
+        svc = yaml.safe_load(COMPOSE)["services"]["bot"]
+
+        assert any("docker.sock" in str(v) for v in (svc.get("volumes") or []))
+        assert svc.get("group_add")

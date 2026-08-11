@@ -1723,7 +1723,7 @@ def _cmd_gateway(args: list[str]) -> str:
     command pipeline like everything else.
     """
     action = (args[0].lower() if args else "").strip()
-    if action not in ("stop", "start", "status"):
+    if action not in ("stop", "start", "status", "state"):
         return (
             "usage: `/gateway stop` · `/gateway start` · `/gateway status`\n"
             "_`stop` halts trading and frees your IBKR session so you can "
@@ -1732,9 +1732,40 @@ def _cmd_gateway(args: list[str]) -> str:
         )
     if action == "status":
         return _cmd_health()
-    if action == "stop":
-        return _queue_command("gateway_stop", {})
-    return _queue_command("gateway_start", {})
+    # Acted on HERE, not queued. The runner executes queued commands, and
+    # the runner cannot start without the gateway (cli.py connects the
+    # broker before the scheduler). Queueing made /gateway start
+    # unreachable in the one situation it exists for: 2026-08-11, gateway
+    # down, runner crash-looping, two /gateway stop commands stuck in the
+    # queue waiting for a process that could never come back.
+    from trading.runtime.docker_ctl import GATEWAY_CONTAINER, container_state, docker_action
+
+    if action == "state":
+        return f"gateway: {container_state()}"
+    try:
+        if action == "stop":
+            # Halt FIRST: the desk must not spend the manual session
+            # firing orders at a socket that is about to disappear.
+            from trading.risk.halt_file import set_halted
+
+            set_halted(settings.state_dir, halted=True, reason="gateway stopped for manual trading")
+            result = docker_action(GATEWAY_CONTAINER, "stop")
+            return (
+                f"🔌 {result}\n"
+                "Trading is HALTED and your IBKR session is free — log into TWS or "
+                "mobile now.\n_`/gateway start` when you are done._"
+            )
+        result = docker_action(GATEWAY_CONTAINER, "start")
+        return (
+            f"🔌 {result}\n"
+            "Logging in (~90s, approve the 2FA push). Still HALTED — "
+            "`/health` to watch, then `/resume`."
+        )
+    except Exception as e:
+        return (
+            f"⚠️ could not {action} the gateway: `{type(e).__name__}: {e}`\n"
+            "_On the VPS: `docker compose up -d ib-gateway`_"
+        )
 
 
 def _cmd_signal(args: list[str]) -> str:

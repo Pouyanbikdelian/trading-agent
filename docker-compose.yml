@@ -248,6 +248,14 @@ services:
       - .env
     volumes:
       - state:/app/state
+      # /gateway acts from the BOT, not the runner: the runner cannot
+      # start without the gateway (the broker connects before the
+      # scheduler), so a queued gateway command is unreachable in the
+      # one case it exists for. 2026-08-11: gateway down, runner
+      # crash-looping, two /gateway stop commands stuck behind it.
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-999}"
       - logs:/app/logs
       # Read-only access to the parquet price cache so /signal,
       # /candidates and any other "what does the strategy see"
