@@ -10,6 +10,9 @@ TODAY with the memory of every yesterday attached.
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +24,57 @@ def _read_json(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text()) if path.exists() else {}
     except Exception:
         return {}
+
+
+MONITOR_MAX_AGE_H = 36.0
+"""Hours before a monitor file stops counting as a current reading.
+
+36h matches ``news_watch.load`` and cleanly separates the two real cases:
+the runner is up and these are hours old, or the runner is down and they
+are days old. Resolved per call so a change takes effect without a
+rebuild — the same frozen-at-import trap that bit ``pm_signal``.
+"""
+
+
+def _monitor_max_age_h() -> float:
+    raw = os.getenv("MONITOR_MAX_AGE_H")
+    if raw is None:
+        return MONITOR_MAX_AGE_H
+    try:
+        v = float(raw)
+    except ValueError:
+        logger.bind(component="agents").warning(f"MONITOR_MAX_AGE_H={raw!r} not a number; default")
+        return MONITOR_MAX_AGE_H
+    # 0 or negative would silently blind the desk entirely. Refuse it.
+    return v if v > 0 else MONITOR_MAX_AGE_H
+
+
+def _read_fresh_json(
+    path: Path, label: str, *, gaps: list[str], max_age_h: float
+) -> dict[str, Any]:
+    """``_read_json``, but {} once the reading is older than ``max_age_h``.
+
+    A missing file is a gap too: absent is not zero, and the desk should
+    hear "no macro dial" rather than infer a calm one from an empty dict.
+    """
+    raw = _read_json(path)
+    if not raw:
+        gaps.append(f"{label}: no reading on disk")
+        return {}
+    stamp = raw.get("last_polled_at") or raw.get("asof") or raw.get("t")
+    if not stamp:
+        # Undated file: cannot be verified, so it cannot be trusted.
+        gaps.append(f"{label}: reading carries no timestamp")
+        return {}
+    try:
+        age_h = (datetime.now(tz=timezone.utc) - datetime.fromisoformat(stamp)).total_seconds() / 3600
+    except Exception:
+        gaps.append(f"{label}: unreadable timestamp {stamp!r}")
+        return {}
+    if age_h > max_age_h:
+        gaps.append(f"{label}: {age_h:.0f}h old (max {max_age_h:.0f}h) — DROPPED, treat as unknown")
+        return {}
+    return raw
 
 
 def _load_fundamentals(data_dir: Path) -> dict[str, Any]:
@@ -143,11 +197,29 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         logger.bind(component="agents").warning(f"context: mandates unavailable ({e})")
 
     # --- monitors (already-computed state files; no recomputation)
-    ctx["macro_dial"] = _read_json(state_dir / "macro_monitor.json").get("readings", {})
-    ctx["vol_surface"] = _read_json(state_dir / "options_monitor.json").get("metrics", {})
-    ctx["spy_vix_triggers"] = _read_json(state_dir / "advisor.json").get("active", [])
-    style = _read_json(state_dir / "style_advisor.json")
+    #
+    # Freshness-gated. These four are the desk's ONLY view of regime and
+    # volatility, and every one is written by a scheduled job inside the
+    # runner. Stop the runner and the files simply stop changing — they
+    # do not disappear, so `_read_json` kept returning a VIX reading and
+    # a macro dial from whenever the runner was last up, and the PM
+    # reasoned over them as if they were current. The runner was stopped
+    # 2026-08-07..08-11 and nothing anywhere said the risk picture was
+    # four days old.
+    #
+    # Dropped rather than passed through with a label: a stale VIX
+    # presented as today's VIX is worse than no VIX, because the desk
+    # cannot tell it is blind. `_data_gaps` is how it is told.
+    gaps: list[str] = []
+    _mon = partial(_read_fresh_json, gaps=gaps, max_age_h=_monitor_max_age_h())
+    ctx["macro_dial"] = _mon(state_dir / "macro_monitor.json", "macro_dial").get("readings", {})
+    ctx["vol_surface"] = _mon(state_dir / "options_monitor.json", "vol_surface").get("metrics", {})
+    ctx["spy_vix_triggers"] = _mon(state_dir / "advisor.json", "spy_vix_triggers").get("active", [])
+    style = _mon(state_dir / "style_advisor.json", "style_leader")
     ctx["style_leader"] = style.get("leader")
+    if gaps:
+        ctx["_data_gaps"] = gaps
+        logger.bind(component="agents").warning(f"context: stale monitors dropped: {gaps}")
 
     # --- permanent memory
     try:
