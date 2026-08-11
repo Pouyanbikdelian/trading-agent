@@ -366,19 +366,46 @@ def answer(
                 record_exchange(state_dir, question, no_evidence, symbol=sym, known_symbols=known)
             return no_evidence
 
+        def _safe(label: str, fn: Any, *a: Any, **kw: Any) -> Any:
+            """One unreadable fact must not cost the whole answer.
+
+            On 2026-08-11 a freshly-armed live account had a zero-byte
+            ``orders.db`` — no schema until the first order is written —
+            and ``orders_and_fills`` raised ``no such table: orders``
+            straight through ``answer()``. Every question, however
+            unrelated, came back as `copilot error: OperationalError`.
+
+            Degrading names what is missing instead of hiding it: the
+            charter already requires the model to say when the evidence
+            does not cover the question, and it can only do that if the
+            gap is in the evidence rather than in the stack trace.
+            """
+            try:
+                return fn(*a, **kw)
+            except Exception as e:
+                logger.bind(component="copilot").warning(f"evidence {label} unavailable: {e}")
+                return {
+                    "unavailable": f"{type(e).__name__}: {e}",
+                    "_meaning": (
+                        "This evidence could not be read for this question. If the "
+                        "answer depends on it, say exactly that it is unavailable — "
+                        "do not substitute a guess or another book's numbers."
+                    ),
+                }
+
         now = {
             # Two DIFFERENT books — labeled so the model can't conflate
             # them (it did, 2026-07-16, calling the trading account "PM
             # holdings").
-            "NOW_trading_account_paper": facts.positions_now(state_dir, sym),
-            "NOW_trading_account_orders": facts.orders_and_fills(state_dir, sym),
-            "NOW_agent_pm_simulated_book": facts.pm_book(state_dir, data_dir),
-            "NOW_risk_state": facts.risk_now(state_dir),
+            "NOW_trading_account_paper": _safe("positions", facts.positions_now, state_dir, sym),
+            "NOW_trading_account_orders": _safe("orders", facts.orders_and_fills, state_dir, sym),
+            "NOW_agent_pm_simulated_book": _safe("pm_book", facts.pm_book, state_dir, data_dir),
+            "NOW_risk_state": _safe("risk", facts.risk_now, state_dir),
             # What the desk believes it has learned. Without this the
             # copilot cannot answer "what lessons do we have" at all — it
             # deflected to "I'm read-only" when asked, which was true
             # about orders and irrelevant to the question.
-            "NOW_lesson_book": facts.lessons_now(state_dir),
+            "NOW_lesson_book": _safe("lessons", facts.lessons_now, state_dir),
             # Every setting that governs what the system will DO, read
             # live from Settings and the guards' own env helpers.
             #
@@ -389,18 +416,18 @@ def answer(
             # particular way to get a correct answer. Without this the
             # copilot answered configuration questions from the model's
             # priors — i.e. invented them (operator, 2026-08-10).
-            "NOW_configuration": facts.config_now(state_dir),
+            "NOW_configuration": _safe("config", facts.config_now, state_dir),
             # How to operate it: the cycle pipeline in order, the command
             # sequences, and which order arming must happen in.
-            "NOW_operating_manual": facts.operating_manual(),
+            "NOW_operating_manual": _safe("manual", facts.operating_manual),
             # How to TALK to it: which door a message goes through, how
             # tone grades a mandate, and that mandates expire. Asked how
             # to make a view stick, the copilot knew the desk's state but
             # not the rules of its own interface (operator, 2026-08-11).
-            "NOW_operator_interface": facts.operator_interface(state_dir),
+            "NOW_operator_interface": _safe("interface", facts.operator_interface, state_dir),
         }
         if sym:
-            now["NOW_market"] = facts.last_close(data_dir, sym)
+            now["NOW_market"] = _safe("market", facts.last_close, data_dir, sym)
 
         evidence = json.dumps(
             {

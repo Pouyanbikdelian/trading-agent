@@ -122,4 +122,4 @@ def test_it_is_wired_into_the_evidence_bundle() -> None:
     src = Path("src/trading/copilot/engine.py").read_text()
 
     assert "NOW_operator_interface" in src
-    assert "facts.operator_interface(state_dir)" in src
+    assert '_safe("interface", facts.operator_interface, state_dir)' in src
