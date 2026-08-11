@@ -107,6 +107,7 @@ HELP_TEXT = (
     "/halt \\[reason] — refuse new trades; force flatten\n"
     "/resume — clear halt, reset failure counter\n"
     "/reconnect — bounce the broker connection\n"
+    "/gateway stop|start|status — release your IBKR session so you can trade by hand in TWS or mobile; stop also halts\n"
 )
 
 
