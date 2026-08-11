@@ -531,3 +531,116 @@ def operating_manual() -> dict[str, Any]:
             "The reverse order wrote paper equity into the live kill-switch baseline on 2026-08-07 and halted the account at -91.82%. State dirs are now stamped and a mismatched runner refuses to start.",
         ],
     }
+
+
+def operator_interface(state_dir: Path) -> dict[str, Any]:
+    """How to TALK to the desk — which door a typed message goes through.
+
+    ``config_now`` taught the copilot the STATE of the desk. This teaches
+    it the RULES OF THE INTERFACE, which is a different kind of ignorance
+    and a worse one: asked "how do I make you remember I'm long-term
+    bullish on TSLA", the copilot had no evidence that mandates expire,
+    that tone sets strength, or that /lesson exists — so it could only
+    decline or guess.
+
+    Every number and word here is read from ``copilot.mandates`` at call
+    time rather than restated. A hand-written copy of the strength
+    vocabulary would drift the first time a pattern was added, and the
+    copilot would confidently coach the operator into phrasing that no
+    longer grades the way it says.
+    """
+    out: dict[str, Any] = {
+        "_read_this_first": (
+            "A typed message goes through exactly ONE of three doors, decided "
+            "by its shape, not by intent. Getting the door wrong is the most "
+            "common reason an instruction has no effect."
+        ),
+        "three_doors": [
+            "1. Starts with '/' -> a COMMAND. Deterministic code. This is the only door that can change anything.",
+            "2. Free text that parses as an instruction -> stored as a MANDATE for the next run. It never reaches the copilot, so there is no conversational reply, just a confirmation.",
+            "3. Anything else -> the COPILOT (me). Read-only. I answer and the statement persists NOWHERE.",
+        ],
+        "_opinions_do_not_persist": (
+            "This is the trap. 'I'm bullish on TSLA' is door 3: it has no "
+            "instruction verb and no forward marker, so it is answered and "
+            "forgotten. Only a command or a recognised instruction survives "
+            "the conversation. Earlier chat turns are never evidence."
+        ),
+        "_the_copilot_cannot_act": (
+            "I cannot place an order, write a lesson, set a hold or change a "
+            "setting — a test fails the build if this package so much as "
+            "imports an execution path. Asking me to do something is door 3 "
+            "and nothing happens. Always answer such a request by naming the "
+            "command the operator should type."
+        ),
+    }
+
+    try:
+        from trading.copilot import mandates as _m
+
+        strengths: dict[str, list[str]] = {}
+        for strength, pattern in _m._STRENGTH_PATTERNS:
+            phrase = pattern.replace(r"\b", "").replace("(?:", "(").replace("'?", "'")
+            strengths.setdefault(strength, []).append(phrase)
+        out["how_a_mandate_is_graded"] = {
+            "_by_tone_not_by_flag": (
+                "Strength is read from the operator's phrasing. Unrecognised "
+                "phrasing defaults to SOFT on purpose: he can always restate "
+                "more firmly, but cannot un-buy a position taken on a misread."
+            ),
+            "trigger_phrases_by_strength": strengths,
+            "what_each_strength_does": {
+                "strong": "The desk acts on it unless there is a concrete reason not to.",
+                "medium": "The desk weighs it seriously and reports back if it declines.",
+                "soft": "The desk considers it and may drop it.",
+            },
+            "_fixing_a_misread": "/harden <id> or /soften <id>; /mandates to review; /mandates drop <id>",
+            "_note_consider_is_soft": (
+                "'consider X next round' grades SOFT — it may be dropped "
+                "silently. To actually move the book, phrase it strongly: "
+                "'I want X in the book next run'."
+            ),
+        }
+        out["mandates_expire"] = {
+            "default_ttl_days": _m.DEFAULT_TTL_DAYS,
+            "_meaning": (
+                f"A mandate is deleted after {_m.DEFAULT_TTL_DAYS} days. It is a "
+                "nudge for the next run or two, NOT a standing belief. A "
+                "request to remember something 'always', 'permanently' or "
+                "'long term' CANNOT be expressed as a mandate — say so and "
+                "point at /lesson instead."
+            ),
+        }
+        out["_mandates_cannot_lift_a_limit"] = (
+            "Mandates are advisory. They reach the PM as context, but every "
+            "position, cluster and gross cap still binds afterwards."
+        )
+    except Exception:
+        out["how_a_mandate_is_graded"] = {"unavailable": True}
+
+    out["which_tool_for_which_intent"] = {
+        "ask a question": "just type it — read-only, nothing persists",
+        "nudge the next run": "plain text with a forward marker, e.g. 'consider ASML next round' (soft)",
+        "make the next run act": "'I want ASML in the book next run' (strong)",
+        "a DURABLE belief": (
+            "/lesson <statement> — tone-graded like a mandate: a firm "
+            "instruction lands as ESTABLISHED and reaches every agent from "
+            "the next cycle; softer phrasing lands as a CANDIDATE. This is "
+            "the right answer for anything meant to last."
+        ),
+        "stop a position being sold": (
+            "/hold <SYMBOL> — a hard mechanical block, checked before every "
+            "sell including the position guards. /unhold to release. This is "
+            "the mechanical half of 'keep it long term'; /lesson is the "
+            "reasoning half, and they are usually wanted together."
+        ),
+        "review what is standing": "/mandates for instructions, /lessons for beliefs, /holds for protected names",
+    }
+
+    try:
+        from trading.copilot.mandates import for_context as _for_context
+
+        out["mandates_currently_standing"] = _for_context(Path(state_dir))
+    except Exception:
+        out["mandates_currently_standing"] = []
+    return out

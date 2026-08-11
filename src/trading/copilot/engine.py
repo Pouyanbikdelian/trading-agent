@@ -393,6 +393,11 @@ def answer(
             # How to operate it: the cycle pipeline in order, the command
             # sequences, and which order arming must happen in.
             "NOW_operating_manual": facts.operating_manual(),
+            # How to TALK to it: which door a message goes through, how
+            # tone grades a mandate, and that mandates expire. Asked how
+            # to make a view stick, the copilot knew the desk's state but
+            # not the rules of its own interface (operator, 2026-08-11).
+            "NOW_operator_interface": facts.operator_interface(state_dir),
         }
         if sym:
             now["NOW_market"] = facts.last_close(data_dir, sym)
