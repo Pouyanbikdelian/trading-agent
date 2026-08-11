@@ -184,6 +184,10 @@ def check_guards(
     exits_done: dict[str, str] = state.setdefault("exits", {})
     exit_orders: list[dict[str, Any]] = []
     alerts: list[str] = []
+    # The per-name exit messages, also appended to `alerts` so existing
+    # callers are unaffected. Tracked separately so the runner can swap
+    # them for one roll-up when several fire at once.
+    exit_alerts: list[str] = []
 
     tp_pct = _env_f("GUARD_TP_PCT", None)
     # Per-position profit ratchet: both knobs must be set sensibly, else the
@@ -252,19 +256,39 @@ def check_guards(
             )
             continue
 
+        # Every exit carries the numbers the operator needs to decide what
+        # to do next — proceeds, realized P&L, why. The runner only reads
+        # `symbol` and `reason`, so the extra keys cost nothing there and
+        # save the roll-up from re-deriving what is already in scope.
+        qty = abs(float(p.get("qty", 0.0)))
+
+        def _record(reason: str) -> dict[str, Any]:
+            return {
+                "symbol": sym,
+                "reason": reason,
+                "price": px,
+                "qty": qty,
+                "proceeds": qty * px,
+                "entry": avg,
+                "pnl_pct": (px / avg - 1.0) * 100.0 if avg else 0.0,
+                "pnl_usd": (px - avg) * qty,
+            }
+
         if px <= stop_level:
-            exit_orders.append({"symbol": sym, "reason": "trailing_stop"})
-            alerts.append(
+            exit_orders.append({**_record("trailing_stop"), "hwm": float(st["hwm"])})
+            msg = (
                 f"🛑 *Trailing stop* {sym}: {px:.2f} ≤ stop {stop_level:.2f} "
                 f"(HWM {float(st['hwm']):.2f} − {eff_pct:.1f}%"
                 f"{' ratcheted' if ratchet_on and eff_pct < float(st['stop_pct']) else ''}) — closing"
             )
+            alerts.append(msg)
+            exit_alerts.append(msg)
             exits_done[sym] = now.isoformat()
         elif tp_pct and px >= avg * (1.0 + tp_pct / 100.0):
-            exit_orders.append({"symbol": sym, "reason": "take_profit"})
-            alerts.append(
-                f"🎯 *Take profit* {sym}: {px:.2f} ≥ +{tp_pct:.0f}% from {avg:.2f} — closing"
-            )
+            exit_orders.append(_record("take_profit"))
+            msg = f"🎯 *Take profit* {sym}: {px:.2f} ≥ +{tp_pct:.0f}% from {avg:.2f} — closing"
+            alerts.append(msg)
+            exit_alerts.append(msg)
             exits_done[sym] = now.isoformat()
 
     # Drop state for positions no longer held (re-entries start fresh).
@@ -298,4 +322,95 @@ def check_guards(
     _save(state_dir, state)
     if exit_orders:
         logger.bind(component="guards").info(f"guard exits: {[e['symbol'] for e in exit_orders]}")
-    return {"exits": exit_orders, "alerts": alerts}
+    # Value still at risk after these exits, for the roll-up's "deployed"
+    # line. Computed here because positions/prices/equity are all in
+    # scope; deriving it later would mean re-fetching a snapshot that has
+    # not been written yet.
+    exited = {e["symbol"] for e in exit_orders}
+    remaining = sum(
+        abs(float(p.get("qty", 0.0))) * float(prices.get(p["symbol"]) or 0.0)
+        for p in positions
+        if p["symbol"] not in exited
+    )
+    return {
+        "exits": exit_orders,
+        "alerts": alerts,
+        "exit_alerts": exit_alerts,
+        "rollup": format_exit_rollup(exit_orders, equity=equity, remaining_value=remaining, now=now),
+    }
+
+
+def _money(x: float) -> str:
+    """`$12,430` / `−$1,240` — sign as a real minus, never a hyphen."""
+    return f"{'−' if x < 0 else ''}${abs(x):,.0f}"
+
+
+def format_exit_rollup(
+    exits: list[dict[str, Any]],
+    *,
+    equity: float | None,
+    remaining_value: float = 0.0,
+    now: datetime | None = None,
+) -> str | None:
+    """One message for a multi-name stop-out, or None for 0-1 exits.
+
+    A single exit already reads well as its own line; six of them arrive
+    as six separate bubbles the operator has to add up by hand, at the
+    exact moment they are least inclined to. What they need in one glance
+    is: how much went to cash, what it cost, and what is left.
+
+    The table sits in a fenced block on purpose — Telegram renders it
+    monospaced so the columns line up, and does not parse entities inside
+    it, so a symbol with an underscore cannot break the whole message.
+    """
+    if len(exits) < 2:
+        return None
+
+    proceeds = sum(float(e.get("proceeds") or 0.0) for e in exits)
+    realized = sum(float(e.get("pnl_usd") or 0.0) for e in exits)
+    stamp = (now or datetime.now(tz=timezone.utc)).strftime("%d %b %H:%M UTC")
+
+    rows = []
+    for e in sorted(exits, key=lambda x: float(x.get("proceeds") or 0.0), reverse=True):
+        pnl = float(e.get("pnl_pct") or 0.0)
+        rows.append(
+            (
+                str(e["symbol"]),
+                f"{float(e.get('price') or 0.0):,.2f}",
+                f"{'+' if pnl >= 0 else '−'}{abs(pnl):.1f}%",
+                _money(float(e.get("proceeds") or 0.0)).replace("$", ""),
+                "stop" if e.get("reason") == "trailing_stop" else "target",
+            )
+        )
+    w = [max(len(r[i]) for r in rows) for i in range(5)]
+    table = "\n".join(
+        f"{r[0]:<{w[0]}}  {r[1]:>{w[1]}}  {r[2]:>{w[2]}}  {r[3]:>{w[3]}}  {r[4]}" for r in rows
+    )
+
+    stops = sum(1 for e in exits if e.get("reason") == "trailing_stop")
+    kind = (
+        "trailing stops"
+        if stops == len(exits)
+        else "profit targets"
+        if stops == 0
+        else f"{stops} stop{'s' if stops > 1 else ''}, "
+        f"{len(exits) - stops} target{'s' if len(exits) - stops > 1 else ''}"
+    )
+
+    lines = [
+        f"🛑 *Guard exits — {len(exits)} positions closed*",
+        f"_{stamp} · {kind}_",
+        "",
+        f"```\n{table}\n```",
+        f"*To cash* {_money(proceeds)}   *Realized* {_money(realized)}",
+    ]
+    if equity:
+        lines.append(f"*Still deployed* {_money(remaining_value)} of {_money(equity)} "
+                     f"({remaining_value / equity * 100:.0f}%)")
+    lines += [
+        "",
+        "⚠️ *Nothing redeploys automatically.* The desk has not seen these exits.",
+        "Reassess before buying back — `/cycle` alone would re-buy the same names:",
+        "`/pm run` → `/pm` → `/cycle`",
+    ]
+    return "\n".join(lines)

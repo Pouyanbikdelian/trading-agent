@@ -1352,8 +1352,18 @@ class Runner:
                     requested_by=f"guard:{exit_req['reason']}",
                 )
                 cmds.submit(cmd, settings.state_dir)
+            # One roll-up replaces the per-name bubbles when several fire
+            # together. Six separate messages arrive at the moment the
+            # operator is least able to add them up by hand; the roll-up
+            # leads with the numbers that decide the next move.
+            rollup = result.get("rollup")
+            exit_msgs = set(result.get("exit_alerts") or [])
             for msg in result["alerts"]:
+                if rollup and msg in exit_msgs:
+                    continue
                 self.alerts.info(msg)
+            if rollup:
+                self.alerts.info(rollup)
         except Exception:
             logger.bind(component="guards").exception("guards run failed")
 
