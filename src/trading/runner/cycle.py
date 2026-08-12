@@ -591,6 +591,44 @@ class Cycle:
         if _settings.require_cycle_approval and orders:
             candidates = self._compute_top_candidates(prices, cfg=cfg)
 
+            def _risk_rebuild(revised_signal: Signal) -> tuple[list[Any], list[RiskDecision]]:
+                """Re-price an operator revision through the normal risk path.
+
+                An approval edit is still a target portfolio, never a
+                hand-filtered list of orders.  In particular, suppressing a
+                planned sell can leave a position above the target or a risk
+                limit, so every revised target must go back through the same
+                sizing, exposure and no-margin checks as the original plan.
+                """
+                new_orders, new_decisions = self.risk_manager.signal_to_orders(
+                    revised_signal,
+                    account=account,
+                    last_prices=last_prices,
+                    instruments=instruments_by_key,
+                    sector_map=sector_map,
+                    fx_rates=fx_rates,
+                    pending_orders=pending_orders,
+                    **(
+                        {"order_id_factory": self._order_id_factory}
+                        if self._order_id_factory
+                        else {}
+                    ),
+                )
+                # Holds are an independent operator safety control.  A
+                # custom approval must not become a side door around them.
+                if held_syms and new_orders:
+                    new_orders, dropped = filter_held_orders(new_orders, held_syms)
+                    if dropped:
+                        names = ", ".join(sorted({o.instrument.symbol for o in dropped}))
+                        new_decisions.append(
+                            RiskDecision(
+                                action="scale",
+                                reason=f"operator hold removed revised orders for: {names}",
+                                scale_factor=1.0,
+                            )
+                        )
+                return new_orders, new_decisions
+
             def _rebuild_from_picks(picked_symbols: list[str]) -> list[Any]:
                 # Equal-weight the picked names at the per-position cap so
                 # the basket still respects risk limits without rebuilding
@@ -610,20 +648,71 @@ class Cycle:
                     picked_keys[matching[0]] = weight_each
                 if not picked_keys:
                     return []
-                new_signal = _Signal(ts=signal.ts, target_weights=picked_keys)
-                new_orders, _new_decisions = self.risk_manager.signal_to_orders(
-                    new_signal,
-                    account=account,
-                    last_prices=last_prices,
-                    instruments=instruments_by_key,
-                    sector_map=sector_map,
-                    **(
-                        {"order_id_factory": self._order_id_factory}
-                        if self._order_id_factory
-                        else {}
-                    ),
+                new_signal = _Signal(
+                    ts=signal.ts,
+                    strategy=signal.strategy,
+                    target_weights=picked_keys,
                 )
+                new_orders, _new_decisions = _risk_rebuild(new_signal)
                 return new_orders
+
+            def _rebuild_with_frozen_symbols(
+                mode: str, selected_symbols: list[str]
+            ) -> tuple[list[Any], list[RiskDecision]]:
+                """Preserve selected original targets and freeze the rest.
+
+                ``only`` applies just the PM's planned changes for the named
+                symbols.  ``except`` freezes the named planned changes.  A
+                freeze means target the current position's actual weight,
+                not simply delete a post-risk order: that lets the risk
+                manager re-evaluate the complete revised book and still
+                override a freeze when a hard limit requires it.
+                """
+                selected = {s.upper() for s in selected_symbols}
+                planned_symbols = {o.instrument.symbol.upper() for o in orders}
+                if mode not in {"only", "except"} or not selected:
+                    raise ValueError("invalid custom approval request")
+                if unknown := selected - planned_symbols:
+                    raise ValueError(
+                        "symbols are not in this cycle's planned changes: "
+                        + ", ".join(sorted(unknown))
+                    )
+
+                frozen = (planned_symbols - selected) if mode == "only" else selected
+                positions_by_symbol = {
+                    pos.instrument.symbol.upper(): pos
+                    for pos in (getattr(account, "positions", {}) or {}).values()
+                }
+                revised_weights = dict(signal.target_weights)
+                equity = float(getattr(account, "equity", 0.0) or 0.0)
+                if equity <= 0:
+                    raise ValueError("cannot freeze positions with non-positive equity")
+
+                for key, instrument in instruments_by_key.items():
+                    symbol = instrument.symbol.upper()
+                    if symbol not in frozen:
+                        continue
+                    position = positions_by_symbol.get(symbol)
+                    if position is None:
+                        revised_weights[key] = 0.0
+                        continue
+                    price = float(last_prices.get(key, 0.0) or 0.0)
+                    if price <= 0:
+                        raise ValueError(f"no positive price to freeze {symbol}")
+                    currency = instrument.currency or getattr(account, "base_currency", "USD")
+                    base_currency = getattr(account, "base_currency", "USD")
+                    fx_rate = (
+                        1.0 if currency == base_currency else float(fx_rates.get(currency, 0.0))
+                    )
+                    # Mirror RiskManager's documented missing-FX fallback.
+                    # A frozen foreign holding must use the same conversion
+                    # convention as every other target in the rebuilt plan.
+                    if fx_rate <= 0:
+                        fx_rate = 1.0
+                    revised_weights[key] = float(position.quantity) * price * fx_rate / equity
+
+                revised_signal = signal.model_copy(update={"target_weights": revised_weights})
+                return _risk_rebuild(revised_signal)
 
             orders = self._request_cycle_approval(
                 orders,
@@ -631,6 +720,7 @@ class Cycle:
                 last_prices,
                 candidates=candidates,
                 rebuild_from_picks=_rebuild_from_picks,
+                rebuild_with_frozen_symbols=_rebuild_with_frozen_symbols,
             )
             if not orders:
                 return CycleReport(
@@ -1747,6 +1837,8 @@ class Cycle:
     # and writes the decision when the operator sends /approve, /reject.
     APPROVAL_PENDING_FILE: ClassVar[str] = "cycle_approval_pending.json"
     APPROVAL_DECISION_FILE: ClassVar[str] = "cycle_approval_decision.json"
+    APPROVAL_AUDIT_FILE: ClassVar[str] = "cycle_approval_audit.jsonl"
+    APPROVAL_LOCK_FILE: ClassVar[str] = "cycle_approval.lock"
     APPROVAL_POLL_INTERVAL_S: ClassVar[float] = 2.0
 
     def _request_cycle_approval(
@@ -1757,6 +1849,9 @@ class Cycle:
         *,
         candidates: list[tuple[str, float]] | None = None,
         rebuild_from_picks: Callable[[list[str]], list[Any]] | None = None,
+        rebuild_with_frozen_symbols: (
+            Callable[[str, list[str]], tuple[list[Any], list[RiskDecision]]] | None
+        ) = None,
     ) -> list[Any]:
         """Block the cycle until the operator decides via Telegram.
 
@@ -1771,19 +1866,117 @@ class Cycle:
         trade — ``rebuild_from_picks`` then rebuilds the orders from
         those picks through the risk manager.
 
+        ``rebuild_with_frozen_symbols`` handles ``/approve only …`` and
+        ``/approve all except …``. The first response requests a revised
+        plan; this method risk-checks it, shows the exact result, and
+        requires a second, preview-bound confirmation.
+
         Returns the list of orders to submit. Empty = no submission.
         """
+        import fcntl as _fcntl
+        import hashlib as _hashlib
         import json as _json
         import time as _time
+        import uuid as _uuid
 
         from trading.core.config import settings as _settings
 
         state_dir = _settings.state_dir
         pending_path = state_dir / self.APPROVAL_PENDING_FILE
         decision_path = state_dir / self.APPROVAL_DECISION_FILE
+        audit_path = state_dir / self.APPROVAL_AUDIT_FILE
+        approval_lock_path = state_dir / self.APPROVAL_LOCK_FILE
 
-        # Wipe any stale decision file from a previous cycle.
-        decision_path.unlink(missing_ok=True)
+        def _order_payload(plan: list[Any]) -> list[dict[str, Any]]:
+            """Stable, human-readable order description for a preview."""
+            return [
+                {
+                    "symbol": str(order.instrument.symbol).upper(),
+                    "side": str(getattr(order.side, "value", order.side)).upper(),
+                    "quantity": float(order.quantity),
+                }
+                for order in plan
+            ]
+
+        def _fingerprint(plan: list[Any]) -> str:
+            canonical = _json.dumps(
+                _order_payload(plan), sort_keys=True, separators=(",", ":")
+            ).encode()
+            return _hashlib.sha256(canonical).hexdigest()
+
+        def _write_pending(payload: dict[str, Any]) -> None:
+            """Publish state atomically so the bot never reads half a plan."""
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = pending_path.with_name(f".{pending_path.name}.tmp")
+            tmp_path.write_text(_json.dumps(payload, indent=2))
+            tmp_path.replace(pending_path)
+
+        def _write_audit(event: str, **payload: Any) -> bool:
+            """Durably record an operator override before it can trade.
+
+            This is deliberately runner-owned: the bot asks for a change,
+            but only the process that built the exact risk-checked plan may
+            say what was actually confirmed. If the state volume is not
+            writable, a custom plan fails closed rather than becoming an
+            untraceable execution path.
+            """
+            import os as _os
+
+            record = {
+                "ts": datetime.now(tz=timezone.utc).isoformat(),
+                "event": event,
+                "cycle_id": cycle_id,
+                **payload,
+            }
+            try:
+                audit_path.parent.mkdir(parents=True, exist_ok=True)
+                with audit_path.open("a", encoding="utf-8") as audit_file:
+                    audit_file.write(_json.dumps(record, sort_keys=True) + "\n")
+                    audit_file.flush()
+                    _os.fsync(audit_file.fileno())
+            except OSError as exc:
+                logger.bind(component="cycle").error(f"approval audit write failed: {exc!r}")
+                self.alerts.warning(
+                    "⚠️ could not record the custom approval audit trail — no orders submitted."
+                )
+                return False
+            return True
+
+        def _wait_for_decision(deadline: float) -> dict[str, Any] | None:
+            """Consume one bot decision, failing closed on malformed JSON."""
+            while _time.monotonic() < deadline:
+                if decision_path.exists():
+                    try:
+                        payload = _json.loads(decision_path.read_text())
+                    except Exception:
+                        self.alerts.warning(
+                            "⚠️ malformed cycle-approval decision — no orders submitted."
+                        )
+                        return None
+                    finally:
+                        decision_path.unlink(missing_ok=True)
+                    if not isinstance(payload, dict):
+                        self.alerts.warning(
+                            "⚠️ invalid cycle-approval decision — no orders submitted."
+                        )
+                        return None
+                    return payload
+                _time.sleep(self.APPROVAL_POLL_INTERVAL_S)
+            return None
+
+        def _matches_current_cycle(decision: dict[str, Any], cycle_id: str) -> bool:
+            decided_id = str(decision.get("id") or "")
+            if not decided_id or decided_id == cycle_id:
+                return True
+            self.alerts.warning(
+                f"⚠️ ignoring an approval for cycle `{decided_id[:8]}` — "
+                f"this is cycle `{cycle_id[:8]}`. No orders submitted.\n"
+                "_Re-issue against the current basket if you still want it._"
+            )
+            logger.bind(component="cycle").warning(
+                f"approval id mismatch: decision {decided_id!r} vs cycle {cycle_id!r}"
+            )
+            return False
 
         cycle_id = self._build_cycle_id(account)
         ccy = getattr(account, "base_currency", None) or "USD"
@@ -1793,9 +1986,12 @@ class Cycle:
         equity = float(getattr(account, "equity", 0.0) or 0.0)
         deploy_pct = (gross / equity * 100.0) if equity > 0 else 0.0
 
-        # Symbols the strategy decided to trade — used so the bot can
-        # mark them on the candidate scoreboard.
+        # Planned symbols mark the candidate scoreboard and are the only
+        # symbols an operator may filter in a custom approval. A request
+        # cannot freeze an arbitrary current holding.
         chosen = {getattr(o.instrument, "symbol", "") for o in orders}
+        selectable_symbols = sorted(symbol.upper() for symbol in chosen if symbol)
+        plan_fingerprint = _fingerprint(orders)
 
         candidates_payload: list[dict[str, Any]] = []
         if candidates:
@@ -1808,23 +2004,57 @@ class Cycle:
                     }
                 )
 
-        pending_path.parent.mkdir(parents=True, exist_ok=True)
-        pending_path.write_text(
-            _json.dumps(
+        # Approval state is deliberately a single active window: it is a
+        # global prompt and global decision file, not a queue. The runner's
+        # cooldown stops ordinary overlap, but a slow window plus an
+        # off-cycle trigger can outlive it. A second cycle must stand down
+        # rather than overwrite the plan an operator is reviewing.
+        approval_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        approval_lock = approval_lock_path.open("a")
+        try:
+            _fcntl.flock(approval_lock.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except OSError:
+            approval_lock.close()
+            self.alerts.warning(
+                "⚠️ cycle skipped — another cycle is awaiting operator approval. "
+                "No orders submitted."
+            )
+            return []
+
+        def _release_approval_lock() -> None:
+            try:
+                _fcntl.flock(approval_lock.fileno(), _fcntl.LOCK_UN)
+            finally:
+                approval_lock.close()
+
+        try:
+            # Wipe a stale decision only AFTER winning the single-window
+            # lock. Doing this before the lock would let a later cycle
+            # erase the decision for the plan currently under review.
+            decision_path.unlink(missing_ok=True)
+            _write_pending(
                 {
                     "id": cycle_id,
                     "ts": datetime.now(tz=timezone.utc).isoformat(),
+                    "phase": "initial",
+                    "plan_fingerprint": plan_fingerprint,
                     "n_orders": len(orders),
                     "gross": gross,
                     "currency": ccy,
                     "equity": equity,
                     "deploy_pct": deploy_pct,
+                    "selectable_symbols": selectable_symbols,
                     "can_pick": bool(candidates_payload and rebuild_from_picks),
                     "candidates": candidates_payload,
-                },
-                indent=2,
+                }
             )
-        )
+        except OSError as exc:
+            _release_approval_lock()
+            logger.bind(component="cycle").error(f"could not publish approval window: {exc!r}")
+            self.alerts.warning(
+                "⚠️ could not publish the cycle approval window — no orders submitted."
+            )
+            return []
 
         timeout_s = float(_settings.cycle_approval_timeout_s)
         prompt_lines = [
@@ -1834,6 +2064,8 @@ class Cycle:
             "Reply with one of:",
             "  `/approve` — submit as-is",
             "  `/approve 80` — scale to 80% of basket size",
+            "  `/approve only NVDA MSFT` — apply only these planned changes",
+            "  `/approve all except NVDA AMD` — freeze these planned changes",
         ]
         if candidates_payload and rebuild_from_picks is not None:
             prompt_lines.append("  `/pick 1 3 5 8 11` — replace basket with these ranks")
@@ -1857,47 +2089,204 @@ class Cycle:
 
         self.alerts.info("\n".join(prompt_lines), buttons=approval_keyboard(cycle_id))
 
-        deadline = _time.monotonic() + timeout_s
-        decision: dict[str, Any] | None = None
-        while _time.monotonic() < deadline:
-            if decision_path.exists():
+        def _cleanup() -> None:
+            try:
+                pending_path.unlink(missing_ok=True)
+                decision_path.unlink(missing_ok=True)
+            finally:
+                _release_approval_lock()
+
+        def _handle_custom_approval(request: dict[str, Any], deadline: float) -> list[Any]:
+            """Build one filtered plan, then require its exact confirmation."""
+            try:
+                # Custom edits have no backward-compatible unbound form:
+                # they must originate from the current bot and displayed
+                # plan, rather than an old process writing a vague action.
+                if not str(request.get("id") or ""):
+                    self.alerts.warning("⚠️ unbound custom approval request — no orders submitted.")
+                    return []
+                if str(request.get("plan_fingerprint") or "") != plan_fingerprint:
+                    self.alerts.warning(
+                        "⚠️ custom approval did not match the displayed plan — no orders submitted."
+                    )
+                    return []
+                mode = str(request.get("mode") or "").lower()
+                raw_symbols = request.get("symbols")
+                if (
+                    mode not in {"only", "except"}
+                    or not isinstance(raw_symbols, list)
+                    or not raw_symbols
+                    or rebuild_with_frozen_symbols is None
+                ):
+                    self.alerts.warning("⚠️ invalid custom approval request — no orders submitted.")
+                    return []
+                symbols = [str(symbol).strip().upper() for symbol in raw_symbols]
+                if (
+                    any(not symbol for symbol in symbols)
+                    or len(set(symbols)) != len(symbols)
+                    or set(symbols) - set(selectable_symbols)
+                ):
+                    self.alerts.warning(
+                        "⚠️ custom approval named symbols outside this plan — no orders submitted."
+                    )
+                    return []
                 try:
-                    decision = _json.loads(decision_path.read_text())
-                except Exception:
-                    decision = None
-                break
-            _time.sleep(self.APPROVAL_POLL_INTERVAL_S)
+                    revised_orders, revised_decisions = rebuild_with_frozen_symbols(mode, symbols)
+                except Exception as exc:
+                    logger.bind(component="cycle").warning(
+                        f"custom approval rebuild failed: {exc!r}"
+                    )
+                    self.alerts.warning(
+                        f"⚠️ could not build the revised plan ({type(exc).__name__}) — "
+                        "no orders submitted."
+                    )
+                    return []
+                if not revised_orders:
+                    risk_notes = [
+                        decision.reason
+                        for decision in revised_decisions
+                        if decision.action != "allow"
+                    ]
+                    detail = f"\n{risk_notes[0]}" if risk_notes else ""
+                    self.alerts.warning(
+                        f"⛔ revised cycle `{cycle_id[:8]}` produced no executable orders. "
+                        f"No orders submitted.{detail}"
+                    )
+                    return []
 
-        # Clean up the coordination files regardless of outcome.
-        pending_path.unlink(missing_ok=True)
-        decision_path.unlink(missing_ok=True)
+                preview_id = _uuid.uuid4().hex[:12]
+                revised_gross = sum(
+                    float(order.quantity) * float(last_prices.get(order.instrument.key, 0.0))
+                    for order in revised_orders
+                )
+                revised_pct = (revised_gross / equity * 100.0) if equity > 0 else 0.0
+                preview_orders = _order_payload(revised_orders)
+                _write_pending(
+                    {
+                        "id": cycle_id,
+                        "ts": datetime.now(tz=timezone.utc).isoformat(),
+                        "phase": "custom_preview",
+                        "plan_fingerprint": plan_fingerprint,
+                        "preview_id": preview_id,
+                        "preview_fingerprint": _fingerprint(revised_orders),
+                        "mode": mode,
+                        "symbols": symbols,
+                        "n_orders": len(revised_orders),
+                        "gross": revised_gross,
+                        "currency": ccy,
+                        "equity": equity,
+                        "deploy_pct": revised_pct,
+                        "orders": preview_orders,
+                    }
+                )
+                if not _write_audit(
+                    "custom_preview",
+                    mode=mode,
+                    symbols=symbols,
+                    plan_fingerprint=plan_fingerprint,
+                    preview_id=preview_id,
+                    preview_fingerprint=_fingerprint(revised_orders),
+                    orders=preview_orders,
+                    risk_adjustments=[
+                        decision.reason
+                        for decision in revised_decisions
+                        if decision.action != "allow"
+                    ],
+                ):
+                    return []
+                mode_text = (
+                    f"only PM changes for `{', '.join(symbols)}`"
+                    if mode == "only"
+                    else f"freeze `{', '.join(symbols)}`"
+                )
+                preview_lines = [
+                    f"🔎 *Revised plan — final confirmation required* — cycle `{cycle_id[:8]}`",
+                    f"{mode_text}; {len(revised_orders)} orders · {revised_pct:.0f}% of equity",
+                    "",
+                    *[
+                        f"  `{order['side']:<4}` `{order['quantity']:g}` `{order['symbol']}`"
+                        for order in preview_orders[:20]
+                    ],
+                ]
+                risk_notes = [
+                    decision.reason for decision in revised_decisions if decision.action != "allow"
+                ]
+                if risk_notes:
+                    preview_lines.extend(
+                        ["", "*Risk adjustments:*"] + [f"  • {note}" for note in risk_notes[:3]]
+                    )
+                preview_lines.extend(
+                    [
+                        "",
+                        f"Confirm with `/approve confirm {preview_id}` or the button below.",
+                        "`/reject` cancels this revised plan.",
+                    ]
+                )
+                from trading.bot.keyboards import revised_approval_keyboard
 
+                self.alerts.info(
+                    "\n".join(preview_lines),
+                    buttons=revised_approval_keyboard(cycle_id, preview_id),
+                )
+
+                confirmation = _wait_for_decision(deadline)
+                if confirmation is None:
+                    self.alerts.warning(
+                        f"⏱ revised cycle `{cycle_id[:8]}` auto-rejected — no final confirmation."
+                    )
+                    return []
+                if not _matches_current_cycle(confirmation, cycle_id):
+                    return []
+                follow_up = str(confirmation.get("action", "reject")).lower()
+                if follow_up == "reject":
+                    self.alerts.info(f"❌ revised cycle `{cycle_id[:8]}` rejected by operator.")
+                    return []
+                if (
+                    follow_up != "custom_confirm"
+                    or str(confirmation.get("preview_id") or "") != preview_id
+                    or str(confirmation.get("preview_fingerprint") or "")
+                    != _fingerprint(revised_orders)
+                ):
+                    self.alerts.warning(
+                        "⚠️ revised-plan confirmation did not match the displayed preview — "
+                        "no orders submitted."
+                    )
+                    return []
+                if not _write_audit(
+                    "custom_confirmed",
+                    mode=mode,
+                    symbols=symbols,
+                    plan_fingerprint=plan_fingerprint,
+                    preview_id=preview_id,
+                    preview_fingerprint=_fingerprint(revised_orders),
+                    orders=preview_orders,
+                ):
+                    return []
+                self.alerts.info(
+                    f"✅ revised cycle `{cycle_id[:8]}` confirmed; submitting "
+                    f"{len(revised_orders)} risk-checked order(s)."
+                )
+                return revised_orders
+            finally:
+                _cleanup()
+
+        deadline = _time.monotonic() + timeout_s
+        decision = _wait_for_decision(deadline)
         if decision is None:
+            _cleanup()
             self.alerts.warning(
                 f"⏱ cycle `{cycle_id[:8]}` auto-rejected after "
                 f"{int(timeout_s / 60)} min — no operator response."
             )
             return []
-
-        # The bot stamps the pending cycle's id into every decision. Until
-        # now nothing checked it — the id was written and discarded, the
-        # same shape as the flatten flag. The inline keyboards already
-        # refuse a tap minted for another basket; a TYPED /approve had no
-        # equivalent, and the file is the last place to catch a decision
-        # that belongs to a cycle other than this one.
-        decided_id = str(decision.get("id") or "")
-        if decided_id and decided_id != cycle_id:
-            self.alerts.warning(
-                f"⚠️ ignoring an approval for cycle `{decided_id[:8]}` — "
-                f"this is cycle `{cycle_id[:8]}`. No orders submitted.\n"
-                "_Re-issue against the current basket if you still want it._"
-            )
-            logger.bind(component="cycle").warning(
-                f"approval id mismatch: decision {decided_id!r} vs cycle {cycle_id!r}"
-            )
+        if not _matches_current_cycle(decision, cycle_id):
+            _cleanup()
             return []
 
         action = str(decision.get("action", "reject")).lower()
+        if action == "custom_request":
+            return _handle_custom_approval(decision, deadline)
+        _cleanup()
         if action == "reject":
             self.alerts.info(f"❌ cycle `{cycle_id[:8]}` rejected by operator.")
             return []

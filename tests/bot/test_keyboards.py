@@ -44,6 +44,7 @@ class TestCallbackCodec:
     def test_every_shipped_button_fits_telegrams_64_byte_cap(self) -> None:
         markups = [
             keyboards.approval_keyboard("abcdef1234567890"),
+            keyboards.revised_approval_keyboard("abcdef1234567890", "123456789abc"),
             keyboards.sentinel_keyboard(),
             keyboards.mode_keyboard("neutral"),
             keyboards.desk_change_keyboard("dc-abcdef1234"),
@@ -80,6 +81,12 @@ class TestKeyboardsBindToTheirSubject:
         scaled = [d for d in data if keyboards.decode(d)[0] == keyboards.ACT_APPROVE_SCALED]
         assert scaled and scaled[0].endswith(":80")
 
+    def test_revised_confirmation_carries_both_cycle_and_preview_ids(self) -> None:
+        data = _all_callback_data(keyboards.revised_approval_keyboard("abcdef1234", "123456789abc"))
+        confirm = [d for d in data if keyboards.decode(d)[0] == keyboards.ACT_CONFIRM_REVISED]
+        assert confirm
+        assert keyboards.decode(confirm[0])[1] == "abcdef12:123456789abc"
+
 
 class TestNoOrderPathHasAButton:
     """Rule #4 in keyboard form: a mis-tap must not move money."""
@@ -93,6 +100,7 @@ class TestNoOrderPathHasAButton:
     def test_no_shipped_keyboard_offers_an_order_command(self) -> None:
         markups = [
             keyboards.approval_keyboard("abc12345"),
+            keyboards.revised_approval_keyboard("abc12345", "123456789abc"),
             keyboards.sentinel_keyboard(),
             keyboards.mode_keyboard("bear"),
             keyboards.desk_change_keyboard("dc-abcdef1234"),

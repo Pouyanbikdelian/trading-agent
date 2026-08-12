@@ -459,12 +459,35 @@ def test_typo_with_an_argument_is_still_suggested(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _pending_cycle(tmp_path: Path, cycle_id: str, *, can_pick: bool = True) -> None:
+def _pending_cycle(
+    tmp_path: Path,
+    cycle_id: str,
+    *,
+    can_pick: bool = True,
+    phase: str = "initial",
+    selectable_symbols: list[str] | None = None,
+    preview_id: str | None = None,
+    preview_fingerprint: str | None = None,
+) -> None:
     from trading.bot.telegram import _APPROVAL_PENDING_FILE
 
+    payload: dict[str, object] = {
+        "id": cycle_id,
+        "n_orders": 3,
+        "deploy_pct": 40.0,
+        "can_pick": can_pick,
+        "phase": phase,
+    }
+    if selectable_symbols is not None:
+        payload["selectable_symbols"] = selectable_symbols
+        payload["plan_fingerprint"] = "displayed-plan"
+    if preview_id is not None:
+        payload["preview_id"] = preview_id
+    if preview_fingerprint is not None:
+        payload["preview_fingerprint"] = preview_fingerprint
     _atomic_write_json(
         tmp_path / _APPROVAL_PENDING_FILE,
-        {"id": cycle_id, "n_orders": 3, "deploy_pct": 40.0, "can_pick": can_pick},
+        payload,
     )
 
 
@@ -514,6 +537,67 @@ def test_scale_button_applies_its_percentage(tmp_path: Path, monkeypatch) -> Non
     decision = json.loads((tmp_path / _APPROVAL_DECISION_FILE).read_text())
     assert decision["action"] == "scale"
     assert decision["scale_factor"] == pytest.approx(0.8)
+
+
+def test_approve_only_stages_a_bound_risk_checked_revision(tmp_path: Path, monkeypatch) -> None:
+    from trading.bot.telegram import _APPROVAL_DECISION_FILE, _cmd_approve
+
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    _pending_cycle(
+        tmp_path,
+        "abc12345deadbeef",
+        selectable_symbols=["NVDA", "MSFT", "AMD"],
+    )
+
+    out = _cmd_approve(["only", "nvda,MSFT"])
+
+    decision = json.loads((tmp_path / _APPROVAL_DECISION_FILE).read_text())
+    assert "risk-checking" in out
+    assert decision == {
+        "id": "abc12345deadbeef",
+        "action": "custom_request",
+        "decided_at": decision["decided_at"],
+        "mode": "only",
+        "symbols": ["NVDA", "MSFT"],
+        "plan_fingerprint": "displayed-plan",
+    }
+
+
+def test_approve_all_except_refuses_a_ticker_outside_the_plan(tmp_path: Path, monkeypatch) -> None:
+    from trading.bot.telegram import _APPROVAL_DECISION_FILE, _cmd_approve
+
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    _pending_cycle(tmp_path, "abc12345deadbeef", selectable_symbols=["NVDA", "MSFT"])
+
+    out = _cmd_approve(["all", "except", "AMD"])
+
+    assert "not a planned change" in out
+    assert not (tmp_path / _APPROVAL_DECISION_FILE).exists()
+
+
+def test_revised_plan_requires_its_exact_final_confirmation(tmp_path: Path, monkeypatch) -> None:
+    from trading.bot import keyboards
+    from trading.bot.telegram import _APPROVAL_DECISION_FILE, _cmd_approve, _handle_callback
+
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    _pending_cycle(
+        tmp_path,
+        "abc12345deadbeef",
+        phase="custom_preview",
+        preview_id="123456789abc",
+        preview_fingerprint="preview-fingerprint",
+    )
+
+    assert "awaiting final confirmation" in _cmd_approve([])
+    assert not (tmp_path / _APPROVAL_DECISION_FILE).exists()
+    out = asyncio.run(
+        _handle_callback(keyboards.encode(keyboards.ACT_CONFIRM_REVISED, "abc12345:123456789abc"))
+    )
+    assert "Confirmed revised cycle" in out
+    decision = json.loads((tmp_path / _APPROVAL_DECISION_FILE).read_text())
+    assert decision["action"] == "custom_confirm"
+    assert decision["preview_id"] == "123456789abc"
+    assert decision["preview_fingerprint"] == "preview-fingerprint"
 
 
 def test_callback_cannot_run_a_command_off_the_allowlist(tmp_path: Path, monkeypatch) -> None:

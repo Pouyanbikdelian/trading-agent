@@ -69,8 +69,10 @@ HELP_TEXT = (
     "*Cycle approval* (when REQUIRE\\_CYCLE\\_APPROVAL=true)\n"
     "/approve — submit pending basket as-is\n"
     "/approve N — scale to N% (e.g. `/approve 80`)\n"
+    "/approve only SYM ... — apply only those planned changes (then confirm preview)\n"
+    "/approve all except SYM ... — freeze those planned changes (then confirm preview)\n"
     "/approve flat — flatten instead of basket\n"
-    "/pick 1 3 5 8 — override basket with these ranks\n"
+    "/pick 1 3 5 8 — replace basket with a new equal-weight rank selection\n"
     "/reject — skip this cycle, no orders\n\n"
     "*Regime & signal*\n"
     "/regime — HMM bull/bear state + SPY/VIX triggers\n"
@@ -986,7 +988,14 @@ def _cmd_status() -> str:
         lines.append(
             f"\n⏸ *Cycle `{short_id}` awaiting approval* — {n} orders, {pct:.0f}% of equity"
         )
-        lines.append("Reply: `/approve` · `/approve 80` · `/approve flat` · `/reject`")
+        if str(pending.get("phase") or "initial") == "custom_preview":
+            preview_id = str(pending.get("preview_id") or "")
+            lines.append(f"Reply: `/approve confirm {preview_id}` · `/reject`")
+        else:
+            lines.append(
+                "Reply: `/approve` · `/approve 80` · `/approve only SYM` · "
+                "`/approve all except SYM` · `/approve flat` · `/reject`"
+            )
     elif getattr(settings, "require_cycle_approval", False):
         lines.append(
             "\n_cycle approval required for every cycle (REQUIRE\\_CYCLE\\_APPROVAL=true)._"
@@ -2032,6 +2041,7 @@ def _cmd_regime() -> str:
 
 _APPROVAL_PENDING_FILE = "cycle_approval_pending.json"
 _APPROVAL_DECISION_FILE = "cycle_approval_decision.json"
+_APPROVAL_SYMBOL_RE = re.compile(r"[A-Z][A-Z0-9.-]{0,7}")
 
 
 def _read_cycle_pending() -> dict[str, Any] | None:
@@ -2092,23 +2102,100 @@ def _no_pending_cycle_reply(cmd: str) -> str:
 
 
 def _cmd_approve(args: list[str]) -> str:
-    r"""``/approve [N|flat]`` — approve the currently-pending cycle.
+    r"""Approve the currently-pending cycle or request a filtered preview.
 
     No arg → submit basket as-is.
     Integer 0-100 → scale order quantities to N% of original.
     ``flat`` → close every position instead of submitting the basket.
+    ``only SYM …`` → preserve only those planned changes.
+    ``all except SYM …`` → freeze those planned changes.
+
+    The two custom forms only stage a revision. The runner builds it through
+    the risk manager and sends a fresh, exact preview which needs one final
+    confirmation. This bot process never constructs or filters orders.
     """
     pending = _read_cycle_pending()
     if pending is None:
         return _no_pending_cycle_reply("/approve")
 
     short_id = str(pending.get("id", ""))[:8]
+    phase = str(pending.get("phase") or "initial").lower()
+    if phase == "custom_preview":
+        preview_id = str(pending.get("preview_id") or "")
+        preview_fingerprint = str(pending.get("preview_fingerprint") or "")
+        if len(args) == 2 and args[0].lower() == "confirm":
+            if not preview_id or not preview_fingerprint or args[1] != preview_id:
+                return (
+                    "that confirmation does not match the current revised plan. "
+                    f"Use `/approve confirm {preview_id}` from the newest preview."
+                )
+            if not _write_cycle_decision(
+                "custom_confirm",
+                preview_id=preview_id,
+                preview_fingerprint=preview_fingerprint,
+            ):
+                return "_revised plan expired before confirmation could land._"
+            return f"✅ Confirmed revised cycle `{short_id}`. Orders submitting…"
+        return (
+            f"a revised plan is awaiting final confirmation. Use `/approve confirm {preview_id}` "
+            "or `/reject`; the original basket cannot be approved at this stage."
+        )
+    if phase != "initial":
+        return "_the approval state is invalid; no order decision was written._"
+
     if not args:
         if not _write_cycle_decision("approve"):
             return "_pending cycle expired before approval could land._"
         return f"✅ Approved cycle `{short_id}` as-is. Orders submitting…"
 
     first = args[0].lower()
+    mode: str | None = None
+    symbol_args: list[str] = []
+    if first == "only":
+        mode, symbol_args = "only", args[1:]
+    elif first == "except":
+        mode, symbol_args = "except", args[1:]
+    elif first == "all" and len(args) >= 2 and args[1].lower() == "except":
+        mode, symbol_args = "except", args[2:]
+    if mode is not None:
+        selectable = pending.get("selectable_symbols")
+        if not isinstance(selectable, list) or not selectable:
+            return "_this cycle does not expose a filterable planned-symbol list; use `/approve` or `/reject`._"
+        tokens = [
+            token.upper() for arg in symbol_args for token in arg.replace(",", " ").split() if token
+        ]
+        if not tokens:
+            example = (
+                "/approve only NVDA MSFT" if mode == "only" else "/approve all except NVDA AMD"
+            )
+            return f"usage: `{example}`"
+        invalid_shape = [symbol for symbol in tokens if not _APPROVAL_SYMBOL_RE.fullmatch(symbol)]
+        if invalid_shape:
+            return f"_invalid ticker `{invalid_shape[0]}`._ Use listed planned ticker symbols only."
+        if len(set(tokens)) != len(tokens):
+            return "_each ticker can be named only once._"
+        allowed = {str(symbol).upper() for symbol in selectable}
+        unknown = [symbol for symbol in tokens if symbol not in allowed]
+        if unknown:
+            return (
+                f"`{unknown[0]}` is not a planned change in cycle `{short_id}`. "
+                f"Choose from: `{', '.join(sorted(allowed))}`."
+            )
+        if not _write_cycle_decision(
+            "custom_request",
+            mode=mode,
+            symbols=tokens,
+            plan_fingerprint=str(pending.get("plan_fingerprint") or ""),
+        ):
+            return "_pending cycle expired before the revision request could land._"
+        description = (
+            f"only `{', '.join(tokens)}`" if mode == "only" else f"all except `{', '.join(tokens)}`"
+        )
+        return (
+            f"🧮 Revising cycle `{short_id}`: approve {description}. "
+            "The runner is risk-checking it and will send the exact plan for final confirmation."
+        )
+
     if first in ("flat", "flatten"):
         if not _write_cycle_decision("flatten"):
             return "_pending cycle expired._"
@@ -2119,7 +2206,8 @@ def _cmd_approve(args: list[str]) -> str:
     except ValueError:
         return (
             f"_unrecognized argument `{args[0]}`._\n"
-            "Use: `/approve` · `/approve 80` · `/approve flat`"
+            "Use: `/approve` · `/approve 80` · `/approve only NVDA MSFT` · "
+            "`/approve all except NVDA` · `/approve flat`"
         )
     if not 0.0 <= pct <= 100.0:
         return "scale must be between 0 and 100 (% of basket size)."
@@ -2152,6 +2240,12 @@ def _cmd_pick(args: list[str]) -> str:
     pending = _read_cycle_pending()
     if pending is None:
         return _no_pending_cycle_reply("/pick")
+    if str(pending.get("phase") or "initial") == "custom_preview":
+        preview_id = str(pending.get("preview_id") or "")
+        return (
+            "a revised plan is awaiting final confirmation. "
+            f"Use `/approve confirm {preview_id}` or `/reject`; `/pick` cannot replace it."
+        )
 
     if not pending.get("can_pick", False):
         return (
@@ -2673,8 +2767,13 @@ async def _handle_callback(data: str) -> str:
         )
         return _desk_reply(result)
 
-    if action in (keyboards.ACT_APPROVE, keyboards.ACT_APPROVE_SCALED, keyboards.ACT_REJECT):
-        cid, _, scale = tokentail.partition(":")
+    if action in (
+        keyboards.ACT_APPROVE,
+        keyboards.ACT_APPROVE_SCALED,
+        keyboards.ACT_CONFIRM_REVISED,
+        keyboards.ACT_REJECT,
+    ):
+        cid, _, detail = tokentail.partition(":")
         pending = _read_cycle_pending()
         if pending is None:
             return _no_pending_cycle_reply("that button")
@@ -2690,7 +2789,13 @@ async def _handle_callback(data: str) -> str:
             )
         if action == keyboards.ACT_REJECT:
             return _cmd_reject()
-        return _cmd_approve([scale] if scale else [])
+        if action == keyboards.ACT_CONFIRM_REVISED:
+            if str(pending.get("phase") or "") != "custom_preview":
+                return "that revised-plan button is no longer current. Use the newest approval message."
+            if detail != str(pending.get("preview_id") or ""):
+                return "that button belongs to a different revised plan. Use the newest preview."
+            return _cmd_approve(["confirm", detail])
+        return _cmd_approve([detail] if detail else [])
 
     if action in (keyboards.ACT_MODE_CONFIRM, keyboards.ACT_MODE_CANCEL):
         from trading.runtime.mode import read_pending

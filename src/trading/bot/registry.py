@@ -99,7 +99,7 @@ REGISTRY: tuple[Spec, ...] = (
     Spec(
         "/approve",
         "submit the pending basket",
-        usage="/approve [N|flat]",
+        usage="/approve [N|only SYM ...|all except SYM ...|flat]",
         example="/approve 80",
     ),
     Spec("/reject", "skip this cycle, no orders"),

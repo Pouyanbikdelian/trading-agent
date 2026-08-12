@@ -451,8 +451,12 @@ def config_now(state_dir: Path) -> dict[str, Any]:
         "timeout_seconds": s.cycle_approval_timeout_s,
         "_meaning": (
             "When true the cycle computes the basket, shows it, and waits "
-            "for /approve, /approve N, /approve flat or /reject. No reply "
-            "within the timeout auto-REJECTS — it never auto-submits."
+            "for /approve, /approve N, /approve only SYM, /approve all "
+            "except SYM, /approve flat or /reject. The two filtered forms "
+            "are rebuilt through risk and need a separate exact-plan "
+            "confirmation. No reply within the timeout auto-REJECTS — it "
+            "never auto-submits. /pick remains a distinct equal-weight "
+            "replacement basket."
         ),
     }
 

@@ -44,6 +44,7 @@ MAX_CALLBACK_BYTES = 64
 # --- actions. Keep short: they share 64 bytes with the token.
 ACT_APPROVE = "a"
 ACT_APPROVE_SCALED = "as"
+ACT_CONFIRM_REVISED = "ar"
 ACT_REJECT = "rj"
 ACT_MODE_CONFIRM = "mc"
 ACT_MODE_CANCEL = "mx"
@@ -116,6 +117,25 @@ def approval_keyboard(cycle_id: str) -> dict[str, Any]:
                 _button("❌ Reject", ACT_REJECT, cid),
                 _button("📊 Positions", ACT_RUN, "/positions"),
             ],
+        ]
+    )
+
+
+def revised_approval_keyboard(cycle_id: str, preview_id: str) -> dict[str, Any]:
+    """Final confirmation for one runner-built revised approval plan.
+
+    Both ids are carried because a cycle can have an initial basket and a
+    revised preview in the same chat. A confirmation must bind to both, or
+    an old tap could approve a later revision that the operator never saw.
+    """
+    token = f"{str(cycle_id)[:8]}:{str(preview_id)[:12]}"
+    return _markup(
+        [
+            [
+                _button("✅ Confirm revised plan", ACT_CONFIRM_REVISED, token),
+                _button("❌ Reject", ACT_REJECT, str(cycle_id)[:8]),
+            ],
+            [_button("📊 Positions", ACT_RUN, "/positions")],
         ]
     )
 
