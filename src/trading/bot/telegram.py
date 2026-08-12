@@ -72,6 +72,8 @@ HELP_TEXT = (
     "/approve only SYM ... — apply only those planned changes (then confirm preview)\n"
     "/approve all except SYM ... — freeze those planned changes (then confirm preview)\n"
     "/approve flat — flatten instead of basket\n"
+    "/proposal — repeat the exact pending buys and sells\n"
+    "/candidates — alternate ranked picks for the pending cycle\n"
     "/pick 1 3 5 8 — replace basket with a new equal-weight rank selection\n"
     "/reject — skip this cycle, no orders\n\n"
     "*Regime & signal*\n"
@@ -111,7 +113,7 @@ HELP_TEXT = (
     "/fx 5000 CHF to USD — convert at market\n"
     "/fx-rate USD CHF — reference rate\n\n"
     "*Safety*\n"
-    "/halt \\[reason] — refuse new trades; force flatten\n"
+    "/halt \\[reason] — refuse new trades; does not close positions\n"
     "/resume — clear halt, reset failure counter\n"
     "/reconnect — bounce the broker connection\n"
     "/gateway stop|start|status — release your IBKR session so you can trade by hand in TWS or mobile; stop also halts\n"
@@ -2101,6 +2103,70 @@ def _no_pending_cycle_reply(cmd: str) -> str:
     return "\n".join(lines)
 
 
+def _cmd_proposal() -> str:
+    """Show the runner-authored plan again without involving an LLM.
+
+    A decision card often scrolls out of view while the operator compares it
+    with a committee message.  This reads the same atomic pending payload the
+    approval gate will validate; it never reconstructs an order or asks the
+    broker for a new quote.
+    """
+    pending = _read_cycle_pending()
+    if pending is None:
+        return _no_pending_cycle_reply("/proposal")
+    from trading.runner.approval_view import format_trade_review
+
+    phase = str(pending.get("phase") or "initial").lower()
+    if phase == "custom_preview":
+        preview_id = str(pending.get("preview_id") or "")
+        return (
+            format_trade_review(pending, final_confirmation=True)
+            + f"\nConfirm with `/approve confirm {preview_id}` or `/reject`."
+        )
+    return format_trade_review(pending, include_controls=True)
+
+
+def _cmd_candidates() -> str:
+    """Show optional replacement picks for the currently pending plan."""
+    pending = _read_cycle_pending()
+    if pending is None:
+        return _no_pending_cycle_reply("/candidates")
+    if str(pending.get("phase") or "initial").lower() != "initial":
+        return "_A revised plan is awaiting final confirmation; its candidate ladder is no longer actionable._"
+    from trading.runner.approval_view import format_candidates
+
+    return format_candidates(pending)
+
+
+def _looks_like_active_plan_question(text: str) -> bool:
+    """Route plain-English plan questions to the deterministic decision card.
+
+    This is intentionally narrow: no request that could be a broader market
+    question is intercepted. With a plan awaiting approval, however,
+    “what is this cycle proposing?” should never be delegated to an LLM
+    which might miss the active state or paraphrase a quantity incorrectly.
+    """
+    low = " ".join(text.lower().split())
+    has_plan_word = any(word in low for word in ("cycle", "proposal", "plan", "trade"))
+    asks_action = any(
+        phrase in low
+        for phrase in (
+            "what is",
+            "what's",
+            "what are",
+            "what will",
+            "what is it",
+            "what does",
+            "buying",
+            "selling",
+            "to be traded",
+            "don't understand",
+            "do not understand",
+        )
+    )
+    return has_plan_word and asks_action
+
+
 def _cmd_approve(args: list[str]) -> str:
     r"""Approve the currently-pending cycle or request a filtered preview.
 
@@ -2423,6 +2489,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
             return PlainReply(f"Could not process the desk request: {e}. No change was applied.")
         if desk_reply is not None:
             return desk_reply
+        if _read_cycle_pending() is not None and _looks_like_active_plan_question(stripped):
+            return _cmd_proposal()
         if len(stripped) < 8 or not any(c.isalpha() for c in stripped):
             return "Ask me a full question — e.g. `why did we buy MU?` — or /help for commands."
         # A forward-looking instruction ("high conviction on GS, look at
@@ -2507,11 +2575,18 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_approve(args)
     if cmd == "/reject":
         return _cmd_reject()
+    if cmd == "/proposal":
+        return _cmd_proposal()
+    if cmd == "/candidates":
+        # During an approval window, candidates means alternatives to the
+        # exact plan in front of the operator. Outside one it retains the
+        # useful historical alias for the live strategy ladder.
+        return _cmd_candidates() if _read_cycle_pending() is not None else _cmd_signal(args)
     if cmd == "/pick":
         return _cmd_pick(args)
     if cmd in ("/regime", "/state"):
         return _cmd_regime()
-    if cmd in ("/signal", "/candidates", "/signals"):
+    if cmd in ("/signal", "/signals"):
         return _cmd_signal(args)
     if cmd == "/report":
         return _cmd_report()

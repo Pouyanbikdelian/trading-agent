@@ -102,6 +102,8 @@ REGISTRY: tuple[Spec, ...] = (
         usage="/approve [N|only SYM ...|all except SYM ...|flat]",
         example="/approve 80",
     ),
+    Spec("/proposal", "repeat the exact pending buy/sell plan"),
+    Spec("/candidates", "alternate ranks for the pending cycle"),
     Spec("/reject", "skip this cycle, no orders"),
     Spec(
         "/pick",
@@ -116,7 +118,7 @@ REGISTRY: tuple[Spec, ...] = (
         "top-N candidates the strategy would pick now",
         usage="/signal [N]",
         example="/signal 10",
-        aliases=("/signals", "/candidates"),
+        aliases=("/signals",),
     ),
     # --- trigger work
     Spec("/cycle", "force a rebalance now", aliases=("/cycle_now",)),

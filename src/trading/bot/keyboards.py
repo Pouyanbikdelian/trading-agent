@@ -56,7 +56,18 @@ ACT_RUN = "run"  # a read-only command, named in the token
 # command": it means a malformed or hostile callback cannot reach a
 # handler that trades, even if the dispatch table changes later.
 SAFE_COMMANDS = frozenset(
-    {"/positions", "/status", "/health", "/orders", "/pending", "/regime", "/holds", "/detail"}
+    {
+        "/positions",
+        "/status",
+        "/health",
+        "/orders",
+        "/pending",
+        "/proposal",
+        "/candidates",
+        "/regime",
+        "/holds",
+        "/detail",
+    }
 )
 
 
@@ -115,6 +126,10 @@ def approval_keyboard(cycle_id: str) -> dict[str, Any]:
             ],
             [
                 _button("❌ Reject", ACT_REJECT, cid),
+                _button("📋 Explain plan", ACT_RUN, "/proposal"),
+            ],
+            [
+                _button("🏆 Alternatives", ACT_RUN, "/candidates"),
                 _button("📊 Positions", ACT_RUN, "/positions"),
             ],
         ]

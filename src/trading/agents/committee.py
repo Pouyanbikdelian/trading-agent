@@ -441,34 +441,29 @@ def run_committee(
 
 
 def format_digest_compact(digest: dict[str, Any]) -> str:
-    """Executive summary — a few bullets + conclusion. Full debate via /detail."""
+    """Decision card — conclusion first, full debate stays behind /detail.
+
+    The scheduled message must help an operator decide whether to look closer,
+    not reproduce eight overlapping agent monologues in the chat timeline.
+    """
     if not digest.get("ok"):
         return f"🤖 Committee did not convene: {digest.get('reason', 'unknown')}"
-    icons = {"bullish": "🟢", "neutral": "⚪", "bearish": "🔴"}
     r = digest.get("ruling", {})
     posture = str(r.get("posture", "neutral")).replace("_", " ").upper()
     posture_icon = {"RISK ON": "🟢", "NEUTRAL": "⚪", "RISK OFF": "🔴"}.get(posture, "⚪")
     lines = [
-        f"🏛 *Committee* — {posture_icon} *{posture}*  (dissent {digest['disagreement_index']:.1f})",
-        "",
+        f"🏛 *Committee* — {posture_icon} *{posture}*  (dissent {digest['disagreement_index']:.1f})"
     ]
-    # One bullet per non-neutral voice, the strongest first; max 5.
-    voiced = [
-        (n, t) for n, t in digest["takes"].items() if t.get("stance") in ("bullish", "bearish")
-    ]
-    voiced.sort(key=lambda kv: float(kv[1]["prediction"]["confidence"]), reverse=True)
-    for name, t in voiced[:5]:
-        lines.append(f"  {icons[t['stance']]} *{_display(name)}*: {_clip(t.get('take', ''), 160)}")
-    if digest.get("objections"):
-        o = digest["objections"][0]
-        lines.append(f"  ⚔️ *challenger*: {_clip(o.get('objection', ''), 160)}")
+    if r.get("proposal"):
+        lines += ["", f"*Conclusion:* {_clip(r['proposal'], 360)}"]
     if digest.get("market_caveat"):
-        lines.append(f"  ⚠️ {_clip(digest['market_caveat'], 160)}")
-    lines += [
-        "",
-        f"*Conclusion:* {_clip(r.get('proposal', ''), 400)}",
-        f"_Watching: {_clip(r.get('watch', ''), 160)} · `/detail` for the full debate_",
-    ]
+        lines += ["", f"*Main risk:* {_clip(digest['market_caveat'], 180)}"]
+    elif digest.get("objections"):
+        objection = digest["objections"][0]
+        lines += ["", f"*Main dissent:* {_clip(objection.get('objection', ''), 180)}"]
+    if r.get("watch"):
+        lines += ["", f"*Watching:* {_clip(r['watch'], 160)}"]
+    lines += ["", "`/detail` shows the full debate."]
     return "\n".join(lines)
 
 

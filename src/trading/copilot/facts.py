@@ -265,6 +265,52 @@ def risk_now(state_dir: Path) -> dict[str, Any]:
     return out
 
 
+def active_cycle_plan(state_dir: Path) -> dict[str, Any]:
+    """The exact runner-owned proposal currently awaiting approval.
+
+    The plan is an atomic state file shared with the Telegram bot.  It is
+    neither a historical decision nor a simulated PM holding: it is the
+    specific order set that will submit only if the operator approves it.
+    Reading it here fixes the particularly bad failure mode where the bot
+    showed a proposal and then the copilot claimed it could not see one.
+    """
+    path = Path(state_dir) / "cycle_approval_pending.json"
+    if not path.exists():
+        return {"active": False}
+    try:
+        pending = json.loads(path.read_text())
+    except Exception:
+        return {
+            "active": True,
+            "readable": False,
+            "note": "pending plan exists but could not be read",
+        }
+    if not isinstance(pending, dict):
+        return {"active": True, "readable": False, "note": "pending plan has an invalid shape"}
+    plan = pending.get("plan")
+    if not isinstance(plan, dict) or not isinstance(plan.get("orders"), list):
+        return {
+            "active": True,
+            "readable": False,
+            "cycle_id": str(pending.get("id") or "")[:8],
+            "note": "an older runner published this pending plan without readable order details",
+        }
+    candidates = pending.get("candidates")
+    return {
+        "active": True,
+        "readable": True,
+        "cycle_id": str(pending.get("id") or "")[:8],
+        "phase": str(pending.get("phase") or "initial"),
+        "note": (
+            "LIVE pending proposal from the runner. No order has been submitted yet; "
+            "answer questions about these exact rows before discussing historical PM decisions."
+        ),
+        "plan": plan,
+        "filterable_symbols": pending.get("selectable_symbols", []),
+        "candidate_alternatives": candidates[:5] if isinstance(candidates, list) else [],
+    }
+
+
 def last_close(data_dir: Path, symbol: str) -> dict[str, Any]:
     """Most recent cached close for a symbol — cache only, no network.
     The copilot answers from what the system knows, at the age it knows it."""

@@ -579,15 +579,18 @@ class Cycle:
                 "_No orders sent. Address the cause above (e.g. `/fx 500000 "
                 "CHF to USD` for margin breaches) and run `/cycle` again._"
             )
-        else:
-            self._announce_basket(orders, account, last_prices)
+        # An approval-enabled cycle publishes one self-contained decision
+        # card below. Sending the raw order table first made operators read
+        # the same plan twice and mistook gross turnover for fresh exposure.
+        from trading.core.config import settings as _settings
+
+        if orders and not _settings.require_cycle_approval:
+            self._announce_basket(orders, account, last_prices, fx_rates=fx_rates)
 
         # 8d. Per-cycle operator approval (optional, off by default).
         # When require_cycle_approval=true, block here until the operator
         # /approve's, /reject's, /pick's a different basket, or the
         # timeout fires. Default paper mode skips this entirely.
-        from trading.core.config import settings as _settings
-
         if _settings.require_cycle_approval and orders:
             candidates = self._compute_top_candidates(prices, cfg=cfg)
 
@@ -718,6 +721,7 @@ class Cycle:
                 orders,
                 account,
                 last_prices,
+                fx_rates=fx_rates,
                 candidates=candidates,
                 rebuild_from_picks=_rebuild_from_picks,
                 rebuild_with_frozen_symbols=_rebuild_with_frozen_symbols,
@@ -731,11 +735,6 @@ class Cycle:
                     decisions=decisions,
                     duration_ms=self._elapsed_ms(ts_start),
                 )
-            # Re-announce the modified basket if the operator /picked or
-            # /scaled, so the Telegram timeline shows the actual orders
-            # that will trade.
-            self._announce_basket(orders, account, last_prices)
-
         # 8f. LAST-INSTANT gates before any order leaves the building
         # (external review, 2026-07-15 — "the freeze is not atomic"):
         #
@@ -1847,6 +1846,7 @@ class Cycle:
         account: Any,
         last_prices: dict[str, float],
         *,
+        fx_rates: dict[str, float] | None = None,
         candidates: list[tuple[str, float]] | None = None,
         rebuild_from_picks: Callable[[list[str]], list[Any]] | None = None,
         rebuild_with_frozen_symbols: (
@@ -1979,12 +1979,13 @@ class Cycle:
             return False
 
         cycle_id = self._build_cycle_id(account)
+        from trading.runner.approval_view import build_plan, format_trade_review
+
         ccy = getattr(account, "base_currency", None) or "USD"
-        gross = sum(
-            float(o.quantity) * float(last_prices.get(o.instrument.key, 0.0)) for o in orders
-        )
-        equity = float(getattr(account, "equity", 0.0) or 0.0)
-        deploy_pct = (gross / equity * 100.0) if equity > 0 else 0.0
+        plan = build_plan(orders, account, last_prices, fx_rates=fx_rates)
+        gross = float(plan["gross_turnover"])
+        equity = float(plan["equity"])
+        deploy_pct = float(plan["turnover_pct"])
 
         # Planned symbols mark the candidate scoreboard and are the only
         # symbols an operator may filter in a custom approval. A request
@@ -2032,22 +2033,22 @@ class Cycle:
             # lock. Doing this before the lock would let a later cycle
             # erase the decision for the plan currently under review.
             decision_path.unlink(missing_ok=True)
-            _write_pending(
-                {
-                    "id": cycle_id,
-                    "ts": datetime.now(tz=timezone.utc).isoformat(),
-                    "phase": "initial",
-                    "plan_fingerprint": plan_fingerprint,
-                    "n_orders": len(orders),
-                    "gross": gross,
-                    "currency": ccy,
-                    "equity": equity,
-                    "deploy_pct": deploy_pct,
-                    "selectable_symbols": selectable_symbols,
-                    "can_pick": bool(candidates_payload and rebuild_from_picks),
-                    "candidates": candidates_payload,
-                }
-            )
+            pending_payload = {
+                "id": cycle_id,
+                "ts": datetime.now(tz=timezone.utc).isoformat(),
+                "phase": "initial",
+                "plan_fingerprint": plan_fingerprint,
+                "n_orders": len(orders),
+                "gross": gross,
+                "currency": ccy,
+                "equity": equity,
+                "deploy_pct": deploy_pct,
+                "plan": plan,
+                "selectable_symbols": selectable_symbols,
+                "can_pick": bool(candidates_payload and rebuild_from_picks),
+                "candidates": candidates_payload,
+            }
+            _write_pending(pending_payload)
         except OSError as exc:
             _release_approval_lock()
             logger.bind(component="cycle").error(f"could not publish approval window: {exc!r}")
@@ -2057,37 +2058,14 @@ class Cycle:
             return []
 
         timeout_s = float(_settings.cycle_approval_timeout_s)
-        prompt_lines = [
-            f"⏸ *Awaiting approval* — cycle `{cycle_id[:8]}`",
-            f"{len(orders)} orders · {deploy_pct:.0f}% of equity",
-            "",
-            "Reply with one of:",
-            "  `/approve` — submit as-is",
-            "  `/approve 80` — scale to 80% of basket size",
-            "  `/approve only NVDA MSFT` — apply only these planned changes",
-            "  `/approve all except NVDA AMD` — freeze these planned changes",
-        ]
-        if candidates_payload and rebuild_from_picks is not None:
-            prompt_lines.append("  `/pick 1 3 5 8 11` — replace basket with these ranks")
-        prompt_lines.extend(
-            [
-                "  `/approve flat` — flatten everything instead",
-                "  `/reject` — skip this cycle (no orders)",
-                f"⏱ Auto-rejects after {int(timeout_s / 60)} min.",
-            ]
-        )
-        if candidates_payload:
-            prompt_lines.append("")
-            prompt_lines.append("*Top candidates this cycle:*")
-            for i, c in enumerate(candidates_payload[:20], start=1):
-                mark = "✅" if c["in_basket"] else "  "
-                prompt_lines.append(f"  `{i:>2}` {mark} `{c['symbol']:<6}` {c['score']:+.1%}")
+        prompt = format_trade_review(pending_payload, include_controls=True)
+        prompt += f"\n`/approve 80` scales the whole plan · `/approve flat` replaces it with a full exit.\n⏱ Auto-rejects after {int(timeout_s / 60)} min."
 
         # Buttons carry the cycle id, so a tap on an older prompt in the
         # chat history is refused rather than applied to this basket.
         from trading.bot.keyboards import approval_keyboard
 
-        self.alerts.info("\n".join(prompt_lines), buttons=approval_keyboard(cycle_id))
+        self.alerts.info(prompt, buttons=approval_keyboard(cycle_id))
 
         def _cleanup() -> None:
             try:
@@ -2155,30 +2133,28 @@ class Cycle:
                     return []
 
                 preview_id = _uuid.uuid4().hex[:12]
-                revised_gross = sum(
-                    float(order.quantity) * float(last_prices.get(order.instrument.key, 0.0))
-                    for order in revised_orders
-                )
-                revised_pct = (revised_gross / equity * 100.0) if equity > 0 else 0.0
+                revised_plan = build_plan(revised_orders, account, last_prices, fx_rates=fx_rates)
+                revised_gross = float(revised_plan["gross_turnover"])
+                revised_pct = float(revised_plan["turnover_pct"])
                 preview_orders = _order_payload(revised_orders)
-                _write_pending(
-                    {
-                        "id": cycle_id,
-                        "ts": datetime.now(tz=timezone.utc).isoformat(),
-                        "phase": "custom_preview",
-                        "plan_fingerprint": plan_fingerprint,
-                        "preview_id": preview_id,
-                        "preview_fingerprint": _fingerprint(revised_orders),
-                        "mode": mode,
-                        "symbols": symbols,
-                        "n_orders": len(revised_orders),
-                        "gross": revised_gross,
-                        "currency": ccy,
-                        "equity": equity,
-                        "deploy_pct": revised_pct,
-                        "orders": preview_orders,
-                    }
-                )
+                preview_payload = {
+                    "id": cycle_id,
+                    "ts": datetime.now(tz=timezone.utc).isoformat(),
+                    "phase": "custom_preview",
+                    "plan_fingerprint": plan_fingerprint,
+                    "preview_id": preview_id,
+                    "preview_fingerprint": _fingerprint(revised_orders),
+                    "mode": mode,
+                    "symbols": symbols,
+                    "n_orders": len(revised_orders),
+                    "gross": revised_gross,
+                    "currency": ccy,
+                    "equity": equity,
+                    "deploy_pct": revised_pct,
+                    "plan": revised_plan,
+                    "orders": preview_orders,
+                }
+                _write_pending(preview_payload)
                 if not _write_audit(
                     "custom_preview",
                     mode=mode,
@@ -2195,18 +2171,13 @@ class Cycle:
                 ):
                     return []
                 mode_text = (
-                    f"only PM changes for `{', '.join(symbols)}`"
+                    f"apply only the planned changes for `{', '.join(symbols)}`"
                     if mode == "only"
                     else f"freeze `{', '.join(symbols)}`"
                 )
                 preview_lines = [
-                    f"🔎 *Revised plan — final confirmation required* — cycle `{cycle_id[:8]}`",
-                    f"{mode_text}; {len(revised_orders)} orders · {revised_pct:.0f}% of equity",
-                    "",
-                    *[
-                        f"  `{order['side']:<4}` `{order['quantity']:g}` `{order['symbol']}`"
-                        for order in preview_orders[:20]
-                    ],
+                    format_trade_review(preview_payload, final_confirmation=True),
+                    mode_text,
                 ]
                 risk_notes = [
                     decision.reason for decision in revised_decisions if decision.action != "allow"
@@ -2308,11 +2279,17 @@ class Cycle:
             if factor < 0.001:
                 self.alerts.info(f"❌ cycle `{cycle_id[:8]}` scaled to ~0% — equivalent to reject.")
                 return []
+            scaled_orders = self._rescale_orders(orders, factor)
             self.alerts.info(
-                f"✅ cycle `{cycle_id[:8]}` approved at {factor * 100:.0f}% — "
-                "rescaling order quantities."
+                format_trade_review(
+                    {
+                        "id": cycle_id,
+                        "plan": build_plan(scaled_orders, account, last_prices, fx_rates=fx_rates),
+                    },
+                    heading=f"🔁 *Scaled trade review* — submitting at {factor * 100:.0f}%",
+                )
             )
-            return self._rescale_orders(orders, factor)
+            return scaled_orders
         if action == "pick":
             picked_symbols = [str(s) for s in decision.get("picked_symbols", []) if s]
             if not picked_symbols or rebuild_from_picks is None:
@@ -2320,11 +2297,20 @@ class Cycle:
                     f"❌ cycle `{cycle_id[:8]}` /pick had no valid symbols — skipping."
                 )
                 return []
-            self.alerts.info(
-                f"✅ cycle `{cycle_id[:8]}` /pick → {len(picked_symbols)} names: "
-                f"`{', '.join(picked_symbols)}`. Rebuilding basket…"
-            )
-            return rebuild_from_picks(picked_symbols)
+            picked_orders = rebuild_from_picks(picked_symbols)
+            if picked_orders:
+                self.alerts.info(
+                    format_trade_review(
+                        {
+                            "id": cycle_id,
+                            "plan": build_plan(
+                                picked_orders, account, last_prices, fx_rates=fx_rates
+                            ),
+                        },
+                        heading="🔁 *Replacement trade review* — submitting",
+                    )
+                )
+            return picked_orders
         # action == "approve"
         self.alerts.info(f"✅ cycle `{cycle_id[:8]}` approved as-is.")
         return orders
@@ -2527,6 +2513,8 @@ class Cycle:
         orders: list[Any],
         account: Any,
         last_prices: dict[str, float],
+        *,
+        fx_rates: dict[str, float] | None = None,
     ) -> None:
         """Telegram-announce the planned order list before broker submission.
 
@@ -2538,51 +2526,14 @@ class Cycle:
             self.alerts.info("📊 cycle plan: no orders — portfolio already on target.")
             return
 
-        from trading.core.types import Side as _Side
+        from trading.runner.approval_view import build_plan, format_trade_review
 
-        equity = float(getattr(account, "equity", 0.0) or 0.0)
-        cash = float(getattr(account, "cash", 0.0) or 0.0)
-        ccy = getattr(account, "base_currency", None) or "USD"
-
-        buy_lines: list[str] = []
-        sell_lines: list[str] = []
-        gross = 0.0
-        net = 0.0
-        for o in orders:
-            px = last_prices.get(o.instrument.key, 0.0)
-            notional = float(o.quantity) * float(px)
-            gross += abs(notional)
-            pct = (notional / equity * 100.0) if equity > 0 else 0.0
-            # Per-share prices and per-order notionals are in the instrument's
-            # currency (USD for US equities). Account totals further down are
-            # in the account's base currency. We keep them visually distinct
-            # so the operator knows which is which.
-            line = (
-                f"  {o.instrument.symbol:<6} {o.quantity:>6g} @ {px:,.2f} "
-                f"= {notional:>10,.0f}  ({pct:>4.1f}%)"
+        self.alerts.info(
+            format_trade_review(
+                {"plan": build_plan(orders, account, last_prices, fx_rates=fx_rates)},
+                heading="📊 *Cycle plan*",
             )
-            if o.side == _Side.BUY:
-                buy_lines.append(line)
-                net += notional
-            else:
-                sell_lines.append(line)
-                net -= notional
-
-        deploy_pct = (gross / equity * 100.0) if equity > 0 else 0.0
-        parts: list[str] = [
-            f"📊 *Cycle plan* — {len(orders)} order(s)",
-            f"Deploy: *{deploy_pct:.0f}%* of equity "
-            f"(gross {gross:,.0f} · equity {ccy} {equity:,.0f} · cash {ccy} {cash:,.0f})",
-        ]
-        if buy_lines:
-            parts.append("\n*BUY*")
-            parts.extend(buy_lines)
-        if sell_lines:
-            parts.append("\n*SELL*")
-            parts.extend(sell_lines)
-        parts.append(f"\nNet buy: {net:,.0f} {ccy} (positive = uses cash / margin)")
-
-        self.alerts.info("\n".join(parts))
+        )
 
     def _apply_operator_mode(self, weights: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
         """Apply the operator-set mode from ``state/mode.json``.

@@ -93,7 +93,8 @@ CHARTER = (
     "8. KNOW WHAT YOU CANNOT SEE. You have exactly these sources: current "
     "positions and cash, orders and fills, the decision journal (committee "
     "rulings, agent takes, PM runs), the PM's simulated book, risk/halt "
-    "state, the operator's standing objections and mandates, and cached "
+    "state, the exact live cycle proposal while it is awaiting approval, the "
+    "operator's standing objections and mandates, and cached "
     "daily closes for symbols we track.\n"
     "You do NOT have: live or intraday quotes, fundamentals (P/E, revenue, "
     "margins, earnings dates), analyst ratings or price targets, news beyond "
@@ -106,6 +107,11 @@ CHARTER = (
     "identical to an answer from evidence and the operator cannot tell them "
     "apart. 'I don't have fundamentals for GS' is a complete and correct "
     "answer. Guessing is the one unrecoverable failure here.\n"
+    "8b. ACTIVE PROPOSAL: when 'NOW_active_cycle_proposal' says active and "
+    "readable, a question such as 'what is this cycle proposing?' is answered "
+    "from its exact buy/sell rows. State buys, reductions and exits plainly, "
+    "and explain that turnover is buys plus sells rather than new exposure. "
+    "Never say there is no current proposal when that source is active.\n"
     "9. AMBIGUITY, HANDLED LIKE A COLLEAGUE. Pick the most likely reading "
     "and answer it, folding the reading into the sentence naturally — "
     "'The XLV position in the simulated book is ...' shows what you "
@@ -249,7 +255,7 @@ def answer_budget(question: str) -> str:
 def _guess_symbol(question: str, known: set[str]) -> str | None:
     for w in re.findall(r"\b[A-Z]{1,5}\b", question):
         if w in known:
-            return w
+            return str(w)
     return None
 
 
@@ -399,6 +405,9 @@ def answer(
             # holdings").
             "NOW_trading_account_paper": _safe("positions", facts.positions_now, state_dir, sym),
             "NOW_trading_account_orders": _safe("orders", facts.orders_and_fills, state_dir, sym),
+            # The thing immediately awaiting approval is more relevant to
+            # 'what is this cycle buying?' than any historical PM decision.
+            "NOW_active_cycle_proposal": _safe("active_plan", facts.active_cycle_plan, state_dir),
             "NOW_agent_pm_simulated_book": _safe("pm_book", facts.pm_book, state_dir, data_dir),
             "NOW_risk_state": _safe("risk", facts.risk_now, state_dir),
             # What the desk believes it has learned. Without this the

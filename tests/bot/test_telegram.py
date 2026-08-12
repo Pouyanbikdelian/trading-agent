@@ -316,6 +316,117 @@ def test_approve_with_nothing_pending_reports_state(tmp_path: Path, monkeypatch)
     assert "REQUIRE" in out  # explains why no cycle ever pauses
 
 
+def test_proposal_repeats_the_exact_runner_plan_without_an_llm(tmp_path: Path, monkeypatch) -> None:
+    from trading.bot.telegram import _APPROVAL_PENDING_FILE, _cmd_proposal
+
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    _atomic_write_json(
+        tmp_path / _APPROVAL_PENDING_FILE,
+        {
+            "id": "20260812-abcdef",
+            "phase": "initial",
+            "plan": {
+                "base_currency": "CHF",
+                "order_count": 2,
+                "gross_turnover": 1_200.0,
+                "turnover_pct": 1.4,
+                "net_cash_change": -400.0,
+                "orders": [
+                    {
+                        "symbol": "AMD",
+                        "side": "BUY",
+                        "quantity": 1,
+                        "notional_base": 400.0,
+                        "context": "new position",
+                    },
+                    {
+                        "symbol": "CNC",
+                        "side": "SELL",
+                        "quantity": 12,
+                        "notional_base": 800.0,
+                        "context": "closes 12 held",
+                    },
+                ],
+                "unchanged_symbols": ["DELL"],
+            },
+        },
+    )
+
+    out = _cmd_proposal()
+
+    assert "AMD" in out and "buy 1" in out
+    assert "CNC" in out and "sell 12" in out
+    assert "Net cash released: CHF 400" in out
+    assert "not additional exposure" in out
+
+
+def test_plain_english_cycle_question_uses_the_exact_pending_plan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from trading.bot.telegram import _APPROVAL_PENDING_FILE
+
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    _atomic_write_json(
+        tmp_path / _APPROVAL_PENDING_FILE,
+        {
+            "id": "20260812-abcdef",
+            "phase": "initial",
+            "plan": {
+                "base_currency": "CHF",
+                "order_count": 2,
+                "gross_turnover": 1_200.0,
+                "turnover_pct": 1.4,
+                "net_cash_change": -400.0,
+                "orders": [
+                    {
+                        "symbol": "AMD",
+                        "side": "BUY",
+                        "quantity": 1,
+                        "notional_base": 400.0,
+                        "context": "new position",
+                    },
+                    {
+                        "symbol": "CNC",
+                        "side": "SELL",
+                        "quantity": 12,
+                        "notional_base": 800.0,
+                        "context": "closes 12 held",
+                    },
+                ],
+            },
+        },
+    )
+
+    async def should_not_call_copilot(*args, **kwargs):
+        raise AssertionError("active-plan questions are deterministic, not LLM-routed")
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", should_not_call_copilot)
+    out = asyncio.run(_dispatch("I don't understand what this cycle is proposing to buy?")) or ""
+
+    assert "AMD" in out and "CNC" in out
+    assert "new position" in out and "closes 12 held" in out
+
+
+def test_candidates_show_pending_alternatives_not_a_new_signal(tmp_path: Path, monkeypatch) -> None:
+    from trading.bot.telegram import _APPROVAL_PENDING_FILE, _cmd_candidates
+
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    _atomic_write_json(
+        tmp_path / _APPROVAL_PENDING_FILE,
+        {
+            "id": "20260812-abcdef",
+            "phase": "initial",
+            "can_pick": True,
+            "candidates": [{"symbol": "SNDK", "score": 5.39, "in_basket": False}],
+        },
+    )
+
+    out = _cmd_candidates()
+
+    assert "alternatives, not the proposed trade" in out
+    assert "SNDK" in out and "/pick" in out
+
+
 def test_reject_and_pick_share_the_state_aware_reply(tmp_path: Path, monkeypatch) -> None:
     from trading.bot.telegram import _cmd_pick, _cmd_reject
 
