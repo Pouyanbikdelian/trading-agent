@@ -9,6 +9,8 @@ pin the distinction the whole lesson lifecycle exists to make.
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -84,6 +86,47 @@ class TestToneGrading:
 
 
 class TestLessonsReachTheDesk:
+    def test_context_marks_relevant_lesson_and_exposes_counterweight_role(
+        self, tmp_path: Path
+    ) -> None:
+        """Agents see why a small lesson set was chosen, not a black-box list."""
+        from trading.agents.context import build_context
+
+        stamp = datetime.now(tz=timezone.utc).isoformat()
+        (tmp_path / "macro_monitor.json").write_text(
+            json.dumps({"last_polled_at": stamp, "readings": {"composite": 2.0}})
+        )
+        (tmp_path / "options_monitor.json").write_text(
+            json.dumps({"last_polled_at": stamp, "metrics": {"atm_iv": 0.30}})
+        )
+        (tmp_path / "style_advisor.json").write_text(
+            json.dumps({"last_polled_at": stamp, "leader": "defensive"})
+        )
+        (tmp_path / "advisor.json").write_text(
+            json.dumps({"last_polled_at": stamp, "active": [{"name": "vix_spike"}]})
+        )
+        mem = MemoryStore(tmp_path / "memory")
+        matching = mem.add_lesson(
+            "Stress volatility requires confirmed breadth before adding exposure.",
+            status="established",
+            conditions={
+                "snapshot": {
+                    "macro_bucket": "stress",
+                    "vol_bucket": "elevated",
+                    "style_leader": "defensive",
+                    "triggers": ["vix_spike"],
+                }
+            },
+        )
+        broad = mem.add_lesson(
+            "Keep concentration limits even when the regime is favourable.", status="established"
+        )
+
+        ctx = build_context(tmp_path, tmp_path / "data")
+        lessons = {row["id"]: row for row in ctx["established_lessons"]}
+        assert lessons[matching]["retrieval_role"] == "regime_match"
+        assert lessons[broad]["retrieval_role"] == "broad_prior"
+
     def test_operator_candidates_reach_the_context(self, tmp_path: Path) -> None:
         """Only established lessons used to reach build_context, so a
         tentatively-phrased lesson influenced nothing at all — it waited

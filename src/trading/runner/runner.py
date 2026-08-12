@@ -1505,12 +1505,15 @@ class Runner:
             logger.bind(component="sentinel").exception("late-day de-risk run failed")
 
     async def _run_historian_async(self) -> None:
-        """Weekly lesson distillation — see agents/historian.py."""
+        """Twice-weekly lesson distillation — see agents/historian.py."""
         try:
+            from trading.agents.context import build_context
             from trading.agents.historian import format_historian_digest, run_historian
-            from trading.memory.store import default_store
+            from trading.memory.store import default_store, lesson_condition_fingerprint
 
-            digest = await asyncio.to_thread(run_historian, default_store())
+            context = await asyncio.to_thread(build_context, settings.state_dir, settings.data_dir)
+            conditions = lesson_condition_fingerprint(context)
+            digest = await asyncio.to_thread(run_historian, default_store(), conditions=conditions)
             self.alerts.info(format_historian_digest(digest))
         except Exception:
             logger.bind(component="historian").exception("historian run failed")

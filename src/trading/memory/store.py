@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -69,7 +70,9 @@ CREATE TABLE IF NOT EXISTS lessons (
     contradict  INTEGER NOT NULL DEFAULT 0,
     retired_ts  REAL,
     retired_why TEXT,
-    tags        TEXT NOT NULL DEFAULT ''
+    tags        TEXT NOT NULL DEFAULT '',
+    conditions  TEXT NOT NULL DEFAULT '{}',  -- structured regime snapshot + stated scope
+    last_reviewed_ts REAL                    -- review rotation only; never an expiry clock
 );
 
 CREATE TABLE IF NOT EXISTS lesson_evidence (
@@ -193,6 +196,110 @@ _RETRIEVAL_STOP_WORDS = frozenset(
 )
 
 
+def lesson_condition_fingerprint(context: dict[str, Any]) -> dict[str, Any]:
+    """Compact, reproducible snapshot used to retrieve rather than expire lessons.
+
+    A regime can persist for months and may go quiet before enough outcome
+    evidence arrives. We therefore never use age as a truth judgement. The
+    snapshot answers the narrower question, "which old claim is worth
+    reopening *today*?" Missing monitors simply omit a key; pretending a
+    missing VIX or macro read is a neutral regime would be false precision.
+    """
+    out: dict[str, Any] = {}
+    macro = context.get("macro_dial")
+    if isinstance(macro, dict):
+        raw_composite = macro.get("composite")
+        if isinstance(raw_composite, (str, int, float)):
+            try:
+                composite = float(raw_composite)
+            except ValueError:
+                composite = None
+            if composite is not None and math.isfinite(composite):
+                out["macro_bucket"] = (
+                    "stress" if composite >= 1.5 else "easing" if composite <= -1.5 else "neutral"
+                )
+    vol = context.get("vol_surface")
+    if isinstance(vol, dict):
+        raw_atm_iv = vol.get("atm_iv")
+        if isinstance(raw_atm_iv, (str, int, float)):
+            try:
+                atm_iv = float(raw_atm_iv)
+            except ValueError:
+                atm_iv = None
+            if atm_iv is not None and math.isfinite(atm_iv):
+                out["vol_bucket"] = (
+                    "low"
+                    if atm_iv < 0.16
+                    else "normal"
+                    if atm_iv < 0.25
+                    else "elevated"
+                    if atm_iv < 0.35
+                    else "stress"
+                )
+    style = context.get("style_leader")
+    if isinstance(style, str) and style.strip():
+        out["style_leader"] = style.strip()
+    triggers = context.get("spy_vix_triggers")
+    if isinstance(triggers, list):
+        names = sorted(
+            {
+                str(item.get("name", "")).strip()
+                for item in triggers
+                if isinstance(item, dict) and str(item.get("name", "")).strip()
+            }
+        )
+        if names:
+            out["triggers"] = names[:8]
+    return out
+
+
+def _stored_conditions(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return ``(regime_snapshot, stated_scope)`` from current or legacy rows."""
+    try:
+        raw = json.loads(row["conditions"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        return {}, {}
+    snapshot = raw.get("snapshot", raw)
+    scope = raw.get("scope", {})
+    return (
+        dict(snapshot) if isinstance(snapshot, dict) else {},
+        dict(scope) if isinstance(scope, dict) else {},
+    )
+
+
+def _condition_match(
+    stored: dict[str, Any], current: dict[str, Any]
+) -> tuple[float, list[str], list[str]]:
+    """A small transparent relevance score — no opaque embedding or decay."""
+    matched: list[str] = []
+    different: list[str] = []
+    compared = 0
+    for key in ("macro_bucket", "vol_bucket", "style_leader"):
+        if key in stored and key in current:
+            compared += 1
+            if stored[key] == current[key]:
+                matched.append(key)
+            else:
+                different.append(key)
+    stored_triggers = {str(x) for x in stored.get("triggers", [])}
+    current_triggers = {str(x) for x in current.get("triggers", [])}
+    if stored_triggers and current_triggers:
+        compared += 1
+        overlap = stored_triggers & current_triggers
+        if overlap:
+            matched.append("triggers:" + ",".join(sorted(overlap)[:3]))
+        else:
+            different.append("triggers")
+    return (len(matched) / compared if compared else 0.0), matched, different
+
+
+def _condition_signature(conditions: dict[str, Any]) -> str:
+    """Stable comparison key that also works when a fingerprint has lists."""
+    return json.dumps(conditions, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def _keywords(text: str) -> set[str]:
     """Small, deterministic retrieval vocabulary; never an opaque embedding.
 
@@ -267,6 +374,8 @@ class MemoryStore:
             ("shadow", "pctile_52w", "REAL"),
             ("lesson_evidence", "evidence_kind", "TEXT NOT NULL DEFAULT 'review'"),
             ("lesson_evidence", "reason", "TEXT NOT NULL DEFAULT ''"),
+            ("lessons", "conditions", "TEXT NOT NULL DEFAULT '{}'"),
+            ("lessons", "last_reviewed_ts", "REAL"),
         ):
             with contextlib.suppress(sqlite3.OperationalError):  # already present
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
@@ -403,6 +512,7 @@ class MemoryStore:
         origin_episodes: list[str] | None = None,
         tags: str = "",
         status: str = "candidate",
+        conditions: dict[str, Any] | None = None,
     ) -> str:
         """Record a lesson. ``candidate`` by default — the historian's
         proposals must earn ``established`` through +3 net supporting
@@ -420,8 +530,9 @@ class MemoryStore:
         lid = _short("ls")
         ts = _now()
         self.conn.execute(
-            "INSERT INTO lessons (id, created_ts, statement, tags, status) VALUES (?, ?, ?, ?, ?)",
-            (lid, ts, statement, tags, status),
+            """INSERT INTO lessons (id, created_ts, statement, tags, status, conditions)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (lid, ts, statement, tags, status, json.dumps(conditions or {}, default=str)),
         )
         for eid in origin_episodes or []:
             self.conn.execute(
@@ -431,7 +542,10 @@ class MemoryStore:
                 (lid, eid, ts),
             )
         self._write_lesson_card(lid)
-        self.journal("lesson_created", {"id": lid, "statement": statement, "status": status})
+        self.journal(
+            "lesson_created",
+            {"id": lid, "statement": statement, "status": status, "conditions": conditions or {}},
+        )
         return lid
 
     def set_lesson_status(self, lesson_id: str, status: str) -> bool:
@@ -593,6 +707,149 @@ class MemoryStore:
             ).fetchall()
         return self.conn.execute("SELECT * FROM lessons ORDER BY created_ts DESC").fetchall()
 
+    def _lesson_cards_for_status(
+        self, status: str, current_conditions: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM lessons WHERE status = ?", (status,)).fetchall()
+        cards: list[dict[str, Any]] = []
+        for row in rows:
+            snapshot, scope = _stored_conditions(row)
+            relevance, matched, different = _condition_match(snapshot, current_conditions)
+            cards.append(
+                {
+                    "id": row["id"],
+                    "status": row["status"],
+                    "statement": row["statement"],
+                    "support": int(row["support"]),
+                    "contradict": int(row["contradict"]),
+                    "tags": row["tags"],
+                    "conditions": snapshot,
+                    "scope": scope,
+                    "relevance": relevance,
+                    "matched_conditions": matched,
+                    "different_conditions": different,
+                    "last_reviewed_ts": row["last_reviewed_ts"],
+                    "created_ts": float(row["created_ts"]),
+                }
+            )
+        return cards
+
+    @staticmethod
+    def _evidence_strength(card: dict[str, Any]) -> int:
+        return int(card["support"]) - int(card["contradict"])
+
+    def retrieve_lessons(
+        self,
+        current_conditions: dict[str, Any],
+        *,
+        status: str = "established",
+        max_relevant: int = 3,
+        max_diversifiers: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Return a small, explainable mix of relevant and broad priors.
+
+        Similarity is a retrieval aid, never a veto. Most slots favour
+        matched conditions; the remaining slots deliberately carry durable
+        lessons from a different or unknown setting so a long-lived regime
+        cannot turn the prompt into a self-confirming echo chamber.
+        """
+        if status not in _ACTIVE_LESSON_STATUSES:
+            raise ValueError(f"retrieval status must be active, got {status!r}")
+        cards = self._lesson_cards_for_status(status, current_conditions)
+        ranked = sorted(
+            cards,
+            key=lambda c: (c["relevance"], self._evidence_strength(c), c["created_ts"]),
+            reverse=True,
+        )
+        selected: list[dict[str, Any]] = []
+        for card in ranked:
+            if card["relevance"] <= 0 or len(selected) >= max_relevant:
+                continue
+            role = "regime_match" if card["relevance"] == 1.0 else "partial_match"
+            selected.append({**card, "retrieval_role": role})
+
+        # The diversifier selection is deterministic and condition-distinct.
+        # A legacy lesson (no snapshot) is a broad prior, not discarded data.
+        seen = {_condition_signature(c["conditions"]) for c in selected}
+        remaining = [c for c in cards if c["id"] not in {s["id"] for s in selected}]
+        # Reserve the first counterweight for a legacy broad prior when one
+        # exists. It is maximally different from a current-regime claim,
+        # but still ranked by evidence rather than being a random weak rule.
+        broad = sorted(
+            (c for c in remaining if not c["conditions"]),
+            key=lambda c: (self._evidence_strength(c), c["created_ts"]),
+            reverse=True,
+        )
+        diverse = sorted(
+            (c for c in remaining if c["conditions"]),
+            key=lambda c: (c["relevance"], -self._evidence_strength(c), c["created_ts"]),
+        )
+        # Put one broad prior in first, then prefer genuinely different
+        # regimes. If the vault predates snapshots, more than one legacy
+        # lesson may fill otherwise-empty counterweight slots; identical
+        # provenance must not make every older lesson permanently invisible.
+        if broad and len(selected) < max_relevant + max_diversifiers:
+            selected.append({**broad[0], "retrieval_role": "broad_prior"})
+        for card in diverse:
+            if len(selected) >= max_relevant + max_diversifiers:
+                break
+            signature = _condition_signature(card["conditions"])
+            if signature in seen:
+                continue
+            seen.add(signature)
+            selected.append({**card, "retrieval_role": "diversifier"})
+        for card in broad[1:]:
+            if len(selected) >= max_relevant + max_diversifiers:
+                break
+            selected.append({**card, "retrieval_role": "broad_prior"})
+        return selected
+
+    def candidate_review_queue(
+        self, current_conditions: dict[str, Any], *, limit: int = 12
+    ) -> list[dict[str, Any]]:
+        """Bound weekly candidate review without treating silence as failure.
+
+        No candidate is expired, demoted or forgotten. This queue merely
+        decides which bounded set gets the next scarce reviewer pass. A
+        condition match wins; otherwise the least-recently-reviewed
+        candidate rotates in, so an enduring but quiet regime is revisited.
+        """
+        cards = self._lesson_cards_for_status("candidate", current_conditions)
+        return sorted(
+            cards,
+            key=lambda c: (
+                -float(c["relevance"]),
+                float(c["last_reviewed_ts"] or 0.0),
+                -self._evidence_strength(c),
+                float(c["created_ts"]),
+            ),
+        )[:limit]
+
+    def lessons_for_historian_review(
+        self, current_conditions: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """The bounded rulebook for one Historian pass, never a deletion policy."""
+        return [
+            *self.candidate_review_queue(current_conditions, limit=12),
+            *self.retrieve_lessons(
+                current_conditions, status="established", max_relevant=4, max_diversifiers=1
+            ),
+            *self.retrieve_lessons(
+                current_conditions, status="challenged", max_relevant=2, max_diversifiers=1
+            ),
+        ]
+
+    def mark_lessons_reviewed(self, lesson_ids: list[str]) -> None:
+        """Record review rotation only; it never changes a lesson's standing."""
+        ids = list(dict.fromkeys(str(lid) for lid in lesson_ids if str(lid).startswith("ls-")))
+        if not ids:
+            return
+        marks = ",".join("?" for _ in ids)
+        self.conn.execute(
+            f"UPDATE lessons SET last_reviewed_ts = ? WHERE status != 'retired' AND id IN ({marks})",
+            (_now(), *ids),
+        )
+
     def lesson_evidence(self, lesson_id: str, *, limit: int = 12) -> list[dict[str, Any]]:
         """Auditable evidence cards for a lesson, newest first.
 
@@ -640,6 +897,16 @@ class MemoryStore:
             "",
             "## Evidence",
         ]
+        snapshot, scope = _stored_conditions(row)
+        if snapshot or scope:
+            lines += [
+                "",
+                "## Retrieval context",
+                "",
+                "```json",
+                json.dumps({"snapshot": snapshot, "scope": scope}, indent=2, sort_keys=True),
+                "```",
+            ]
         for e in ev:
             ts = datetime.fromtimestamp(e["ts"], tz=timezone.utc).date().isoformat()
             tail = f" — {e['reason']}" if e["reason"] else ""

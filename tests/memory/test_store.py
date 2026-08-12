@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from trading.memory import MemoryStore
+from trading.memory.store import lesson_condition_fingerprint
 
 
 @pytest.fixture
@@ -78,6 +79,89 @@ def test_lesson_lifecycle_promote_and_retire(mem: MemoryStore) -> None:
     assert "Retired" in card and "regime changed" in card
     # Never deleted:
     assert mem.lessons(status="retired")[0]["id"] == lid
+
+
+def test_conditioned_retrieval_mixes_matches_with_counterweights(mem: MemoryStore) -> None:
+    """Today's similarity must not hide durable lessons from other regimes."""
+    current = {
+        "macro_bucket": "stress",
+        "vol_bucket": "elevated",
+        "triggers": ["vix_spike"],
+    }
+    matching = mem.add_lesson(
+        "Stress-vol selloffs need breadth confirmation before adding risk.",
+        status="established",
+        conditions={"snapshot": current},
+    )
+    partial = mem.add_lesson(
+        "Stress macro still needs low-vol confirmation before exposure rises.",
+        status="established",
+        conditions={"snapshot": {"macro_bucket": "stress", "vol_bucket": "normal"}},
+    )
+    broad = mem.add_lesson(
+        "Never let a single sector become the whole risk budget.", status="established"
+    )
+    second_broad = mem.add_lesson(
+        "Keep a cash buffer even when the tape feels straightforward.", status="established"
+    )
+    different = mem.add_lesson(
+        "Easing-regime rallies can tolerate wider cyclical exposure.",
+        status="established",
+        conditions={"snapshot": {"macro_bucket": "easing", "vol_bucket": "low"}},
+    )
+
+    selected = mem.retrieve_lessons(current, max_relevant=3, max_diversifiers=2)
+    by_id = {row["id"]: row for row in selected}
+
+    assert by_id[matching]["retrieval_role"] == "regime_match"
+    assert by_id[partial]["retrieval_role"] == "partial_match"
+    assert by_id[partial]["different_conditions"] == ["vol_bucket"]
+    assert by_id[broad]["retrieval_role"] == "broad_prior"
+    assert by_id[second_broad]["retrieval_role"] == "broad_prior"
+    assert by_id[different]["retrieval_role"] == "diversifier"
+    assert len(selected) <= 5
+
+    legacy_mem = MemoryStore(mem.root.parent / "legacy-memory")
+    legacy_first = legacy_mem.add_lesson("First unsnapshotted prior.", status="established")
+    legacy_second = legacy_mem.add_lesson("Second unsnapshotted prior.", status="established")
+    legacy_only = legacy_mem.retrieve_lessons({}, max_relevant=0, max_diversifiers=2)
+    assert {row["id"] for row in legacy_only if row["retrieval_role"] == "broad_prior"} == {
+        legacy_first,
+        legacy_second,
+    }
+
+
+def test_review_rotation_never_expires_a_quiet_regime_candidate(mem: MemoryStore) -> None:
+    """Review timestamps allocate scarce attention; they are not validity dates."""
+    lid = mem.add_lesson(
+        "A quiet easing regime may still reward cyclicals after a long pause.",
+        conditions={"snapshot": {"macro_bucket": "easing"}},
+    )
+
+    queued = mem.candidate_review_queue({"macro_bucket": "stress"}, limit=1)
+    assert [row["id"] for row in queued] == [lid]
+    mem.mark_lessons_reviewed([lid])
+
+    row = mem.lessons(status="candidate")[0]
+    assert row["id"] == lid
+    assert row["last_reviewed_ts"] is not None
+
+
+def test_lesson_condition_fingerprint_omits_unknowns_not_false_neutrality() -> None:
+    assert lesson_condition_fingerprint({"macro_dial": {}, "vol_surface": {}}) == {}
+    assert lesson_condition_fingerprint(
+        {
+            "macro_dial": {"composite": 2.1},
+            "vol_surface": {"atm_iv": 0.31},
+            "style_leader": "defensive",
+            "spy_vix_triggers": [{"name": "vix_spike"}],
+        }
+    ) == {
+        "macro_bucket": "stress",
+        "vol_bucket": "elevated",
+        "style_leader": "defensive",
+        "triggers": ["vix_spike"],
+    }
 
 
 def test_repeated_evidence_does_not_count_twice(mem: MemoryStore) -> None:

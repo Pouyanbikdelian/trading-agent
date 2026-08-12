@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -68,6 +69,63 @@ def test_garbage_statements_skipped_and_empty_week_ok(mem: MemoryStore) -> None:
     )
     assert digest["created"] == []  # too short -> garbage guard
     assert "no new lessons" in format_historian_digest(digest)
+
+
+def test_historian_stores_scope_and_today_snapshot_for_new_lessons(mem: MemoryStore) -> None:
+    conditions = {"macro_bucket": "stress", "vol_bucket": "elevated"}
+
+    digest = run_historian(
+        mem,
+        conditions=conditions,
+        llm=lambda s, p: {
+            "new_lessons": [
+                {
+                    "title": "Breadth confirms stress rallies",
+                    "body": "A breadth recovery matters after a stress selloff. It applies only while volatility remains elevated. Dealers and short covering can otherwise create a false bounce. Add only after broad participation confirms.",
+                    "applies_when": "macro stress with elevated implied volatility",
+                    "fails_when": "breadth stays narrow",
+                    "invalidated_if": "three broad breadth failures in this regime",
+                    "sample": "24 weekly observations, 2019-2026",
+                }
+            ],
+            "retire": [],
+        },
+    )
+
+    assert digest["ok"] is True and len(digest["created"]) == 1
+    row = mem.lessons(status="candidate")[0]
+    stored = json.loads(row["conditions"])
+    assert stored["snapshot"] == conditions
+    assert stored["scope"]["applies_when"] == "macro stress with elevated implied volatility"
+    assert "Fails when: breadth stays narrow" in row["statement"]
+
+
+def test_historian_bounds_review_but_leaves_unreviewed_candidates_valid(mem: MemoryStore) -> None:
+    conditions = {"macro_bucket": "stress"}
+    ids = [
+        mem.add_lesson(
+            f"Candidate lesson {i} remains a potentially useful stress-regime claim.",
+            conditions={"snapshot": conditions},
+        )
+        for i in range(14)
+    ]
+    seen: dict[str, list[dict[str, Any]]] = {}
+
+    def llm(system: str, prompt: str) -> dict[str, Any]:
+        if "reviewer" in system:
+            return {"votes": []}
+        seen["book"] = json.loads(prompt)["lesson_book"]
+        return {"new_lessons": [], "retire": []}
+
+    run_historian(mem, llm=llm, conditions=conditions)
+
+    reviewed = {row["id"] for row in seen["book"]}
+    assert len(reviewed) == 12
+    assert reviewed < set(ids)
+    assert all(row["status"] == "candidate" for row in mem.lessons(status="candidate"))
+    rows = {row["id"]: row for row in mem.lessons(status="candidate")}
+    assert all(rows[lid]["last_reviewed_ts"] is not None for lid in reviewed)
+    assert all(rows[lid]["last_reviewed_ts"] is None for lid in set(ids) - reviewed)
 
 
 def test_promotion_needs_three_measured_outcomes(mem: MemoryStore) -> None:

@@ -382,12 +382,17 @@ def _review_period_tag(now: datetime) -> str:
 
 
 def run_historian(
-    mem: MemoryStore, *, llm: LlmFn | None = None, now: datetime | None = None
+    mem: MemoryStore,
+    *,
+    llm: LlmFn | None = None,
+    now: datetime | None = None,
+    conditions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One twice-weekly distillation pass. Returns a digest payload."""
     llm = llm or _default_llm
     now = now or datetime.now(tz=timezone.utc)
     week_tag = _review_period_tag(now)
+    current_conditions = conditions or {}
 
     lesson_book = [
         {
@@ -396,10 +401,12 @@ def run_historian(
             "statement": r["statement"],
             "support": r["support"],
             "contradict": r["contradict"],
+            "conditions": r["conditions"],
+            "scope": r["scope"],
+            "retrieval_role": r.get("retrieval_role", "review_queue"),
             "evidence": mem.lesson_evidence(r["id"], limit=8),
         }
-        for r in mem.lessons()
-        if r["status"] in ("candidate", "established", "challenged")
+        for r in mem.lessons_for_historian_review(current_conditions)
     ]
     evidence = build_week_evidence(mem)
     try:
@@ -465,8 +472,16 @@ def run_historian(
             val = str(lesson.get(key, "")).strip()
             if val:
                 stmt += f"\n{label}: {val[:300]}"
+        scope = {
+            key: str(lesson.get(key, "")).strip()[:300]
+            for key in ("applies_when", "fails_when", "invalidated_if", "sample")
+            if str(lesson.get(key, "")).strip()
+        }
         lid = mem.add_lesson(
-            stmt, origin_episodes=[week_tag], tags=str(lesson.get("tags", ""))[:120]
+            stmt,
+            origin_episodes=[week_tag],
+            tags=str(lesson.get("tags", ""))[:120],
+            conditions={"snapshot": current_conditions, "scope": scope},
         )
         label = title or stmt[:80]
         created.append(f"{lid}: {label}")
@@ -483,6 +498,10 @@ def run_historian(
         evidence,
         llm=llm,
     )
+    # This is a rotation marker, not evidence or expiry. A candidate from a
+    # quiet regime remains a candidate and comes back after its peers have
+    # had their bounded review turn.
+    mem.mark_lessons_reviewed([str(le["id"]) for le in lesson_book])
 
     retired = 0
     challenged = {r["id"] for r in lesson_book if r["status"] == "challenged"}
