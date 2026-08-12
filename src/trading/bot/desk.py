@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import tempfile
 import uuid
 from dataclasses import asdict, dataclass, replace
@@ -104,6 +105,10 @@ class WatchlistStore:
             raise ValueError("watchlist.yaml must contain a string list named 'watchlist'")
         return list(dict.fromkeys(self._symbol(s) for s in raw))
 
+    def baseline_items(self) -> list[str]:
+        """Versioned watchlist before any operator-state overlay is applied."""
+        return self._base_items()
+
     def _overrides(self) -> tuple[list[str], list[str]]:
         """``(added, removed)`` with strict validation at the write boundary."""
         try:
@@ -142,9 +147,12 @@ class WatchlistStore:
             return False
         base = self._base_items()
         added, removed = self._overrides()
-        if symbol in base:
-            removed = [item for item in removed if item != symbol]
-        else:
+        # A removal marker always wins in ``items()``.  Clear it even when
+        # the symbol has since moved out of the static config: otherwise a
+        # deploy that removes a formerly-static name would make a later
+        # approved add (or undo) appear to succeed while still hiding it.
+        removed = [item for item in removed if item != symbol]
+        if symbol not in base:
             added.append(symbol)
         self._save_overrides(list(dict.fromkeys(added)), list(dict.fromkeys(removed)))
         return True
@@ -201,6 +209,22 @@ class DeskProposal:
                 isinstance(k, str) and isinstance(v, str) for k, v in payload.items()
             ):
                 return None
+            required = {
+                "watchlist_add": {"symbol"},
+                "watchlist_remove": {"symbol"},
+                "lesson_create": {"statement", "strength", "status"},
+                "lesson_supersede": {
+                    "lesson_id",
+                    "old_statement",
+                    "statement",
+                    "strength",
+                    "status",
+                },
+                "lesson_status": {"lesson_id", "old_status", "status"},
+                "lesson_archive": {"lesson_id", "statement"},
+            }
+            if not required[kind].issubset(payload):
+                return None
             return cls(
                 id=str(raw["id"]),
                 kind=kind,  # type: ignore[arg-type]
@@ -239,11 +263,19 @@ class DeskChangeStore:
     def _all(self) -> list[DeskProposal]:
         try:
             raw = json.loads(self.path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError:
             return []
+        except json.JSONDecodeError as e:
+            raise ValueError(f"desk-change proposal state is invalid: {e}") from e
         if not isinstance(raw, list):
-            return []
-        return [p for row in raw if (p := DeskProposal.from_dict(row)) is not None]
+            raise ValueError("desk-change proposal state must be a list")
+        proposals: list[DeskProposal] = []
+        for row in raw:
+            proposal = DeskProposal.from_dict(row)
+            if proposal is None:
+                raise ValueError("desk-change proposal state contains an invalid proposal")
+            proposals.append(proposal)
+        return proposals
 
     def _save(self, proposals: list[DeskProposal]) -> None:
         _atomic_write(self.path, json.dumps([asdict(p) for p in proposals], indent=2) + "\n")
@@ -443,24 +475,55 @@ class DeskChangeStore:
         return max(candidates, key=lambda p: p.requested_at, default=None)
 
     def cancel(self, proposal_id: str | None = None) -> ChangeResult:
-        proposal = self.pending(proposal_id)
-        if proposal is None:
-            return ChangeResult(None, "No pending desk change to cancel.")
-        self._replace(proposal, "cancelled")
-        self._audit("cancelled", replace(proposal, status="cancelled"))
-        return ChangeResult(None, f"Cancelled proposed change `{proposal.id}`.")
+        try:
+            proposal = self.pending(proposal_id)
+            if proposal is None:
+                return ChangeResult(None, "No pending desk change to cancel.")
+            self._replace(proposal, "cancelled")
+            self._audit("cancelled", replace(proposal, status="cancelled"))
+            return ChangeResult(None, f"Cancelled proposed change `{proposal.id}`.")
+        except (OSError, ValueError) as e:
+            _LOG.warning(f"could not cancel desk change: {e}")
+            return ChangeResult(
+                None, f"Could not cancel the desk change: {e}. No change was applied."
+            )
 
     def approve(self, proposal_id: str | None = None) -> ChangeResult:
-        proposal = self.pending(proposal_id)
+        try:
+            proposal = self.pending(proposal_id)
+        except (OSError, ValueError, sqlite3.Error) as e:
+            _LOG.warning(f"could not read desk change for approval: {e}")
+            return ChangeResult(
+                None, f"Could not read the desk change: {e}. No change was applied."
+            )
         if proposal is None:
             return ChangeResult(None, "That desk-change proposal is no longer pending.")
+
         try:
             message, detail = self._apply(proposal)
+        except (OSError, ValueError, sqlite3.Error) as e:
+            # A lesson operation is backed by both SQLite and a markdown
+            # card, so a storage error can arrive after part of that write.
+            # Do not invite a blind retry: it could make a duplicate lesson.
+            _LOG.warning(f"desk change {proposal.id} could not be completed: {e}")
+            return ChangeResult(
+                None,
+                f"Could not complete `{proposal.id}`: {e}. It may have changed state; do not approve it again.",
+            )
+
+        try:
+            applied = replace(proposal, status="applied")
+            self._replace(proposal, "applied")
         except (OSError, ValueError) as e:
-            _LOG.warning(f"desk change {proposal.id} failed: {e}")
-            return ChangeResult(None, f"Could not apply `{proposal.id}`: {e}")
-        applied = replace(proposal, status="applied")
-        self._replace(proposal, "applied")
+            # The mutation has returned successfully, but the durable
+            # proposal status has not.  State this plainly rather than
+            # claiming the mutation failed and risking a duplicate retry.
+            _LOG.error(f"desk change {proposal.id} applied but could not finalize ledger: {e}")
+            return ChangeResult(
+                None,
+                f"`{proposal.id}` was applied, but its proposal ledger could not be finalized: {e}. Do not approve it again.",
+            )
+
         self._audit("applied", applied, **detail)
         return ChangeResult(None, message)
 

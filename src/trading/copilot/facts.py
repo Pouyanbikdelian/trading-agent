@@ -562,7 +562,7 @@ def operator_interface(state_dir: Path) -> dict[str, Any]:
             "common reason an instruction has no effect."
         ),
         "four_doors": [
-            "1. Starts with '/' -> a COMMAND. Deterministic code. This is the only door that can change anything.",
+            "1. Starts with '/' -> a COMMAND. Deterministic code. Commands can change their own defined state immediately; a desk-change proposal is the only non-command path that persists, and it still cannot apply until approved.",
             "2. A recognised free-text request to show or change the operator watchlist or an operator lesson -> a DESK-CHANGE PROPOSAL. It changes nothing until the operator approves that exact proposal; it never reaches trading execution.",
             "3. Other free text that parses as an instruction -> stored as a MANDATE for the next run. It never reaches the copilot, so there is no conversational reply, just a confirmation.",
             "4. Anything else -> the COPILOT (me). Read-only. I answer and the statement persists NOWHERE.",

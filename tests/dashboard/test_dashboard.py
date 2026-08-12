@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from trading.dashboard.app import _Handler, build_summary
+from trading.dashboard.app import _effective_watchlist, _Handler, build_summary
 from trading.memory import MemoryStore
 from trading.runner.state import RunnerStore
 
@@ -49,6 +49,19 @@ def test_build_summary_degrades_on_empty_dirs(tmp_path) -> None:
     assert out["equity_curve"] == []
     # memory store auto-creates; stats present but empty
     assert out["memory"]["stats"]["journal"] == 0
+
+
+def test_corrupt_operator_watchlist_keeps_dashboard_baseline(tmp_path, monkeypatch) -> None:
+    """A bad state overlay must not blank the static names from the chart."""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "watchlist.yaml").write_text("watchlist:\n  - NVDA\n")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "operator_watchlist.json").write_text("{not-json")
+    monkeypatch.setattr("trading.core.config.PROJECT_ROOT", tmp_path)
+
+    assert _effective_watchlist(state) == ["NVDA"]
 
 
 def test_http_auth_and_endpoints(populated_state) -> None:

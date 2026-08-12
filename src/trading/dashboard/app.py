@@ -28,6 +28,28 @@ from trading.core.clock import artifact_age_seconds
 from trading.core.logging import logger
 
 
+def _effective_watchlist(state_dir: Path) -> list[str]:
+    """Resolve the dashboard list without letting an overlay fault hide config.
+
+    The bot fails closed if its operator-state JSON is malformed, because it
+    might otherwise overwrite the only proposal ledger.  The dashboard is
+    read-only, so its safer degradation is to keep charting the versioned
+    baseline and log that operator additions/removals are temporarily absent.
+    """
+    from trading.bot.desk import WATCHLIST_OVERRIDES_FILE, WatchlistStore
+    from trading.core.config import PROJECT_ROOT
+
+    watchlist = WatchlistStore(
+        PROJECT_ROOT / "config" / "watchlist.yaml",
+        state_dir / WATCHLIST_OVERRIDES_FILE,
+    )
+    try:
+        return watchlist.items()
+    except ValueError as e:
+        logger.bind(component="dashboard").warning(f"operator watchlist unavailable: {e}")
+        return watchlist.baseline_items()
+
+
 def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     """One JSON blob with everything the page shows. Defensive: each
     section degrades to empty rather than failing the whole payload."""
@@ -107,11 +129,7 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         held = [p["symbol"] for p in out.get("context", {}).get("positions", [])]
         wl: list[str] = []
         try:
-            from trading.bot.desk import WATCHLIST_OVERRIDES_FILE, WatchlistStore
-            from trading.core.config import PROJECT_ROOT
-
-            wfile = PROJECT_ROOT / "config" / "watchlist.yaml"
-            wl = WatchlistStore(wfile, state_dir / WATCHLIST_OVERRIDES_FILE).items()
+            wl = _effective_watchlist(state_dir)
         except Exception:
             wl = []
         symbols = list(dict.fromkeys([*held, *wl]))[:24]

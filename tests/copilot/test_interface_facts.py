@@ -37,6 +37,13 @@ class TestTheInterfaceDoors:
             and "copilot" in joined
         )
 
+    def test_the_door_description_does_not_hide_proposal_persistence(self) -> None:
+        """A free-text desk request does create a pending proposal, not a trade."""
+        command_door = _iface()["four_doors"][0].lower()
+
+        assert "only door that can change anything" not in command_door
+        assert "proposal" in command_door and "approved" in command_door
+
     def test_it_says_opinions_do_not_persist(self) -> None:
         """The operator's actual question: 'I'm bullish on TSLA' — and the
         answer is that it lands nowhere."""

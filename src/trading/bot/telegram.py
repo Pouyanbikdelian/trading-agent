@@ -2318,7 +2318,15 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         # fragments ("ok", "👍") get a hint instead of an LLM call, and
         # the copilot's own 15s rate limit bounds a chatty evening.
         stripped = text.strip()
-        desk_reply = _maybe_handle_desk_request(stripped)
+        try:
+            desk_reply = _maybe_handle_desk_request(stripped)
+        except Exception as e:
+            # Desk state is deliberately fail-closed.  A malformed proposal
+            # ledger or a transient SQLite lock must not take down the
+            # long-poll loop, fall through to mandate capture, or make the
+            # LLM infer an action.  Nothing reaches trading from this path.
+            logger.exception("desk copilot request failed")
+            return PlainReply(f"Could not process the desk request: {e}. No change was applied.")
         if desk_reply is not None:
             return desk_reply
         if len(stripped) < 8 or not any(c.isalpha() for c in stripped):

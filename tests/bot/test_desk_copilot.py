@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from trading.bot import telegram as telegram_module
 from trading.bot.desk import DeskChangeStore
@@ -34,6 +38,20 @@ def _settings_stub(state_dir: Path, watchlist_path: Path) -> SimpleNamespace:
         trading_env="research",
         is_live_armed=lambda: False,
     )
+
+
+def test_desk_change_boundary_never_imports_execution() -> None:
+    """Watchlist/lesson staging must not acquire an order-capable dependency."""
+    code = (
+        "import sys\n"
+        "import trading.bot.desk\n"
+        "bad = [m for m in sys.modules if m.startswith('trading.execution')]\n"
+        "assert not bad, bad\n"
+    )
+
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_watchlist_change_is_a_proposal_until_approved(tmp_path: Path) -> None:
@@ -79,6 +97,29 @@ def test_watchlist_overrides_merge_with_later_config_edits(tmp_path: Path) -> No
     assert "IONQ" in store.watchlist.config_path.read_text()
 
 
+def test_add_restores_a_removed_name_after_a_baseline_config_change(tmp_path: Path) -> None:
+    """A stale remove marker must not hide an approved restoration forever."""
+    store = _store(tmp_path)
+    removed = store.propose_watchlist_remove("IONQ").proposal
+    assert removed is not None
+    store.approve(removed.id)
+    assert store.watchlist.items() == []
+
+    # The next deploy removes IONQ from static config too.  It is now an
+    # operator addition again, and a fresh approval needs to clear the old
+    # removal marker as well as add it to the overlay.
+    _watchlist(store.watchlist.config_path, "MSFT")
+    restored = store.propose_watchlist_add("IONQ").proposal
+    assert restored is not None
+    store.approve(restored.id)
+
+    assert store.watchlist.items() == ["MSFT", "IONQ"]
+    assert json.loads(store.watchlist.overrides_path.read_text()) == {
+        "added": ["IONQ"],
+        "removed": [],
+    }
+
+
 def test_watchlist_approval_works_with_read_only_config_mount(tmp_path: Path) -> None:
     """Mirror the bot container, where ``/app/config`` is mounted read-only."""
     store = _store(tmp_path)
@@ -105,6 +146,35 @@ def test_expired_proposal_cannot_mutate_watchlist(tmp_path: Path) -> None:
     assert "no longer pending" in store.approve(staged.proposal.id).message
     assert store.watchlist.items() == ["IONQ"]
     assert json.loads(store.path.read_text())[-1]["status"] == "expired"
+
+
+def test_corrupt_proposal_state_fails_closed_without_overwriting_history(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.path.parent.mkdir()
+    store.path.write_text("{not-json")
+
+    with pytest.raises(ValueError, match="proposal state is invalid"):
+        store.propose_watchlist_add("NVDA")
+    assert store.path.read_text() == "{not-json"
+    assert "Could not read the desk change" in store.approve().message
+
+
+def test_failed_ledger_finalization_never_claims_an_applied_change_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = _store(tmp_path)
+    staged = store.propose_watchlist_add("NVDA").proposal
+    assert staged is not None
+
+    def fail_finalize(*args, **kwargs) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_replace", fail_finalize)
+    result = store.approve(staged.id)
+
+    assert store.watchlist.items() == ["IONQ", "NVDA"]
+    assert "was applied" in result.message
+    assert "Do not approve it again" in result.message
 
 
 def test_undo_is_approval_gated_and_linked_to_the_prior_change(tmp_path: Path) -> None:
@@ -190,6 +260,28 @@ def test_plain_english_watchlist_request_stages_then_plain_approve_applies(
     reverted = asyncio.run(_dispatch("approve"))
     assert reverted is not None and "reverted" in reverted
     assert DeskChangeStore(tmp_path / "state", watchlist).watchlist.items() == ["IONQ"]
+
+
+def test_free_text_desk_failure_does_not_crash_or_fall_through_to_llm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    watchlist = tmp_path / "config" / "watchlist.yaml"
+    watchlist.parent.mkdir()
+    _watchlist(watchlist, "IONQ")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "desk_change_proposals.json").write_text("{not-json")
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(state, watchlist))
+
+    async def no_llm(*args, **kwargs):
+        raise AssertionError("a broken desk ledger must not fall through to the LLM")
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", no_llm)
+    out = asyncio.run(_dispatch("I like NVDA, can you add it to our list"))
+
+    assert isinstance(out, telegram_module.PlainReply)
+    assert "No change was applied" in out
+    assert (state / "desk_change_proposals.json").read_text() == "{not-json"
 
 
 def test_lesson_memory_request_is_answered_from_the_real_store(tmp_path: Path, monkeypatch) -> None:
