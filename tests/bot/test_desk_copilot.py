@@ -79,6 +79,42 @@ def test_watchlist_change_is_a_proposal_until_approved(tmp_path: Path) -> None:
     assert "no longer pending" in store.approve(staged.proposal.id).message
 
 
+def test_multi_watchlist_removal_is_one_atomic_approved_change(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _watchlist(store.watchlist.config_path, "IONQ", "RGTI", "FORM", "NVDA")
+
+    staged = store.propose_watchlist_remove_many(["IONQ", "RGTI", "FORM"])
+
+    assert staged.proposal is not None
+    assert staged.proposal.kind == "watchlist_remove_many"
+    assert store.watchlist.items() == ["IONQ", "RGTI", "FORM", "NVDA"]
+    assert "Remove 3 names" in telegram_module._desk_reply(staged)
+
+    result = store.approve(staged.proposal.id)
+
+    assert "Removed 3 names" in result.message
+    assert store.watchlist.items() == ["NVDA"]
+    audit = [json.loads(line) for line in store.audit_path.read_text().splitlines()]
+    assert audit[-1]["old_value"] == ["IONQ", "RGTI", "FORM", "NVDA"]
+    assert audit[-1]["new_value"] == ["NVDA"]
+
+    undo = store.propose_undo_last_watchlist_change().proposal
+    assert undo is not None and undo.kind == "watchlist_add_many"
+    assert store.approve(undo.id).message.startswith("✅ Restored 3 names")
+    assert store.watchlist.items() == ["IONQ", "RGTI", "FORM", "NVDA"]
+
+
+def test_multi_watchlist_change_is_all_or_nothing_when_one_symbol_is_absent(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    staged = store.propose_watchlist_remove_many(["IONQ", "RGTI"])
+
+    assert staged.proposal is None
+    assert "No change staged" in staged.message
+    assert store.watchlist.items() == ["IONQ"]
+    assert not store.path.exists()
+
+
 def test_watchlist_overrides_merge_with_later_config_edits(tmp_path: Path) -> None:
     store = _store(tmp_path)
     added = store.propose_watchlist_add("NVDA").proposal
@@ -260,6 +296,30 @@ def test_plain_english_watchlist_request_stages_then_plain_approve_applies(
     reverted = asyncio.run(_dispatch("approve"))
     assert reverted is not None and "reverted" in reverted
     assert DeskChangeStore(tmp_path / "state", watchlist).watchlist.items() == ["IONQ"]
+
+
+def test_plain_english_multi_watchlist_removal_is_one_proposal(tmp_path: Path, monkeypatch) -> None:
+    watchlist = tmp_path / "config" / "watchlist.yaml"
+    watchlist.parent.mkdir()
+    _watchlist(watchlist, "IONQ", "RGTI", "FORM", "NVDA")
+    state = tmp_path / "state"
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(state, watchlist))
+
+    async def no_llm(*args, **kwargs):
+        raise AssertionError("a deterministic multi-ticker request must not call the LLM")
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", no_llm)
+    proposal = asyncio.run(_dispatch("remove IONQ, RGTI and FORM from watchlist"))
+
+    assert isinstance(proposal, telegram_module.ButtonReply)
+    assert "Remove 3 names" in proposal
+    assert all(symbol in proposal for symbol in ("IONQ", "RGTI", "FORM"))
+    assert DeskChangeStore(state, watchlist).watchlist.items() == ["IONQ", "RGTI", "FORM", "NVDA"]
+
+    applied = asyncio.run(_dispatch("approve"))
+
+    assert applied is not None and "Removed 3 names" in applied
+    assert DeskChangeStore(state, watchlist).watchlist.items() == ["NVDA"]
 
 
 def test_free_text_desk_failure_does_not_crash_or_fall_through_to_llm(

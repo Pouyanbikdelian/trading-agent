@@ -37,6 +37,8 @@ _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,7}$")
 ChangeKind = Literal[
     "watchlist_add",
     "watchlist_remove",
+    "watchlist_add_many",
+    "watchlist_remove_many",
     "lesson_create",
     "lesson_supersede",
     "lesson_status",
@@ -141,34 +143,71 @@ class WatchlistStore:
         omitted = set(removed)
         return list(dict.fromkeys(symbol for symbol in [*base, *added] if symbol not in omitted))
 
-    def add(self, symbol: str) -> bool:
-        symbol = self._symbol(symbol)
-        if symbol in self.items():
-            return False
+    @classmethod
+    def _symbols(cls, symbols: list[str]) -> list[str]:
+        clean = list(dict.fromkeys(cls._symbol(symbol) for symbol in symbols))
+        if not clean:
+            raise ValueError("give at least one ticker")
+        return clean
+
+    def add_many(self, symbols: list[str]) -> tuple[bool, list[str]]:
+        """Atomically add every symbol, or none when one is already present."""
+        symbols = self._symbols(symbols)
+        items = set(self.items())
+        already_present = [symbol for symbol in symbols if symbol in items]
+        if already_present:
+            return False, already_present
+
         base = self._base_items()
         added, removed = self._overrides()
-        # A removal marker always wins in ``items()``.  Clear it even when
-        # the symbol has since moved out of the static config: otherwise a
-        # deploy that removes a formerly-static name would make a later
-        # approved add (or undo) appear to succeed while still hiding it.
-        removed = [item for item in removed if item != symbol]
-        if symbol not in base:
-            added.append(symbol)
+        for symbol in symbols:
+            removed = [item for item in removed if item != symbol]
+            if symbol not in base:
+                added.append(symbol)
         self._save_overrides(list(dict.fromkeys(added)), list(dict.fromkeys(removed)))
-        return True
+        return True, []
+
+    def remove_many(self, symbols: list[str]) -> tuple[bool, list[str]]:
+        """Atomically remove every symbol, or none when one is already absent."""
+        symbols = self._symbols(symbols)
+        items = set(self.items())
+        absent = [symbol for symbol in symbols if symbol not in items]
+        if absent:
+            return False, absent
+
+        base = self._base_items()
+        added, removed = self._overrides()
+        for symbol in symbols:
+            if symbol in base:
+                removed.append(symbol)
+            else:
+                added = [item for item in added if item != symbol]
+        self._save_overrides(list(dict.fromkeys(added)), list(dict.fromkeys(removed)))
+        return True, []
+
+    def add(self, symbol: str) -> bool:
+        return self.add_many([symbol])[0]
 
     def remove(self, symbol: str) -> bool:
-        symbol = self._symbol(symbol)
-        if symbol not in self.items():
-            return False
-        base = self._base_items()
-        added, removed = self._overrides()
-        if symbol in base:
-            removed.append(symbol)
-        else:
-            added = [item for item in added if item != symbol]
-        self._save_overrides(list(dict.fromkeys(added)), list(dict.fromkeys(removed)))
-        return True
+        return self.remove_many([symbol])[0]
+
+
+def _format_symbols(symbols: list[str]) -> str:
+    return ", ".join(f"`{symbol}`" for symbol in symbols)
+
+
+def _watchlist_payload(symbols: list[str], *, undo_of: str | None = None) -> dict[str, str]:
+    symbols = WatchlistStore._symbols(symbols)
+    payload = {"symbol": symbols[0]} if len(symbols) == 1 else {"symbols": ",".join(symbols)}
+    if undo_of:
+        payload["undo_of"] = undo_of
+    return payload
+
+
+def _proposal_symbols(payload: dict[str, str]) -> list[str]:
+    if "symbols" in payload:
+        return WatchlistStore._symbols(payload["symbols"].split(","))
+    return WatchlistStore._symbols([payload["symbol"]])
 
 
 @dataclass(frozen=True)
@@ -198,6 +237,8 @@ class DeskProposal:
             if kind not in {
                 "watchlist_add",
                 "watchlist_remove",
+                "watchlist_add_many",
+                "watchlist_remove_many",
                 "lesson_create",
                 "lesson_supersede",
                 "lesson_status",
@@ -212,6 +253,8 @@ class DeskProposal:
             required = {
                 "watchlist_add": {"symbol"},
                 "watchlist_remove": {"symbol"},
+                "watchlist_add_many": {"symbols"},
+                "watchlist_remove_many": {"symbols"},
                 "lesson_create": {"statement", "strength", "status"},
                 "lesson_supersede": {
                     "lesson_id",
@@ -224,6 +267,11 @@ class DeskProposal:
                 "lesson_archive": {"lesson_id", "statement"},
             }
             if not required[kind].issubset(payload):
+                return None
+            if (
+                kind in {"watchlist_add_many", "watchlist_remove_many"}
+                and len(_proposal_symbols(payload)) < 2
+            ):
                 return None
             return cls(
                 id=str(raw["id"]),
@@ -314,11 +362,35 @@ class DeskChangeStore:
             return ChangeResult(None, f"`{symbol}` is already on the operator watchlist.")
         return ChangeResult(self._stage("watchlist_add", {"symbol": symbol}), "")
 
+    def propose_watchlist_add_many(self, symbols: list[str]) -> ChangeResult:
+        symbols = self.watchlist._symbols(symbols)
+        if len(symbols) == 1:
+            return self.propose_watchlist_add(symbols[0])
+        already_present = [symbol for symbol in symbols if symbol in self.watchlist.items()]
+        if already_present:
+            return ChangeResult(
+                None,
+                f"Already on the operator watchlist: {_format_symbols(already_present)}. No change staged.",
+            )
+        return ChangeResult(self._stage("watchlist_add_many", _watchlist_payload(symbols)), "")
+
     def propose_watchlist_remove(self, symbol: str) -> ChangeResult:
         symbol = self.watchlist._symbol(symbol)
         if symbol not in self.watchlist.items():
             return ChangeResult(None, f"`{symbol}` is not on the operator watchlist.")
         return ChangeResult(self._stage("watchlist_remove", {"symbol": symbol}), "")
+
+    def propose_watchlist_remove_many(self, symbols: list[str]) -> ChangeResult:
+        symbols = self.watchlist._symbols(symbols)
+        if len(symbols) == 1:
+            return self.propose_watchlist_remove(symbols[0])
+        absent = [symbol for symbol in symbols if symbol not in self.watchlist.items()]
+        if absent:
+            return ChangeResult(
+                None,
+                f"Not on the operator watchlist: {_format_symbols(absent)}. No change staged.",
+            )
+        return ChangeResult(self._stage("watchlist_remove_many", _watchlist_payload(symbols)), "")
 
     def propose_undo_last_watchlist_change(self) -> ChangeResult:
         """Stage the inverse of the last applied watchlist change.
@@ -341,28 +413,38 @@ class DeskChangeStore:
             if (
                 record.get("event") == "applied"
                 and proposal is not None
-                and proposal.kind in {"watchlist_add", "watchlist_remove"}
+                and proposal.kind
+                in {
+                    "watchlist_add",
+                    "watchlist_remove",
+                    "watchlist_add_many",
+                    "watchlist_remove_many",
+                }
             ):
                 original = proposal
                 break
         if original is None:
             return ChangeResult(None, "There is no applied watchlist change to undo.")
-        symbol = original.payload["symbol"]
-        items = self.watchlist.items()
-        if original.kind == "watchlist_add":
-            if symbol not in items:
+        symbols = _proposal_symbols(original.payload)
+        items = set(self.watchlist.items())
+        if original.kind in {"watchlist_add", "watchlist_add_many"}:
+            absent = [symbol for symbol in symbols if symbol not in items]
+            if absent:
                 return ChangeResult(
-                    None, f"`{symbol}` is already absent; that change cannot be undone."
+                    None,
+                    f"Already absent: {_format_symbols(absent)}; that change cannot be undone.",
                 )
-            kind: ChangeKind = "watchlist_remove"
+            kind: ChangeKind = "watchlist_remove" if len(symbols) == 1 else "watchlist_remove_many"
         else:
-            if symbol in items:
+            present = [symbol for symbol in symbols if symbol in items]
+            if present:
                 return ChangeResult(
-                    None, f"`{symbol}` is already present; that change cannot be undone."
+                    None,
+                    f"Already present: {_format_symbols(present)}; that change cannot be undone.",
                 )
-            kind = "watchlist_add"
+            kind = "watchlist_add" if len(symbols) == 1 else "watchlist_add_many"
         return ChangeResult(
-            self._stage(kind, {"symbol": symbol, "undo_of": original.id}),
+            self._stage(kind, _watchlist_payload(symbols, undo_of=original.id)),
             "",
         )
 
@@ -533,35 +615,49 @@ class DeskChangeStore:
 
     def _apply(self, proposal: DeskProposal) -> tuple[str, dict[str, Any]]:
         p = proposal.payload
-        if proposal.kind == "watchlist_add":
+        if proposal.kind in {"watchlist_add", "watchlist_add_many"}:
+            symbols = _proposal_symbols(p)
             before = self.watchlist.items()
-            changed = self.watchlist.add(p["symbol"])
+            changed, already_present = self.watchlist.add_many(symbols)
             after = self.watchlist.items()
             if not changed:
-                return f"`{p['symbol']}` was already on the operator watchlist.", {
+                return f"Already on the operator watchlist: {_format_symbols(already_present)}.", {
                     "old_value": before,
                     "new_value": after,
                 }
             verb = "Restored" if p.get("undo_of") else "Added"
             undo = f" Reverted `{p['undo_of']}`." if p.get("undo_of") else ""
+            if len(symbols) > 1:
+                return (
+                    f"✅ {verb} {len(symbols)} names to the operator watchlist: "
+                    f"{_format_symbols(symbols)}.{undo} No trading action was taken.",
+                    {"old_value": before, "new_value": after},
+                )
             return (
-                f"✅ {verb} `{p['symbol']}` on the operator watchlist.{undo} "
+                f"✅ {verb} `{symbols[0]}` on the operator watchlist.{undo} "
                 "No trading action was taken.",
                 {"old_value": before, "new_value": after},
             )
-        if proposal.kind == "watchlist_remove":
+        if proposal.kind in {"watchlist_remove", "watchlist_remove_many"}:
+            symbols = _proposal_symbols(p)
             before = self.watchlist.items()
-            changed = self.watchlist.remove(p["symbol"])
+            changed, absent = self.watchlist.remove_many(symbols)
             after = self.watchlist.items()
             if not changed:
-                return f"`{p['symbol']}` was already absent from the operator watchlist.", {
+                return f"Already absent from the operator watchlist: {_format_symbols(absent)}.", {
                     "old_value": before,
                     "new_value": after,
                 }
             verb = "Removed to undo" if p.get("undo_of") else "Removed"
             undo = f" `{p['undo_of']}` was reverted." if p.get("undo_of") else ""
+            if len(symbols) > 1:
+                return (
+                    f"✅ {verb} {len(symbols)} names from the operator watchlist: "
+                    f"{_format_symbols(symbols)}.{undo} No trading action was taken.",
+                    {"old_value": before, "new_value": after},
+                )
             return (
-                f"✅ {verb} `{p['symbol']}` from the operator watchlist.{undo} "
+                f"✅ {verb} `{symbols[0]}` from the operator watchlist.{undo} "
                 "No trading action was taken.",
                 {"old_value": before, "new_value": after},
             )
@@ -621,14 +717,28 @@ class DeskChangeStore:
 def describe_proposal(proposal: DeskProposal) -> str:
     """Human preview of the exact change, before any mutation happens."""
     p = proposal.payload
-    if proposal.kind == "watchlist_add":
+    if proposal.kind in {"watchlist_add", "watchlist_add_many"}:
+        symbols = _proposal_symbols(p)
         action = "Restore" if p.get("undo_of") else "Add"
         prior = f" This reverts `{p['undo_of']}`." if p.get("undo_of") else ""
-        body = f"{action} `{p['symbol']}` to the operator watchlist.{prior}\nNo trading action will be taken."
-    elif proposal.kind == "watchlist_remove":
+        if len(symbols) == 1:
+            body = f"{action} `{symbols[0]}` to the operator watchlist.{prior}\nNo trading action will be taken."
+        else:
+            body = (
+                f"{action} {len(symbols)} names to the operator watchlist: "
+                f"{_format_symbols(symbols)}.{prior}\nNo trading action will be taken."
+            )
+    elif proposal.kind in {"watchlist_remove", "watchlist_remove_many"}:
+        symbols = _proposal_symbols(p)
         action = "Remove to undo" if p.get("undo_of") else "Remove"
         prior = f" This reverts `{p['undo_of']}`." if p.get("undo_of") else ""
-        body = f"{action} `{p['symbol']}` from the operator watchlist.{prior}\nNo trading action will be taken."
+        if len(symbols) == 1:
+            body = f"{action} `{symbols[0]}` from the operator watchlist.{prior}\nNo trading action will be taken."
+        else:
+            body = (
+                f"{action} {len(symbols)} names from the operator watchlist: "
+                f"{_format_symbols(symbols)}.{prior}\nNo trading action will be taken."
+            )
     elif proposal.kind == "lesson_create":
         body = f"Create an operator lesson as *{p['status']}*:\n{p['statement']}"
     elif proposal.kind == "lesson_supersede":

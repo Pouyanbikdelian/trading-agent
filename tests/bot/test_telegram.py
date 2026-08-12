@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,8 @@ from trading.bot.telegram import (
     _cmd_status,
     _dispatch,
 )
+from trading.core.types import AccountSnapshot, AssetClass, Instrument, Position
+from trading.runner.state import RunnerStore
 
 
 def _settings_stub(state_dir: Path) -> SimpleNamespace:
@@ -59,6 +62,38 @@ def test_dispatch_plain_text_routes_to_copilot(monkeypatch) -> None:
     out = asyncio.run(_dispatch("why did we buy MU last week?"))
     assert out == "copilot reply"
     assert seen["q"] == "why did we buy MU last week?"
+
+
+def test_plain_language_live_positions_are_a_compact_snapshot_inventory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Current holdings are facts, never a PM-memory or LLM paraphrase."""
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    amat = Instrument(symbol="AMAT", asset_class=AssetClass.EQUITY)
+    ceg = Instrument(symbol="CEG", asset_class=AssetClass.EQUITY)
+    RunnerStore(tmp_path / "runner.db").save_snapshot(
+        AccountSnapshot(
+            ts=datetime.now(tz=timezone.utc),
+            cash=10_000.0,
+            equity=20_000.0,
+            positions={
+                amat.key: Position(instrument=amat, quantity=12, avg_price=500),
+                ceg.key: Position(instrument=ceg, quantity=30, avg_price=250),
+            },
+            base_currency="CHF",
+        )
+    )
+
+    async def boom(*args, **kwargs) -> str:
+        raise AssertionError("position inventory must not call the copilot")
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", boom)
+    out = asyncio.run(_dispatch("what are our general positions in the live strategy right now?"))
+
+    assert out is not None
+    assert "AMAT" in out and "CEG" in out
+    assert "2 open" in out
+    assert "Avg cost" not in out and "PM" not in out
 
 
 @pytest.mark.parametrize(

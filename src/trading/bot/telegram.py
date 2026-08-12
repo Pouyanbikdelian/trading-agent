@@ -491,17 +491,28 @@ def _cmd_watchlist(args: list[str]) -> str:
             )
         action = args[0].lower()
         if action in {"add", "remove", "drop"}:
-            if len(args) != 2:
-                return f"usage: `/watchlist {action} SYMBOL`"
-            result = (
-                store.propose_watchlist_add(args[1])
-                if action == "add"
-                else store.propose_watchlist_remove(args[1])
-            )
+            symbols = [token for arg in args[1:] for token in arg.replace(",", " ").split()]
+            if not symbols:
+                return f"usage: `/watchlist {action} SYMBOL [SYMBOL ...]`"
+            if action == "add":
+                result = (
+                    store.propose_watchlist_add(symbols[0])
+                    if len(symbols) == 1
+                    else store.propose_watchlist_add_many(symbols)
+                )
+            else:
+                result = (
+                    store.propose_watchlist_remove(symbols[0])
+                    if len(symbols) == 1
+                    else store.propose_watchlist_remove_many(symbols)
+                )
             return _desk_reply(result)
         if action == "undo" and len(args) == 1:
             return _desk_reply(store.propose_undo_last_watchlist_change())
-        return "usage: `/watchlist` · `/watchlist add SYMBOL` · `/watchlist remove SYMBOL` · `/watchlist undo`"
+        return (
+            "usage: `/watchlist` · `/watchlist add SYMBOL [SYMBOL ...]` · "
+            "`/watchlist remove SYMBOL [SYMBOL ...]` · `/watchlist undo`"
+        )
     except Exception as e:
         return f"could not read the operator watchlist: `{e}`"
 
@@ -1122,6 +1133,39 @@ def _cmd_positions() -> str:
     )
     table = "```\n" + "\n".join([header, sep, *body]) + "\n```"
     return prefix + summary + "\n" + table
+
+
+def _cmd_position_inventory() -> str:
+    """Return only the current real-account symbols, not prices or PM context.
+
+    The normal ``/positions`` table is useful when reviewing sizing and P&L.
+    A plain question like "what stocks do we own?" asks a different thing:
+    the small, authoritative inventory.  It is deliberately assembled from
+    the runner snapshot rather than delegated to the copilot, which must not
+    infer current holdings from a historical PM decision or partial evidence.
+    """
+    try:
+        from trading.runner.state import RunnerStore
+
+        snap = RunnerStore(settings.state_dir / "runner.db").latest_snapshot()
+    except Exception as e:
+        return f"could not read live positions: {e}"
+    if snap is None:
+        return "No live-strategy snapshot yet — the runner has not recorded positions."
+
+    prefix = _snapshot_age_warning(snap.ts) or ""
+    symbols = sorted(
+        {
+            position.instrument.symbol.upper()
+            for position in snap.positions.values()
+            if abs(float(position.quantity)) > 0
+        }
+    )
+    stamp = snap.ts.strftime("%Y-%m-%d %H:%M UTC")
+    if not symbols:
+        return prefix + f"📊 *Live strategy positions* (snapshot {stamp})\nNo open positions."
+    names = ", ".join(f"`{symbol}`" for symbol in symbols)
+    return prefix + f"📊 *Live strategy positions* (snapshot {stamp})\n{len(symbols)} open: {names}"
 
 
 # ---------------------------------------------------------------------------
@@ -2457,14 +2501,38 @@ _LIST_REFERENCE_RE = r"(?:watch\s*list|(?:our|my|the)\s+list)"
 _EXPLICIT_TICKER_RE = re.compile(r"(?<![A-Za-z0-9])\$?([A-Z][A-Z0-9.-]{1,7})(?![A-Za-z0-9])")
 
 
-def _request_ticker(text: str) -> str | None:
-    """A ticker named by the operator, never an LLM-guessed company symbol."""
-    matches = {
-        m.group(1).upper()
-        for m in _EXPLICIT_TICKER_RE.finditer(text)
-        if m.group(1).upper() not in {"THE", "AND", "THIS", "THAT", "LIST"}
-    }
-    return next(iter(matches)) if len(matches) == 1 else None
+def _request_tickers(text: str) -> list[str]:
+    """Explicit operator tickers, in message order, never LLM-guessed."""
+    matches: list[str] = []
+    for m in _EXPLICIT_TICKER_RE.finditer(text):
+        symbol = m.group(1).upper()
+        if symbol in {"THE", "AND", "THIS", "THAT", "LIST"} or symbol in matches:
+            continue
+        matches.append(symbol)
+    return matches
+
+
+def _looks_like_position_inventory_question(text: str) -> bool:
+    """Route live-account inventory questions to the runner snapshot.
+
+    This is intentionally about *what is owned*, not questions about price,
+    performance, rationale, or what to buy.  Those remain copilot questions.
+    """
+    low = " ".join(text.lower().split())
+    asks_inventory = bool(re.search(r"\b(?:what|which|show|list|display)\b", low))
+    describes_inventory = any(
+        phrase in low
+        for phrase in (
+            "positions",
+            "holdings",
+            "stocks do we own",
+            "what do we own",
+            "live strategy",
+            "trading account",
+            "real strategy",
+        )
+    )
+    return asks_inventory and describes_inventory
 
 
 def _maybe_handle_desk_request(text: str) -> str | None:
@@ -2494,11 +2562,23 @@ def _maybe_handle_desk_request(text: str) -> str | None:
 
     add_request = has_list and re.search(r"\b(add|include|put)\b", low)
     remove_request = has_list and re.search(r"\b(remove|drop|delete)\b", low)
-    ticker = _request_ticker(compact)
-    if add_request and ticker is not None:
-        return _desk_reply(_desk_store().propose_watchlist_add(ticker))
-    if remove_request and ticker is not None:
-        return _desk_reply(_desk_store().propose_watchlist_remove(ticker))
+    tickers = _request_tickers(compact)
+    if add_request and tickers:
+        store = _desk_store()
+        result = (
+            store.propose_watchlist_add(tickers[0])
+            if len(tickers) == 1
+            else store.propose_watchlist_add_many(tickers)
+        )
+        return _desk_reply(result)
+    if remove_request and tickers:
+        store = _desk_store()
+        result = (
+            store.propose_watchlist_remove(tickers[0])
+            if len(tickers) == 1
+            else store.propose_watchlist_remove_many(tickers)
+        )
+        return _desk_reply(result)
     if has_list and re.search(r"\bundo\b", low):
         return _desk_reply(_desk_store().propose_undo_last_watchlist_change())
 
@@ -2547,6 +2627,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         stripped = text.strip()
         if _looks_like_holds_question(stripped) or _confirms_existing_holds(stripped):
             return _cmd_holds()
+        if _looks_like_position_inventory_question(stripped):
+            return _cmd_position_inventory()
         try:
             desk_reply = _maybe_handle_desk_request(stripped)
         except Exception as e:
