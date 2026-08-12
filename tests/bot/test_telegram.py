@@ -61,6 +61,71 @@ def test_dispatch_plain_text_routes_to_copilot(monkeypatch) -> None:
     assert seen["q"] == "why did we buy MU last week?"
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what are we having on hold?",
+        "Which tickers are pinned?",
+        "show the no-sell positions",
+        "list cycle-protected names",
+    ],
+)
+def test_plain_language_holds_inventory_reads_live_registry(
+    tmp_path: Path, monkeypatch, question: str
+) -> None:
+    """Never let PM memory stand in for the operator's hard pins."""
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    (tmp_path / "holds.json").write_text(json.dumps({"symbols": ["NVDA", "CEG"]}))
+
+    async def boom(*args, **kwargs) -> str:
+        raise AssertionError("hold inventory must not call the copilot")
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", boom)
+    out = asyncio.run(_dispatch(question))
+
+    assert out is not None
+    assert "NVDA" in out and "CEG" in out
+    assert "Pinned positions" in out
+
+
+def test_hold_advice_question_still_reaches_copilot(tmp_path: Path, monkeypatch) -> None:
+    """Only a list request is deterministic; advice still needs reasoning."""
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+
+    async def fake(question: str, **kwargs) -> str:
+        return "copilot advice"
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", fake)
+    assert asyncio.run(_dispatch("should I put CEG on hold?")) == "copilot advice"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "but I have them already on hold",
+        "these should be on hold: AMAT, CEG, GEV, NVDA, TER",
+    ],
+)
+def test_existing_holds_correction_reads_registry_not_copilot(
+    tmp_path: Path, monkeypatch, message: str
+) -> None:
+    """A correction must not become an invented PM mandate or LLM answer."""
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    (tmp_path / "holds.json").write_text(
+        json.dumps({"symbols": ["AMAT", "CEG", "GEV", "NVDA", "TER"]})
+    )
+
+    async def boom(*args, **kwargs) -> str:
+        raise AssertionError("existing pin confirmation must not call the copilot")
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", boom)
+    out = asyncio.run(_dispatch(message))
+
+    assert out is not None
+    assert "AMAT" in out and "TER" in out
+    assert "Pinned positions" in out
+
+
 def test_dispatch_tiny_fragment_gets_hint_not_llm(monkeypatch) -> None:
     async def fake_copilot(question: str, symbol: str | None = None, **kw) -> str:
         raise AssertionError("copilot must not be called for fragments")

@@ -2167,6 +2167,73 @@ def _looks_like_active_plan_question(text: str) -> bool:
     return has_plan_word and asks_action
 
 
+def _looks_like_holds_question(text: str) -> bool:
+    """True for a request to list the live cycle-protected tickers.
+
+    ``/holds`` reads the runner-owned ``holds.json`` directly, but ordinary
+    chat previously went to the copilot.  That let the model confuse the PM's
+    research portfolio with the operator's hard no-trade pins.  A question
+    such as "what are we having on hold?" is an inventory request, not a
+    reasoning task, so answer it from the same authoritative state as the
+    command.
+
+    Keep this intentionally narrow.  Questions about *whether* to hold a
+    symbol, or why the system held a position, remain questions for the
+    copilot rather than being mistaken for a request to list pins.
+    """
+    low = " ".join(text.lower().split())
+    asks_inventory = bool(re.search(r"\b(?:what|which|show|list|display)\b", low))
+    refers_to_pins = any(
+        phrase in low
+        for phrase in (
+            "on hold",
+            "on-hold",
+            "pinned",
+            "pins",
+            "no sell",
+            "no-sell",
+            "cycle protected",
+            "cycle-protected",
+        )
+    )
+    return asks_inventory and refers_to_pins
+
+
+def _confirms_existing_holds(text: str) -> bool:
+    """True when plain chat is correcting the bot about pins already saved.
+
+    This handles the natural follow-up to a bad inventory reply — "but I
+    have them already on hold" — and a pasted ticker list such as "these
+    should be on hold: AMAT, CEG" when every named ticker is already pinned.
+    It is deliberately read-only: an unpinned name still needs the explicit
+    ``/hold`` command, rather than a conversational clarification silently
+    changing the live cycle's no-trade rules.
+    """
+    low = " ".join(text.lower().split())
+    refers_to_pins = any(
+        phrase in low for phrase in ("on hold", "on-hold", "pinned", "no sell", "no-sell")
+    )
+    if not refers_to_pins:
+        return False
+    if "already" in low:
+        return True
+
+    # Explicit uppercase symbols are the least ambiguous form in a chat
+    # correction.  Do not infer tickers from ordinary prose or treat an
+    # unpinned symbol as confirmation.
+    mentioned = {
+        token.upper() for token in re.findall(r"\b[A-Z]{1,5}\b", text) if _looks_like_ticker(token)
+    }
+    if not mentioned:
+        return False
+    try:
+        from trading.runner.holds import load_holds
+
+        return mentioned.issubset(load_holds(settings.state_dir))
+    except Exception:
+        return False
+
+
 def _cmd_approve(args: list[str]) -> str:
     r"""Approve the currently-pending cycle or request a filtered preview.
 
@@ -2478,6 +2545,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         # fragments ("ok", "👍") get a hint instead of an LLM call, and
         # the copilot's own 15s rate limit bounds a chatty evening.
         stripped = text.strip()
+        if _looks_like_holds_question(stripped) or _confirms_existing_holds(stripped):
+            return _cmd_holds()
         try:
             desk_reply = _maybe_handle_desk_request(stripped)
         except Exception as e:
