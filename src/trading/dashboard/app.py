@@ -96,24 +96,22 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         out["market_watch"] = {}
 
     # Holdings + watchlist: 6 months of closes per symbol, normalized
-    # client-side. Held names from the snapshot; extras from
-    # config/watchlist.yaml (cache-served via yfinance fallback).
+    # client-side. Held names from the snapshot; extras from the static
+    # config watchlist plus approval-gated operator overrides in state
+    # (cache-served via yfinance fallback). The bot mounts config read-only,
+    # so this merge is what makes Telegram edits visible without broadening
+    # the bot's container authority.
     try:
         from trading.runtime.portfolio_stats import _read_close
 
         held = [p["symbol"] for p in out.get("context", {}).get("positions", [])]
         wl: list[str] = []
         try:
-            import yaml as _yaml
-
+            from trading.bot.desk import WATCHLIST_OVERRIDES_FILE, WatchlistStore
             from trading.core.config import PROJECT_ROOT
 
             wfile = PROJECT_ROOT / "config" / "watchlist.yaml"
-            if wfile.exists():
-                wl = [
-                    str(s).upper()
-                    for s in (_yaml.safe_load(wfile.read_text()) or {}).get("watchlist", [])
-                ]
+            wl = WatchlistStore(wfile, state_dir / WATCHLIST_OVERRIDES_FILE).items()
         except Exception:
             wl = []
         symbols = list(dict.fromkeys([*held, *wl]))[:24]

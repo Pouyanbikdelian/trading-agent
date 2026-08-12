@@ -38,6 +38,7 @@ def _settings_stub(state_dir: Path, watchlist_path: Path) -> SimpleNamespace:
 
 def test_watchlist_change_is_a_proposal_until_approved(tmp_path: Path) -> None:
     store = _store(tmp_path)
+    baseline = store.watchlist.config_path.read_text()
 
     staged = store.propose_watchlist_add("NVDA")
 
@@ -46,10 +47,51 @@ def test_watchlist_change_is_a_proposal_until_approved(tmp_path: Path) -> None:
     result = store.approve(staged.proposal.id)
     assert "Added `NVDA`" in result.message
     assert store.watchlist.items() == ["IONQ", "NVDA"]
+    # The bot's production config mount is deliberately read-only. A
+    # Telegram edit must therefore leave the versioned baseline untouched
+    # and persist only the state-volume overlay shared with the dashboard.
+    assert store.watchlist.config_path.read_text() == baseline
+    assert json.loads(store.watchlist.overrides_path.read_text()) == {
+        "added": ["NVDA"],
+        "removed": [],
+    }
 
     events = [json.loads(line)["event"] for line in store.audit_path.read_text().splitlines()]
     assert events == ["proposed", "applied"]
     assert "no longer pending" in store.approve(staged.proposal.id).message
+
+
+def test_watchlist_overrides_merge_with_later_config_edits(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    added = store.propose_watchlist_add("NVDA").proposal
+    assert added is not None
+    store.approve(added.id)
+
+    # A deploy can update the versioned baseline after the operator has
+    # already added a name. The overlay must merge instead of replacing it.
+    _watchlist(store.watchlist.config_path, "IONQ", "MSFT")
+    assert store.watchlist.items() == ["IONQ", "MSFT", "NVDA"]
+
+    removed = store.propose_watchlist_remove("IONQ").proposal
+    assert removed is not None
+    store.approve(removed.id)
+    assert store.watchlist.items() == ["MSFT", "NVDA"]
+    assert "IONQ" in store.watchlist.config_path.read_text()
+
+
+def test_watchlist_approval_works_with_read_only_config_mount(tmp_path: Path) -> None:
+    """Mirror the bot container, where ``/app/config`` is mounted read-only."""
+    store = _store(tmp_path)
+    baseline = store.watchlist.config_path.read_text()
+    store.watchlist.config_path.chmod(0o444)
+
+    staged = store.propose_watchlist_add("NVDA").proposal
+    assert staged is not None
+    store.approve(staged.id)
+
+    assert store.watchlist.items() == ["IONQ", "NVDA"]
+    assert store.watchlist.config_path.read_text() == baseline
+    assert store.watchlist.overrides_path.exists()
 
 
 def test_expired_proposal_cannot_mutate_watchlist(tmp_path: Path) -> None:

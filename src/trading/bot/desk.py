@@ -29,6 +29,7 @@ _LOG = logger.bind(component="desk_copilot")
 
 PROPOSALS_FILE = "desk_change_proposals.json"
 AUDIT_FILE = "desk_change_audit.jsonl"
+WATCHLIST_OVERRIDES_FILE = "operator_watchlist.json"
 PROPOSAL_TTL = timedelta(minutes=10)
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,7}$")
 
@@ -71,15 +72,18 @@ def _lesson_snapshot(mem: MemoryStore, lesson_id: str) -> dict[str, str] | None:
 
 
 class WatchlistStore:
-    """The dashboard-only operator watchlist in ``config/watchlist.yaml``.
+    """Effective dashboard-only watchlist: static config plus operator overrides.
 
-    It intentionally edits neither ``universes.yaml`` nor any signal or
-    execution setting.  The file is a simple YAML list; additions/removals
-    preserve its explanatory group comments rather than reserialising it.
+    ``config/watchlist.yaml`` remains a versioned, read-only baseline inside
+    the bot container.  Telegram changes live in the shared state volume as
+    a compact add/remove overlay; the dashboard uses this same resolver.
+    That matters on the VPS: making ``config/`` writable for a chat bot
+    would broaden the bot's authority far beyond the operator watchlist.
     """
 
-    def __init__(self, path: Path) -> None:
-        self.path = Path(path)
+    def __init__(self, config_path: Path, overrides_path: Path) -> None:
+        self.config_path = Path(config_path)
+        self.overrides_path = Path(overrides_path)
 
     @staticmethod
     def _symbol(symbol: str) -> str:
@@ -88,50 +92,74 @@ class WatchlistStore:
             raise ValueError("use a ticker such as NVDA, BRK.B, or RDS-A")
         return clean
 
-    def items(self) -> list[str]:
-        if not self.path.exists():
+    def _base_items(self) -> list[str]:
+        if not self.config_path.exists():
             return []
         try:
-            payload = yaml.safe_load(self.path.read_text()) or {}
+            payload = yaml.safe_load(self.config_path.read_text()) or {}
         except yaml.YAMLError as e:
             raise ValueError(f"watchlist YAML is invalid: {e}") from e
         raw = payload.get("watchlist", []) if isinstance(payload, dict) else []
         if not isinstance(raw, list) or not all(isinstance(s, str) for s in raw):
             raise ValueError("watchlist.yaml must contain a string list named 'watchlist'")
-        return [self._symbol(s) for s in raw]
+        return list(dict.fromkeys(self._symbol(s) for s in raw))
+
+    def _overrides(self) -> tuple[list[str], list[str]]:
+        """``(added, removed)`` with strict validation at the write boundary."""
+        try:
+            raw = json.loads(self.overrides_path.read_text())
+        except FileNotFoundError:
+            return [], []
+        except json.JSONDecodeError as e:
+            raise ValueError(f"operator watchlist state is invalid: {e}") from e
+        if not isinstance(raw, dict):
+            raise ValueError("operator watchlist state must be an object")
+        added, removed = raw.get("added", []), raw.get("removed", [])
+        if not isinstance(added, list) or not isinstance(removed, list):
+            raise ValueError("operator watchlist state must have string added/removed lists")
+        if not all(isinstance(s, str) for s in [*added, *removed]):
+            raise ValueError("operator watchlist state must have string added/removed lists")
+        return (
+            list(dict.fromkeys(self._symbol(s) for s in added)),
+            list(dict.fromkeys(self._symbol(s) for s in removed)),
+        )
+
+    def _save_overrides(self, added: list[str], removed: list[str]) -> None:
+        _atomic_write(
+            self.overrides_path,
+            json.dumps({"added": added, "removed": removed}, indent=2) + "\n",
+        )
+
+    def items(self) -> list[str]:
+        base = self._base_items()
+        added, removed = self._overrides()
+        omitted = set(removed)
+        return list(dict.fromkeys(symbol for symbol in [*base, *added] if symbol not in omitted))
 
     def add(self, symbol: str) -> bool:
         symbol = self._symbol(symbol)
         if symbol in self.items():
             return False
-        if not self.path.exists():
-            _atomic_write(self.path, f"watchlist:\n  - {symbol}\n")
-            return True
-        text = self.path.read_text()
-        if not re.search(r"^watchlist\s*:\s*(?:#.*)?$", text, flags=re.MULTILINE):
-            raise ValueError("watchlist.yaml has no top-level 'watchlist:' section")
-        suffix = "" if not text or text.endswith("\n") else "\n"
-        _atomic_write(self.path, f"{text}{suffix}  - {symbol}\n")
+        base = self._base_items()
+        added, removed = self._overrides()
+        if symbol in base:
+            removed = [item for item in removed if item != symbol]
+        else:
+            added.append(symbol)
+        self._save_overrides(list(dict.fromkeys(added)), list(dict.fromkeys(removed)))
         return True
 
     def remove(self, symbol: str) -> bool:
         symbol = self._symbol(symbol)
         if symbol not in self.items():
             return False
-        lines = self.path.read_text().splitlines(keepends=True)
-        item = re.compile(rf"^\s*-\s*{re.escape(symbol)}\s*(?:#.*)?(?:\n)?$")
-        kept: list[str] = []
-        removed = False
-        for line in lines:
-            if not removed and item.fullmatch(line):
-                removed = True
-                continue
-            kept.append(line)
-        if not removed:
-            # We support simple symbols in the canonical file.  Refusing a
-            # surprising format is safer than rewriting and losing comments.
-            raise ValueError(f"could not safely locate {symbol} in watchlist.yaml")
-        _atomic_write(self.path, "".join(kept))
+        base = self._base_items()
+        added, removed = self._overrides()
+        if symbol in base:
+            removed.append(symbol)
+        else:
+            added = [item for item in added if item != symbol]
+        self._save_overrides(list(dict.fromkeys(added)), list(dict.fromkeys(removed)))
         return True
 
 
@@ -205,7 +233,7 @@ class DeskChangeStore:
         self.state_dir = Path(state_dir)
         self.path = self.state_dir / PROPOSALS_FILE
         self.audit_path = self.state_dir / AUDIT_FILE
-        self.watchlist = WatchlistStore(watchlist_path)
+        self.watchlist = WatchlistStore(watchlist_path, self.state_dir / WATCHLIST_OVERRIDES_FILE)
         self.clock = clock or UtcClock()
 
     def _all(self) -> list[DeskProposal]:
