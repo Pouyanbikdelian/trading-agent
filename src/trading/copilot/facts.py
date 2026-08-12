@@ -195,16 +195,18 @@ def lessons_now(state_dir: Path, limit: int = 24) -> dict[str, Any]:
     trades, which was true and beside the point. It could not discuss
     lessons because it had never been handed any.
 
-    Established and candidate are returned separately and labelled:
+    Established, candidate and challenged lessons are returned separately and labelled:
     conflating "the desk has evidence for this" with "someone suggested
     this last week" is the whole distinction the lifecycle exists to make.
     """
     out: dict[str, Any] = {
         "established": [],
         "candidates": [],
+        "challenged": [],
         "note": (
-            "established = supported by >=3 net graded episodes, or set by the "
-            "operator in a hard tone; candidate = proposed, not yet earned"
+            "established = supported by >=3 net measured outcomes, or set by the "
+            "operator in a hard tone; candidate = proposed, not yet earned; "
+            "challenged = withheld after contradictory measured outcomes"
         ),
     }
     try:
@@ -214,7 +216,11 @@ def lessons_now(state_dir: Path, limit: int = 24) -> dict[str, Any]:
     except Exception:
         return out
     try:
-        for status, key in (("established", "established"), ("candidate", "candidates")):
+        for status, key in (
+            ("established", "established"),
+            ("candidate", "candidates"),
+            ("challenged", "challenged"),
+        ):
             for row in mem.lessons(status=status)[:limit]:
                 out[key].append(
                     {

@@ -1,23 +1,21 @@
-"""The Historian — turns a week of evidence into at most two lessons.
+"""The Historian — turns recent evidence into at most two lessons per pass.
 
 The memory store has had the full lesson lifecycle since day one —
-candidate -> established (3+ net supporting episodes) -> retired — but
-nothing ever wrote to it. This is the librarian for that filing cabinet.
+candidate -> established -> challenged -> retired — but nothing ever
+wrote to it. This is the librarian for that filing cabinet.
 
-Weekly, after the Friday grading pass, the Historian reads the week's
-journal (graded predictions, committee rulings, PM rebalances) plus the
-current lesson book, and produces:
+Twice weekly, after the nightly grading pass, the Historian reads a rolling
+week of journal evidence (graded predictions, committee rulings, PM
+rebalances) plus the current lesson book, and produces:
 
 * **<=2 new candidate lessons** — durable, falsifiable market
   regularities ("sharp corrections inside uptrends resolved upward
   within N days"), never event recaps ("the Dow fell Wednesday").
-* **evidence votes** on existing candidates — this week supported or
-  contradicted them. Promotion to established (what the committee
-  actually sees in context) happens only through the store's existing
-  +3-net-support mechanic, so a lesson must survive ~a month of weekly
-  scrutiny before any agent treats it as truth. That is the chaos
-  filter: the LLM proposes, accumulated evidence disposes.
-* **retirements** for established lessons the evidence has turned against.
+* **outcome-linked evidence votes** on existing lessons — every vote names
+  a graded prediction or closed episode. Weekly review can interpret the
+  evidence, but cannot manufacture it; only three net measured outcomes
+  establish a candidate.
+* **retirements** for challenged lessons the evidence has turned against.
 
 Advisory infrastructure: journal + lesson cards + Telegram. No order path.
 """
@@ -40,8 +38,9 @@ MAX_NEW_LESSONS = 2
 HISTORIAN_CHARTER = (
     "You are the Historian of a systematic trading desk. You will see one "
     "week of journal entries (graded predictions with outcomes, committee "
-    "rulings, portfolio changes) and the current lesson book. Your job is "
-    "distillation, not narration. Propose at most TWO new lessons, and "
+    "rulings, portfolio changes), a current lesson book, and a compact "
+    "long-horizon historical dossier. Your job is distillation, not "
+    "narration. Propose at most TWO new lessons, and "
     "ONLY if the week genuinely taught something durable: a falsifiable "
     "regularity that would have been useful BEFORE this week and will be "
     "useful in future weeks. Event recaps, single-instance coincidences, "
@@ -88,8 +87,13 @@ HISTORIAN_CHARTER = (
     "times over. Do not build a lesson on a slice with fewer than 20 "
     "distinct names; say the sample is too thin instead. If the measured "
     "edge contradicts the week's narrative, the measurement wins.\n\n"
-    "You may also propose retiring an ESTABLISHED lesson the evidence has "
-    "turned against. Respond ONLY with JSON:\n"
+    "The historical dossier includes related RETIRED lessons. Treat them as "
+    "guardrails against rediscovering an old mistake: explicitly explain why "
+    "a materially similar proposal is different, or omit it. A challenged "
+    "lesson has already lost sufficient outcome support to leave agent "
+    "context. You may propose retiring a CHALLENGED lesson when the evidence "
+    "is conclusive; do not retire an established lesson directly. Respond "
+    "ONLY with JSON:\n"
     '{"new_lessons": [{"title": "<5-8 word label>", '
     '"body": "<4-sentence elaboration>", '
     '"applies_when": "<conditions where it holds>", '
@@ -103,8 +107,8 @@ HISTORIAN_CHARTER = (
 # Voting is a separate call with a separate charter, and it never sees
 # which lessons this desk's own historian authored. Asked in one breath to
 # propose lessons and to judge them, a model leans towards confirming its
-# own — and the +3-net-support promotion mechanic is only a chaos filter
-# if the votes are something closer to independent evidence.
+# own — and the +3-net-outcome promotion mechanic is only a chaos filter
+# if the votes attach to independently recorded evidence.
 VOTER_CHARTER = (
     "You are an independent reviewer at a systematic trading desk. You "
     "will see a week of desk evidence and a numbered list of claims about "
@@ -117,12 +121,17 @@ VOTER_CHARTER = (
     "speaks directly to the claim. A vote you cannot justify in one "
     "concrete sentence — naming a number, a ticker or a dated event from "
     "the evidence — is a vote you should not cast.\n\n"
-    "Where a 'measured_edge' section is present it is measurement rather "
+    "Where a 'measured_edge' or 'historical_dossier' section is present it is measurement rather "
     "than narrative and outranks the prose. Judge sample size by "
     "'n_symbols' (distinct names), not 'n' (rows, which repeat the same "
     "names daily), and ignore any slice under 20 distinct names.\n\n"
     "Respond ONLY with JSON. Omit claims you are not voting on:\n"
+    "A vote counts only when it names `evidence_id`: the id of a graded "
+    "prediction (`pr-...`) or closed episode (`ep-...`) visible in the "
+    "evidence. A synthetic week label, a lesson id, or an invented id is "
+    "not evidence. Respond ONLY with JSON:\n"
     '{"votes": [{"lesson_id": "<id>", "supports": true|false, '
+    '"evidence_id": "<pr-... or ep-...>", '
     '"why": "<1 concrete sentence citing the evidence>"}]}'
 )
 
@@ -161,9 +170,9 @@ def _default_llm(system: str, prompt: str) -> dict[str, Any]:
 PROMPT_BUDGET = 24_000
 
 # Journal buckets in the order they may be sacrificed when the evidence
-# does not fit. Chatter first; measured outcomes and the lesson book are
-# never dropped, because those are the only things that can make a lesson
-# better than a guess.
+# does not fit. Chatter first. The active rulebook and historical dossier
+# are never silently dropped: an incomplete permanent-memory review is
+# worse than a skipped review with an explicit error.
 _TRIM_ORDER: tuple[str, ...] = (
     "take",
     "debate",
@@ -175,11 +184,18 @@ _TRIM_ORDER: tuple[str, ...] = (
 )
 
 
-def _budgeted_evidence(payload: dict[str, Any], budget: int = PROMPT_BUDGET) -> str:
+def _budgeted_evidence(
+    payload: dict[str, Any],
+    budget: int = PROMPT_BUDGET,
+    *,
+    protected: tuple[str, ...] = ("lesson_book", "historical_dossier"),
+) -> str:
     """Serialize under ``budget`` by dropping whole buckets, never slicing.
 
     Slicing produced invalid JSON ending mid-string, and destroyed
-    whichever key sorted last rather than whichever mattered least.
+    whichever key sorted last rather than whichever mattered least. A
+    caller's protected context is never removed; if it cannot fit, the
+    Historian fails safely and the next ops pass makes that visible.
     """
     import copy
 
@@ -192,7 +208,7 @@ def _budgeted_evidence(payload: dict[str, Any], budget: int = PROMPT_BUDGET) -> 
     s = fitted()
     if s is not None:
         return s
-    journal = p.get("journal")
+    journal = p.get("week_journal")
     for kind in _TRIM_ORDER:
         if isinstance(journal, dict) and kind in journal:
             # Halve first, drop second — a thinned bucket still carries
@@ -205,12 +221,19 @@ def _budgeted_evidence(payload: dict[str, Any], budget: int = PROMPT_BUDGET) -> 
             s = fitted()
             if s is not None:
                 return s
-    for key in ("journal", "lesson_book"):
+    p.pop("week_journal", None)
+    s = fitted()
+    if s is not None:
+        return s
+    unprotected = [key for key in p if key not in protected]
+    for key in unprotected:
         p.pop(key, None)
         s = fitted()
         if s is not None:
             return s
-    return json.dumps(p, default=str)
+    raise ValueError(
+        "historian protected memory exceeds prompt budget; refusing a partial permanent-memory review"
+    )
 
 
 def build_week_evidence(mem: MemoryStore, days: float = HISTORIAN_WINDOW_DAYS) -> dict[str, Any]:
@@ -260,7 +283,6 @@ def run_lesson_vote(
     lesson_book: list[dict[str, Any]],
     evidence: dict[str, Any],
     *,
-    week_tag: str,
     llm: LlmFn | None = None,
 ) -> int:
     """Score existing lessons against the week, in a separate call.
@@ -284,14 +306,35 @@ def run_lesson_vote(
     random.shuffle(claims)
     by_number = {i: le["id"] for i, le in enumerate(lesson_book, start=1)}
 
-    prompt = json.dumps(
-        {
-            "week_journal": evidence.get("week_journal", {}),
-            "measured_edge": evidence.get("measured_edge", {}),
-            "claims": claims,
-        },
-        default=str,
-    )[:24000]
+    voter_evidence = {
+        "week_journal": evidence.get("week_journal", {}),
+        "measured_edge": evidence.get("measured_edge", {}),
+        "historical_dossier": evidence.get("historical_dossier", {}),
+        "claims": claims,
+    }
+    try:
+        prompt = _budgeted_evidence(voter_evidence, protected=("historical_dossier", "claims"))
+    except ValueError as e:
+        logger.bind(component="historian").warning(f"lesson vote skipped: {e}")
+        return 0
+
+    # The reviewer may only attach an outcome it was actually shown. This
+    # turns an LLM's judgment into an auditable link, rather than allowing a
+    # generic weekly impression to promote a permanent desk rule.
+    outcome_ids: set[str] = set()
+    for row in evidence.get("week_journal", {}).get("prediction_graded", []):
+        value = row.get("payload", {}).get("id")
+        if isinstance(value, str) and value.startswith("pr-"):
+            outcome_ids.add(value)
+    for row in evidence.get("week_journal", {}).get("episode", []):
+        value = row.get("payload", {}).get("id")
+        if isinstance(value, str) and value.startswith("ep-"):
+            outcome_ids.add(value)
+    # The dossier gives long-horizon context, including outcomes that led
+    # to an earlier retired lesson. It is deliberately NOT eligible for a
+    # weekly vote: otherwise a new candidate could accumulate three old,
+    # cherry-picked outcomes over successive reviews instead of surviving
+    # three independent observations after it was proposed.
 
     try:
         out = llm(VOTER_CHARTER, prompt)
@@ -300,6 +343,7 @@ def run_lesson_vote(
         return 0
 
     voted = 0
+    voted_lessons: set[str] = set()
     for vote in list(out.get("votes", []))[:10]:
         raw = vote.get("lesson_id")
         try:
@@ -307,17 +351,43 @@ def run_lesson_vote(
         except (TypeError, ValueError):
             # Tolerate a reviewer that echoes the real id anyway.
             lid = str(raw) if any(le["id"] == str(raw) for le in lesson_book) else None
-        if not lid:
+        if not lid or lid in voted_lessons:
             continue
-        mem.add_evidence(lid, week_tag, supports=bool(vote.get("supports")))
-        voted += 1
+        evidence_id = str(vote.get("evidence_id", ""))
+        if evidence_id not in outcome_ids:
+            continue
+        if mem.add_evidence(
+            lid,
+            evidence_id,
+            supports=bool(vote.get("supports")),
+            reason=str(vote.get("why", "")),
+            evidence_kind="outcome",
+        ):
+            voted += 1
+            voted_lessons.add(lid)
     return voted
 
 
-def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, Any]:
-    """One weekly distillation pass. Returns a digest payload."""
+def _review_period_tag(now: datetime) -> str:
+    """Stable origin tag for candidates created in the same ISO week.
+
+    Tuesday and Friday may both generate a candidate, but their votes now
+    attach to outcome ids and deduplicate at the evidence table. The week
+    tag is retained only as provenance for the newly proposed lesson.
+    """
+    if now.tzinfo is None:
+        raise ValueError("historian timestamp must be timezone-aware")
+    iso = now.astimezone(timezone.utc).isocalendar()
+    return f"wk-{iso.year}-W{iso.week:02d}"
+
+
+def run_historian(
+    mem: MemoryStore, *, llm: LlmFn | None = None, now: datetime | None = None
+) -> dict[str, Any]:
+    """One twice-weekly distillation pass. Returns a digest payload."""
     llm = llm or _default_llm
-    week_tag = f"wk-{datetime.now(tz=timezone.utc).date().isoformat()}"
+    now = now or datetime.now(tz=timezone.utc)
+    week_tag = _review_period_tag(now)
 
     lesson_book = [
         {
@@ -326,16 +396,36 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
             "statement": r["statement"],
             "support": r["support"],
             "contradict": r["contradict"],
+            "evidence": mem.lesson_evidence(r["id"], limit=8),
         }
         for r in mem.lessons()
-        if r["status"] in ("candidate", "established")
+        if r["status"] in ("candidate", "established", "challenged")
     ]
     evidence = build_week_evidence(mem)
+    try:
+        evidence["historical_dossier"] = mem.historian_dossier(
+            focus_statements=[str(le["statement"]) for le in lesson_book]
+        )
+    except Exception as e:
+        digest = {
+            "ok": False,
+            "ts": now.isoformat(),
+            "reason": f"historical memory unavailable: {e}",
+        }
+        mem.journal("historian", digest, actor="historian")
+        logger.bind(component="historian").exception("historical memory retrieval failed")
+        return digest
     # Budgeted, not sliced. A raw [:24000] cut here would truncate
     # whichever key happened to land last — and the keys that matter most
     # (measured_edge, the lesson book) are not first. Same failure the PM
     # prompt had; drop whole low-value buckets instead.
-    prompt = _budgeted_evidence({**evidence, "lesson_book": lesson_book})
+    try:
+        prompt = _budgeted_evidence({**evidence, "lesson_book": lesson_book})
+    except ValueError as e:
+        digest = {"ok": False, "ts": now.isoformat(), "reason": str(e)}
+        mem.journal("historian", digest, actor="historian")
+        logger.bind(component="historian").warning(str(e))
+        return digest
 
     try:
         out = llm(HISTORIAN_CHARTER, prompt)
@@ -391,21 +481,20 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
         mem,
         [le for le in lesson_book if le["id"] not in {c.split(":")[0] for c in created}],
         evidence,
-        week_tag=week_tag,
         llm=llm,
     )
 
     retired = 0
-    established = {r["id"] for r in lesson_book if r["status"] == "established"}
+    challenged = {r["id"] for r in lesson_book if r["status"] == "challenged"}
     for r in list(out.get("retire", []))[:3]:
         lid = str(r.get("lesson_id", ""))
-        if lid in established:
+        if lid in challenged:
             mem.retire_lesson(lid, str(r.get("why", ""))[:200])
             retired += 1
 
     digest = {
         "ok": True,
-        "ts": datetime.now(tz=timezone.utc).isoformat(),
+        "ts": now.isoformat(),
         "created": created,
         "lesson_bodies": lesson_bodies,
         "voted": voted,
@@ -418,7 +507,7 @@ def run_historian(mem: MemoryStore, *, llm: LlmFn | None = None) -> dict[str, An
 def format_historian_digest(digest: dict[str, Any]) -> str:
     if not digest.get("ok"):
         return f"🤖 Historian skipped: {digest.get('reason', 'unknown')}"
-    lines = [f"📜 *Historian* — weekly distillation ({digest['voted']} votes"]
+    lines = [f"📜 *Historian* — twice-weekly distillation ({digest['voted']} votes"]
     lines[0] += f", {digest['retired']} retired)" if digest.get("retired") else ")"
     if digest["created"]:
         lines.append("*New candidate lessons:*")
@@ -432,5 +521,5 @@ def format_historian_digest(digest: dict[str, Any]) -> str:
                 first_sentence = body_hint.split(".")[0].strip()
                 lines.append(f"    _{first_sentence}._")
     else:
-        lines.append("_no new lessons this week — the bar is high by design_")
+        lines.append("_no new lessons this pass — the bar is high by design_")
     return "\n".join(lines)

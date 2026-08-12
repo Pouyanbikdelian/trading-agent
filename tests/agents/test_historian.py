@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -17,12 +18,26 @@ def mem(tmp_path) -> MemoryStore:
 
 def test_creates_capped_lessons_and_votes(mem: MemoryStore) -> None:
     existing = mem.add_lesson("Sharp corrections inside uptrends resolve upward within 10 days")
+    evidence_id = mem.add_prediction(
+        agent="quant",
+        subject="SMH",
+        direction="up",
+        horizon_days=5,
+        confidence=0.7,
+        statement="semis held through the correction",
+    )
+    mem.grade_prediction(evidence_id, realized_move=0.03)
 
     def llm(system: str, prompt: str) -> dict[str, Any]:
         if "reviewer" in system:  # the separate, independent voting call
             return {
                 "votes": [
-                    {"lesson_id": existing, "supports": True, "why": "this week confirmed"},
+                    {
+                        "lesson_id": existing,
+                        "supports": True,
+                        "evidence_id": evidence_id,
+                        "why": "SMH rose 3% after the correction.",
+                    },
                     {"lesson_id": "ls-hallucinated", "supports": True, "why": "n/a"},
                 ]
             }
@@ -55,21 +70,53 @@ def test_garbage_statements_skipped_and_empty_week_ok(mem: MemoryStore) -> None:
     assert "no new lessons" in format_historian_digest(digest)
 
 
-def test_promotion_needs_three_weeks_of_support(mem: MemoryStore) -> None:
+def test_promotion_needs_three_measured_outcomes(mem: MemoryStore) -> None:
     lid = mem.add_lesson("In low-IV uptrends, dip buys recover within five sessions")
+    outcome_ids = []
+    for i in range(3):
+        pid = mem.add_prediction(
+            agent="quant",
+            subject=f"S{i}",
+            direction="up",
+            horizon_days=5,
+            confidence=0.7,
+            statement="recovery",
+        )
+        mem.grade_prediction(pid, realized_move=0.02)
+        outcome_ids.append(pid)
 
-    def llm_vote(s: str, p: str) -> dict[str, Any]:
-        return {"new_lessons": [], "votes": [{"lesson_id": lid, "supports": True}]}
-
-    # NB: evidence is keyed by week tag; same-day reruns dedupe via INSERT
-    # OR IGNORE, so simulate weeks by voting directly.
-    mem.add_evidence(lid, "wk-1", supports=True)
-    mem.add_evidence(lid, "wk-2", supports=True)
+    mem.add_evidence(lid, outcome_ids[0], supports=True, reason="first measured recovery")
+    mem.add_evidence(lid, outcome_ids[1], supports=True, reason="second measured recovery")
     assert mem.lessons(status="candidate")[0]["id"] == lid
-    mem.add_evidence(lid, "wk-3", supports=True)
+    mem.add_evidence(lid, outcome_ids[2], supports=True, reason="third measured recovery")
     assert mem.lessons(status="established")[0]["id"] == lid
-    run_historian(mem, llm=llm_vote)  # historian voting also counts
-    assert mem.lessons(status="established")[0]["support"] == 4
+    assert mem.lessons(status="established")[0]["support"] == 3
+
+
+def test_tuesday_and_friday_cannot_double_count_one_outcome(mem: MemoryStore) -> None:
+    """Twice-weekly review can interpret an outcome once, never manufacture two."""
+    lid = mem.add_lesson("Semi clusters become one risk factor in a broad selloff")
+    evidence_id = mem.add_prediction(
+        agent="quant",
+        subject="SMH",
+        direction="down",
+        horizon_days=5,
+        confidence=0.7,
+        statement="semi risk factor",
+    )
+    mem.grade_prediction(evidence_id, realized_move=-0.02)
+
+    def llm(system: str, prompt: str) -> dict[str, Any]:
+        if "reviewer" in system:
+            return {"votes": [{"lesson_id": lid, "supports": True, "evidence_id": evidence_id}]}
+        return {"new_lessons": [], "retire": []}
+
+    tuesday = run_historian(mem, llm=llm, now=datetime(2026, 8, 11, 22, 45, tzinfo=timezone.utc))
+    friday = run_historian(mem, llm=llm, now=datetime(2026, 8, 14, 22, 45, tzinfo=timezone.utc))
+
+    assert tuesday["voted"] == 1
+    assert friday["voted"] == 0
+    assert mem.lessons()[0]["support"] == 1
 
 
 class TestWeekEvidence:
@@ -108,6 +155,46 @@ class TestWeekEvidence:
         from trading.agents.historian import build_week_evidence
 
         assert "measured_edge" in build_week_evidence(mem)
+
+    def test_historian_gets_retired_lesson_and_long_horizon_scorecard(
+        self, mem: MemoryStore
+    ) -> None:
+        active = mem.add_lesson("Semiconductor breadth confirms breakouts", tags="semis breadth")
+        retired = mem.add_lesson(
+            "Semiconductor breakouts failed in thin breadth", tags="semis breadth"
+        )
+        mem.retire_lesson(retired, "repeated thin-breadth failures")
+        pid = mem.add_prediction(
+            agent="quant",
+            subject="SMH",
+            direction="up",
+            horizon_days=5,
+            confidence=0.7,
+            statement="semiconductor breakout",
+        )
+        mem.grade_prediction(pid, realized_move=0.03)
+        seen: dict[str, str] = {}
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            if "reviewer" in system:
+                return {"votes": []}
+            seen["historian"] = prompt
+            return {"new_lessons": [], "retire": []}
+
+        run_historian(mem, llm=llm)
+
+        assert active in seen["historian"]
+        assert retired in seen["historian"]
+        assert pid in seen["historian"]
+        assert "historical_dossier" in seen["historian"]
+
+    def test_protected_memory_is_never_silently_dropped(self) -> None:
+        from trading.agents.historian import _budgeted_evidence
+
+        with pytest.raises(ValueError, match="protected memory"):
+            _budgeted_evidence(
+                {"lesson_book": [{"statement": "x" * 500}], "historical_dossier": {}}, budget=100
+            )
 
 
 class TestVoterIndependence:
@@ -152,6 +239,66 @@ class TestVoterIndependence:
         digest = run_historian(mem, llm=llm)
         assert len(digest["created"]) == 1
         assert digest["voted"] == 0  # nothing else in the book to vote on
+        assert mem.lessons()[0]["support"] == 0
+
+    def test_one_review_pass_allows_one_outcome_per_lesson(self, mem: MemoryStore) -> None:
+        lid = mem.add_lesson("Semiconductor breadth confirms breakouts")
+        outcomes = []
+        for i in range(2):
+            pid = mem.add_prediction(
+                agent="quant",
+                subject=f"S{i}",
+                direction="up",
+                horizon_days=5,
+                confidence=0.6,
+                statement="breakout",
+            )
+            mem.grade_prediction(pid, realized_move=0.02)
+            outcomes.append(pid)
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            if "reviewer" in system:
+                return {
+                    "votes": [
+                        {"lesson_id": lid, "supports": True, "evidence_id": outcomes[0]},
+                        {"lesson_id": lid, "supports": True, "evidence_id": outcomes[1]},
+                    ]
+                }
+            return {"new_lessons": [], "retire": []}
+
+        digest = run_historian(mem, llm=llm)
+        assert digest["voted"] == 1
+        assert mem.lessons()[0]["support"] == 1
+
+    def test_old_dossier_outcome_cannot_count_as_this_weeks_evidence(
+        self, mem: MemoryStore
+    ) -> None:
+        """Historical context informs a review but cannot manufacture support."""
+        lid = mem.add_lesson("Semiconductor breadth confirms breakouts")
+        old = mem.add_prediction(
+            agent="quant",
+            subject="SMH",
+            direction="up",
+            horizon_days=5,
+            confidence=0.6,
+            statement="old breakout outcome",
+        )
+        mem.grade_prediction(old, realized_move=0.02)
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(days=30)).timestamp()
+        mem.conn.execute("UPDATE predictions SET graded_ts = ? WHERE id = ?", (old_ts, old))
+        mem.conn.execute("UPDATE journal SET ts = ? WHERE kind = 'prediction_graded'", (old_ts,))
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            if "reviewer" in system:
+                return {"votes": [{"lesson_id": lid, "supports": True, "evidence_id": old}]}
+            return {"new_lessons": [], "retire": []}
+
+        digest = run_historian(mem, llm=llm)
+        assert (
+            mem.historian_dossier(focus_statements=[])["scorecard"]["recent_outcomes"][0]["id"]
+            == old
+        )
+        assert digest["voted"] == 0
         assert mem.lessons()[0]["support"] == 0
 
     def test_a_failed_vote_leaves_the_lesson_book_untouched(self, mem: MemoryStore) -> None:

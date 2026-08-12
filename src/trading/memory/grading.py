@@ -23,8 +23,8 @@ from typing import Any
 from trading.core.logging import logger
 
 
-def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, int]:
-    """Grade every matured prediction. Returns ``{graded, skipped}``.
+def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, Any]:
+    """Grade every matured prediction and expose why any row was blocked.
 
     Grades at the DUE date, not at the newest available bar: scoring a
     14-day call over however many days happen to have passed measures a
@@ -38,27 +38,35 @@ def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, int]:
     from trading.runtime.portfolio_stats import _read_close, close_at, covers
 
     graded = skipped = 0
+    unpriced_subjects: set[str] = set()
+    cache_behind_subjects: set[str] = set()
+    failed_subjects: set[str] = set()
     for row in mem.due_predictions():
+        subject = str(row["subject"]).upper()
         try:
-            series = _read_close(data_dir, row["subject"])
+            series = _read_close(data_dir, subject)
             if series is None or len(series) < 5:
                 skipped += 1
+                unpriced_subjects.add(subject)
                 continue
             made = datetime.fromtimestamp(row["ts"], tz=timezone.utc)
             due = datetime.fromtimestamp(row["due_ts"], tz=timezone.utc)
             if not covers(series, due):
                 skipped += 1  # not matured in our data yet; retry tomorrow
+                cache_behind_subjects.add(subject)
                 continue
             base = close_at(series, made)
             end = close_at(series, due)
             if not base or end is None:
                 skipped += 1
+                cache_behind_subjects.add(subject)
                 continue
             mem.grade_prediction(row["id"], end / base - 1.0)
             graded += 1
         except Exception:
             skipped += 1
-            logger.bind(component="memory", subject=row.get("subject")).exception(
+            failed_subjects.add(subject)
+            logger.bind(component="memory", subject=subject).exception(
                 "grading one prediction failed"
             )
     if skipped:
@@ -67,4 +75,17 @@ def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, int]:
         )
     if graded:
         logger.bind(component="memory").info(f"graded {graded} due prediction(s)")
-    return {"graded": graded, "skipped": skipped}
+    if unpriced_subjects or cache_behind_subjects or failed_subjects:
+        logger.bind(component="memory").warning(
+            "scorecard blockers: "
+            f"unpriced={','.join(sorted(unpriced_subjects)) or '-'} "
+            f"cache_behind={','.join(sorted(cache_behind_subjects)) or '-'} "
+            f"failed={','.join(sorted(failed_subjects)) or '-'}"
+        )
+    return {
+        "graded": graded,
+        "skipped": skipped,
+        "unpriced_subjects": sorted(unpriced_subjects),
+        "cache_behind_subjects": sorted(cache_behind_subjects),
+        "failed_subjects": sorted(failed_subjects),
+    }

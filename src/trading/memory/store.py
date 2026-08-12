@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import uuid
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS lessons (
     id          TEXT PRIMARY KEY,        -- ls-<uuid8>
     created_ts  REAL NOT NULL,
     statement   TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'candidate',  -- candidate|established|retired
+    status      TEXT NOT NULL DEFAULT 'candidate',  -- candidate|established|challenged|retired
     support     INTEGER NOT NULL DEFAULT 0,
     contradict  INTEGER NOT NULL DEFAULT 0,
     retired_ts  REAL,
@@ -76,6 +77,8 @@ CREATE TABLE IF NOT EXISTS lesson_evidence (
     episode_id  TEXT NOT NULL,
     relation    TEXT NOT NULL,           -- supports|contradicts|origin
     ts          REAL NOT NULL,
+    evidence_kind TEXT NOT NULL DEFAULT 'review',  -- outcome|review|origin
+    reason      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (lesson_id, episode_id, relation)
 );
 
@@ -152,6 +155,69 @@ def _short(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
+_LESSON_STATUSES = frozenset(("candidate", "established", "challenged", "retired"))
+_ACTIVE_LESSON_STATUSES = frozenset(("candidate", "established", "challenged"))
+_PROMOTION_EVIDENCE_KINDS = frozenset(("outcome",))
+_MIN_OUTCOME_EVIDENCE = 3
+_WORD_RE = re.compile(r"[a-z0-9]{3,}")
+_RETRIEVAL_STOP_WORDS = frozenset(
+    {
+        "after",
+        "against",
+        "always",
+        "because",
+        "before",
+        "broad",
+        "could",
+        "days",
+        "does",
+        "from",
+        "have",
+        "into",
+        "market",
+        "more",
+        "only",
+        "over",
+        "should",
+        "that",
+        "than",
+        "their",
+        "there",
+        "these",
+        "this",
+        "under",
+        "when",
+        "with",
+        "within",
+    }
+)
+
+
+def _keywords(text: str) -> set[str]:
+    """Small, deterministic retrieval vocabulary; never an opaque embedding.
+
+    The historian's memory must be auditable. Lexical retrieval is less
+    glamorous than a vector store, but every match can be shown to the
+    operator and recomputed from the canonical memory tables.
+    """
+    return {
+        word
+        for word in _WORD_RE.findall(text.lower())
+        if word not in _RETRIEVAL_STOP_WORDS and not word.isdecimal()
+    }
+
+
+def _evidence_kind(evidence_id: str, explicit: str | None) -> str:
+    if explicit is not None:
+        if explicit not in ("outcome", "review", "origin"):
+            raise ValueError(f"unknown lesson evidence kind: {explicit!r}")
+        return explicit
+    # Predictions and closed trading episodes are independently recorded
+    # outcomes. A synthetic week tag is useful review provenance but must
+    # never promote a permanent desk belief on its own.
+    return "outcome" if evidence_id.startswith(("pr-", "ep-")) else "review"
+
+
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.")
@@ -197,7 +263,11 @@ class MemoryStore:
         Additive only. Nothing in this module drops or rewrites a column;
         the memory spine is append-only by design.
         """
-        for table, column, decl in (("shadow", "pctile_52w", "REAL"),):
+        for table, column, decl in (
+            ("shadow", "pctile_52w", "REAL"),
+            ("lesson_evidence", "evidence_kind", "TEXT NOT NULL DEFAULT 'review'"),
+            ("lesson_evidence", "reason", "TEXT NOT NULL DEFAULT ''"),
+        ):
             with contextlib.suppress(sqlite3.OperationalError):  # already present
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
@@ -355,7 +425,9 @@ class MemoryStore:
         )
         for eid in origin_episodes or []:
             self.conn.execute(
-                "INSERT OR IGNORE INTO lesson_evidence VALUES (?, ?, 'origin', ?)",
+                """INSERT OR IGNORE INTO lesson_evidence
+                   (lesson_id, episode_id, relation, ts, evidence_kind, reason)
+                   VALUES (?, ?, 'origin', ?, 'origin', '')""",
                 (lid, eid, ts),
             )
         self._write_lesson_card(lid)
@@ -367,8 +439,10 @@ class MemoryStore:
         card and the journal keep every transition, so a lesson the
         operator hardened and later softened reads as a change of mind
         rather than as though it had always been tentative."""
-        if status not in ("candidate", "established"):
-            raise ValueError(f"lesson status must be candidate|established, got {status!r}")
+        if status not in _ACTIVE_LESSON_STATUSES:
+            raise ValueError(
+                f"lesson status must be candidate|established|challenged, got {status!r}"
+            )
         cur = self.conn.execute(
             "UPDATE lessons SET status = ? WHERE id = ? AND status != 'retired'",
             (status, lesson_id),
@@ -389,24 +463,116 @@ class MemoryStore:
             (status,),
         ).fetchall()
 
-    def add_evidence(self, lesson_id: str, episode_id: str, *, supports: bool) -> None:
+    def add_evidence(
+        self,
+        lesson_id: str,
+        episode_id: str,
+        *,
+        supports: bool,
+        reason: str = "",
+        evidence_kind: str | None = None,
+    ) -> bool:
+        """Record one distinct item of lesson evidence and return whether it was new.
+
+        The primary key is the deduplication boundary. Incrementing the
+        lesson counter after an ignored insert made a repeat delivery look
+        like fresh support, which is especially dangerous now that the
+        historian reviews evidence twice a week. Only an independently
+        recorded ``outcome`` (a graded prediction or closed episode) can
+        promote a candidate; a historian's weekly review remains visible
+        but is deliberately insufficient by itself.
+        """
         rel = "supports" if supports else "contradicts"
-        self.conn.execute(
-            "INSERT OR IGNORE INTO lesson_evidence VALUES (?, ?, ?, ?)",
-            (lesson_id, episode_id, rel, _now()),
+        kind = _evidence_kind(episode_id, evidence_kind)
+        if kind == "outcome":
+            # The caller (normally the Historian) has already checked that
+            # it showed the reviewer this id. Enforce the other half of the
+            # contract at the persistence boundary: an id merely *shaped*
+            # like a prediction or episode must not be able to establish a
+            # desk belief unless it exists as a completed measurement.
+            if episode_id.startswith("pr-"):
+                outcome_exists = self.conn.execute(
+                    "SELECT 1 FROM predictions WHERE id = ? AND graded_ts IS NOT NULL",
+                    (episode_id,),
+                ).fetchone()
+            elif episode_id.startswith("ep-"):
+                outcome_exists = self.conn.execute(
+                    "SELECT 1 FROM episodes WHERE id = ?", (episode_id,)
+                ).fetchone()
+            else:
+                outcome_exists = None
+            if outcome_exists is None:
+                return False
+        # A realized outcome cannot honestly both support and contradict the
+        # same claim. The old primary key included ``relation``, which made
+        # that contradiction possible on a retry with flipped model output.
+        if self.conn.execute(
+            "SELECT 1 FROM lesson_evidence WHERE lesson_id = ? AND episode_id = ? LIMIT 1",
+            (lesson_id, episode_id),
+        ).fetchone():
+            return False
+        inserted = self.conn.execute(
+            """INSERT OR IGNORE INTO lesson_evidence
+               (lesson_id, episode_id, relation, ts, evidence_kind, reason)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (lesson_id, episode_id, rel, _now(), kind, reason[:500]),
         )
+        if not inserted.rowcount:
+            return False
         col = "support" if supports else "contradict"
         self.conn.execute(f"UPDATE lessons SET {col} = {col} + 1 WHERE id = ?", (lesson_id,))
-        # Promotion: 3+ net supporting episodes establishes a candidate.
+        # Promotion requires measured outcomes, not repeated LLM review.
         row = self.conn.execute(
             "SELECT status, support, contradict FROM lessons WHERE id = ?", (lesson_id,)
         ).fetchone()
-        if row and row["status"] == "candidate" and row["support"] - row["contradict"] >= 3:
+        outcome_counts = self.conn.execute(
+            """SELECT
+                 SUM(CASE WHEN relation = 'supports' THEN 1 ELSE 0 END) AS support,
+                 SUM(CASE WHEN relation = 'contradicts' THEN 1 ELSE 0 END) AS contradict
+               FROM lesson_evidence
+               WHERE lesson_id = ? AND evidence_kind IN ('outcome')""",
+            (lesson_id,),
+        ).fetchone()
+        outcome_support = int(outcome_counts["support"] or 0) if outcome_counts else 0
+        outcome_contradict = int(outcome_counts["contradict"] or 0) if outcome_counts else 0
+        if (
+            row
+            and row["status"] == "candidate"
+            and outcome_support - outcome_contradict >= _MIN_OUTCOME_EVIDENCE
+        ):
             self.conn.execute(
                 "UPDATE lessons SET status = 'established' WHERE id = ?", (lesson_id,)
             )
-            self.journal("lesson_established", {"id": lesson_id})
+            self.journal(
+                "lesson_established",
+                {
+                    "id": lesson_id,
+                    "outcome_support": outcome_support,
+                    "outcome_contradict": outcome_contradict,
+                },
+            )
+        elif (
+            row
+            and row["status"] == "established"
+            and outcome_contradict >= _MIN_OUTCOME_EVIDENCE
+            and outcome_contradict >= outcome_support
+        ):
+            # Challenged lessons immediately leave the agent context, but
+            # remain visible to the historian and operator until a review
+            # retires or manually restores them. This is safer than letting
+            # a once-established belief continue to influence a trade while
+            # its empirical support has reversed.
+            self.conn.execute("UPDATE lessons SET status = 'challenged' WHERE id = ?", (lesson_id,))
+            self.journal(
+                "lesson_challenged",
+                {
+                    "id": lesson_id,
+                    "outcome_support": outcome_support,
+                    "outcome_contradict": outcome_contradict,
+                },
+            )
         self._write_lesson_card(lesson_id)
+        return True
 
     def retire_lesson(self, lesson_id: str, why: str) -> None:
         """Retired, never deleted — the card keeps its full history."""
@@ -419,11 +585,37 @@ class MemoryStore:
 
     def lessons(self, status: str | None = None) -> list[sqlite3.Row]:
         if status:
+            if status not in _LESSON_STATUSES:
+                raise ValueError(f"unknown lesson status: {status!r}")
             return self.conn.execute(
                 "SELECT * FROM lessons WHERE status = ? ORDER BY support - contradict DESC",
                 (status,),
             ).fetchall()
         return self.conn.execute("SELECT * FROM lessons ORDER BY created_ts DESC").fetchall()
+
+    def lesson_evidence(self, lesson_id: str, *, limit: int = 12) -> list[dict[str, Any]]:
+        """Auditable evidence cards for a lesson, newest first.
+
+        Evidence is returned with its provenance rather than only a counter.
+        The Historian can therefore distinguish a reviewed claim from one
+        tied to a realized prediction or completed trade.
+        """
+        rows = self.conn.execute(
+            """SELECT episode_id, relation, ts, evidence_kind, reason
+               FROM lesson_evidence WHERE lesson_id = ?
+               ORDER BY ts DESC LIMIT ?""",
+            (lesson_id, limit),
+        ).fetchall()
+        return [
+            {
+                "id": r["episode_id"],
+                "relation": r["relation"],
+                "kind": r["evidence_kind"],
+                "ts": datetime.fromtimestamp(r["ts"], tz=timezone.utc).date().isoformat(),
+                "reason": r["reason"],
+            }
+            for r in rows
+        ]
 
     def _write_lesson_card(self, lesson_id: str) -> None:
         """Render the lesson as an Obsidian-compatible markdown card."""
@@ -450,7 +642,10 @@ class MemoryStore:
         ]
         for e in ev:
             ts = datetime.fromtimestamp(e["ts"], tz=timezone.utc).date().isoformat()
-            lines.append(f"- {ts} **{e['relation']}** [[{e['episode_id']}]]")
+            tail = f" — {e['reason']}" if e["reason"] else ""
+            lines.append(
+                f"- {ts} **{e['relation']}** ({e['evidence_kind']}) [[{e['episode_id']}]]{tail}"
+            )
         if row["status"] == "retired":
             died = datetime.fromtimestamp(row["retired_ts"], tz=timezone.utc).date().isoformat()
             lines += ["", f"## Retired {died}", "", row["retired_why"] or ""]
@@ -520,6 +715,26 @@ class MemoryStore:
             "SELECT * FROM predictions WHERE graded_ts IS NULL AND due_ts <= ?", (cutoff,)
         ).fetchall()
 
+    def scorecard_backfill_targets(
+        self, *, asof: datetime | None = None, max_age_days: int = 730
+    ) -> list[dict[str, Any]]:
+        """Distinct matured subjects whose missing prices block scoring.
+
+        The cache refresher uses this to repair the scorecard deliberately,
+        rather than only fetching today's configured trading universe and
+        hoping it happens to contain yesterday's prediction subjects.
+        """
+        cutoff = (asof or datetime.now(tz=timezone.utc)).timestamp()
+        earliest = cutoff - max_age_days * 86400.0
+        rows = self.conn.execute(
+            """SELECT subject, MIN(ts) AS earliest_ts, COUNT(*) AS n
+               FROM predictions
+               WHERE graded_ts IS NULL AND due_ts <= ? AND ts >= ?
+               GROUP BY subject ORDER BY earliest_ts""",
+            (cutoff, earliest),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def grade_prediction(
         self, prediction_id: str, realized_move: float, *, flat_band: float = 0.005
     ) -> str:
@@ -545,7 +760,18 @@ class MemoryStore:
             self.bump_trust(source, hit=(outcome == "hit"))
         self.journal(
             "prediction_graded",
-            {"id": prediction_id, "agent": row["agent"], "outcome": outcome, "brier": brier},
+            {
+                "id": prediction_id,
+                "agent": row["agent"],
+                "subject": row["subject"],
+                "direction": row["direction"],
+                "horizon_days": row["horizon_days"],
+                "confidence": row["confidence"],
+                "outcome": outcome,
+                "realized_move": realized_move,
+                "brier": brier,
+                "statement": str(row["statement"])[:300],
+            },
         )
         return outcome
 
@@ -559,6 +785,166 @@ class MemoryStore:
                GROUP BY agent ORDER BY brier ASC"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def historian_dossier(
+        self,
+        *,
+        focus_statements: list[str],
+        since_days: int = 365,
+        recent_limit: int = 12,
+        retired_limit: int = 8,
+    ) -> dict[str, Any]:
+        """Compact, auditable long-horizon memory for a Historian pass.
+
+        This is deliberately SQL and lexical matching rather than a hidden
+        embedding index: every aggregate and every "similar prior lesson"
+        can be reproduced from the permanent store. The bounded detail lets
+        the prompt retain a year of measured history without pretending that
+        hundreds of raw journal rows are useful context.
+        """
+        cutoff = _now() - since_days * 86400.0
+        now_ts = _now()
+
+        scorecard = self.conn.execute(
+            """SELECT COUNT(*) AS graded,
+                      AVG(CASE WHEN outcome = 'hit' THEN 1.0 ELSE 0.0 END) AS hit_rate,
+                      AVG(brier) AS brier,
+                      AVG(realized_move) AS mean_move
+               FROM predictions WHERE graded_ts IS NOT NULL AND graded_ts >= ?""",
+            (cutoff,),
+        ).fetchone()
+        overdue = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM predictions WHERE graded_ts IS NULL AND due_ts <= ?",
+            (now_ts,),
+        ).fetchone()
+        by_agent = self.conn.execute(
+            """SELECT agent, COUNT(*) AS n,
+                      AVG(CASE WHEN outcome = 'hit' THEN 1.0 ELSE 0.0 END) AS hit_rate,
+                      AVG(brier) AS brier
+               FROM predictions
+               WHERE graded_ts IS NOT NULL AND graded_ts >= ?
+               GROUP BY agent ORDER BY n DESC, agent LIMIT 12""",
+            (cutoff,),
+        ).fetchall()
+        by_subject = self.conn.execute(
+            """SELECT subject, horizon_days, COUNT(*) AS n,
+                      AVG(CASE WHEN outcome = 'hit' THEN 1.0 ELSE 0.0 END) AS hit_rate,
+                      AVG(realized_move) AS mean_move
+               FROM predictions
+               WHERE graded_ts IS NOT NULL AND graded_ts >= ?
+               GROUP BY subject, horizon_days
+               ORDER BY n DESC, subject LIMIT 16""",
+            (cutoff,),
+        ).fetchall()
+        predictions = self.conn.execute(
+            """SELECT id, agent, subject, direction, horizon_days, confidence,
+                      statement, outcome, realized_move, brier, graded_ts
+               FROM predictions
+               WHERE graded_ts IS NOT NULL AND graded_ts >= ?
+               ORDER BY graded_ts DESC LIMIT ?""",
+            (cutoff, recent_limit),
+        ).fetchall()
+
+        episode_summary = self.conn.execute(
+            """SELECT COUNT(*) AS n, AVG(pnl_pct) AS mean_pnl,
+                      AVG(CASE WHEN pnl_pct > 0 THEN 1.0 ELSE 0.0 END) AS win_rate
+               FROM episodes WHERE ts_close >= ?""",
+            (cutoff,),
+        ).fetchone()
+        episode_rows = self.conn.execute(
+            """SELECT id, symbol, side, ts_open, ts_close, pnl_pct,
+                      entry_pctile_52w, context, tags
+               FROM episodes WHERE ts_close >= ?
+               ORDER BY ts_close DESC LIMIT ?""",
+            (cutoff, recent_limit),
+        ).fetchall()
+
+        focus = (
+            set().union(*(_keywords(s) for s in focus_statements)) if focus_statements else set()
+        )
+        retired_rows = self.conn.execute(
+            """SELECT * FROM lessons WHERE status = 'retired'
+               ORDER BY retired_ts DESC LIMIT 100"""
+        ).fetchall()
+
+        def retired_score(row: sqlite3.Row) -> tuple[int, float]:
+            terms = _keywords(f"{row['statement']} {row['tags']} {row['retired_why'] or ''}")
+            # A lexical overlap is an explicit retrieval explanation. The
+            # timestamp tie-break makes the result stable and reviewable.
+            return (len(focus & terms), float(row["retired_ts"] or 0.0))
+
+        matching = [r for r in retired_rows if retired_score(r)[0] > 0]
+        selected = sorted(matching or retired_rows, key=retired_score, reverse=True)[:retired_limit]
+
+        def episode_card(row: sqlite3.Row) -> dict[str, Any]:
+            try:
+                context = json.loads(row["context"])
+            except (TypeError, ValueError):
+                context = {}
+            return {
+                "id": row["id"],
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "opened": datetime.fromtimestamp(row["ts_open"], tz=timezone.utc)
+                .date()
+                .isoformat(),
+                "closed": datetime.fromtimestamp(row["ts_close"], tz=timezone.utc)
+                .date()
+                .isoformat(),
+                "pnl_pct": row["pnl_pct"],
+                "entry_pctile_52w": row["entry_pctile_52w"],
+                "context": context,
+                "tags": row["tags"],
+            }
+
+        def prediction_card(row: sqlite3.Row) -> dict[str, Any]:
+            card = dict(row)
+            card["graded"] = datetime.fromtimestamp(card.pop("graded_ts"), tz=timezone.utc)
+            card["graded"] = card["graded"].date().isoformat()
+            card["statement"] = str(card["statement"])[:300]
+            return card
+
+        return {
+            "coverage": {
+                "since_days": since_days,
+                "focus_terms": sorted(focus)[:24],
+                "note": (
+                    "Aggregates are measured history. A small sample is not proof; "
+                    "do not infer a durable rule from a thin slice."
+                ),
+            },
+            "scorecard": {
+                "graded": int(scorecard["graded"] or 0),
+                "hit_rate": scorecard["hit_rate"],
+                "brier": scorecard["brier"],
+                "mean_move": scorecard["mean_move"],
+                "overdue_ungraded": int(overdue["n"] or 0),
+                "by_agent": [dict(r) for r in by_agent],
+                "by_subject": [dict(r) for r in by_subject],
+                "recent_outcomes": [prediction_card(r) for r in predictions],
+            },
+            "episodes": {
+                "n": int(episode_summary["n"] or 0),
+                "mean_pnl": episode_summary["mean_pnl"],
+                "win_rate": episode_summary["win_rate"],
+                "recent": [episode_card(r) for r in episode_rows],
+            },
+            "related_retired_lessons": [
+                {
+                    "id": r["id"],
+                    "statement": r["statement"],
+                    "tags": r["tags"],
+                    "support": r["support"],
+                    "contradict": r["contradict"],
+                    "retired_why": r["retired_why"],
+                    "matched_terms": sorted(
+                        focus & _keywords(f"{r['statement']} {r['tags']} {r['retired_why'] or ''}")
+                    )[:12],
+                    "evidence": self.lesson_evidence(r["id"], limit=4),
+                }
+                for r in selected
+            ],
+        }
 
     # ------------------------------------------------------------- shadow
 

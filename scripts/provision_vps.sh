@@ -185,21 +185,21 @@ cat <<'EOF'
    #      TELEGRAM_CHAT_ID=<from @getmyid_bot>
    nano .env
 
-   # 2) build images + start everything
-   docker compose build
-   docker compose up -d
+   # 2) build images + start the PAPER profile
+   docker compose --profile paper build
+   docker compose --profile paper up -d
 
    # 3) confirm everything is running
    docker compose ps
-   docker compose logs -f trader     # follow runner output
+   docker compose --profile paper logs -f trader     # follow runner output
 
    # 4) sanity-check from Telegram: send /status to your bot
    #    or run a smoke test:
-   docker compose exec trader trading status
+   docker compose --profile paper exec trader trading status
 
    # 5) hard kill from anywhere:
    #    - Telegram:   /halt
-   #    - Console:    docker compose exec trader trading halt --reason "manual"
+   #    - Console:    docker compose --profile paper exec trader trading halt --reason "manual"
    #    - Manual:     echo '{"halted":true,"reason":"x"}' > state/halt.json
 
  Reminders:
@@ -207,7 +207,7 @@ cat <<'EOF'
    - IB Gateway needs 2FA the first time it connects — approve the push on your phone.
    - To go live later: edit .env (TRADING_ENV=live, ALLOW_LIVE_TRADING=true,
      IBKR_TRADING_MODE=live, IBKR_PORT=4001), then:
-       docker compose down
+       docker compose --profile paper stop trader
        docker compose --profile live up -d
 ================================================================
 EOF

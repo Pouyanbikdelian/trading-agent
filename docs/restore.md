@@ -124,8 +124,8 @@ ALLOW_LIVE_TRADING=false
 ```
 
 ```bash
-docker compose up -d
-docker compose exec trader trading paper run us_large_cap --once
+docker compose --profile paper up -d
+docker compose --profile paper exec trader trading paper run us_large_cap --once
 ```
 
 Confirm the cycle prints `halted` if it was halted, `ok` / `no_orders`

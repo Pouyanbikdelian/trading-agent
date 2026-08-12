@@ -514,7 +514,8 @@ def _cmd_lessons(args: list[str]) -> str:
 
     est = mem.lessons(status="established")
     cand = mem.lessons(status="candidate")
-    if not est and not cand:
+    challenged = mem.lessons(status="challenged")
+    if not est and not cand and not challenged:
         return "_no lessons yet. `/lesson <statement>` writes the first one._"
 
     def _rows(rows: list[Any], limit: int) -> list[str]:
@@ -534,7 +535,10 @@ def _cmd_lessons(args: list[str]) -> str:
     if cand:
         lines.append(f"\n*Candidates* ({len(cand)}) — proposed, not yet earned:")
         lines.extend(_rows(cand, 8))
-    lines.append("\n_`/lessons harden <id>` promotes · `/lesson <text>` adds_")
+    if challenged:
+        lines.append(f"\n*Challenged* ({len(challenged)}) — withheld from agents pending review:")
+        lines.extend(_rows(challenged, 8))
+    lines.append("\n_`/lessons harden <id>` restores/promotes · `/lesson <text>` adds_")
     return "\n".join(lines)
 
 
@@ -2335,6 +2339,19 @@ def _maybe_capture_mandate(text: str) -> str | None:
 
     try:
         symbols = extract_symbols(span, known)
+        # ``known`` is an anti-hallucination filter for ordinary copilot
+        # chat. A mandate is different: its text is the operator's durable
+        # instruction, so dropping an explicit uppercase ticker just
+        # because a generated universe is temporarily unavailable loses
+        # context on the one instruction that should survive an outage.
+        # These are advisory labels only; the PM's own whitelist and the
+        # risk manager still decide whether a symbol can enter a basket.
+        explicit: set[str] = set()
+        for token in span.split():
+            cleaned = token.strip(".,;:!?()[]{}\"'")
+            if token == token.upper() and len(cleaned) >= 2 and _looks_like_ticker(cleaned):
+                explicit.add(cleaned.upper())
+        symbols = sorted(set(symbols) | explicit)
         m = MandateStore(settings.state_dir).add(span, symbols=symbols)
     except Exception as e:
         logger.exception("mandate capture failed")

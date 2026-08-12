@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
-from trading.runtime.portfolio_stats import close_at, covers
+from trading.runtime.portfolio_stats import _read_close, cache_symbol_for_subject, close_at, covers
 
 
 def _series(tz: str | None, days: int = 30) -> pd.Series:
@@ -96,3 +96,14 @@ def test_horizon_is_respected_end_to_end() -> None:
     assert realized == pytest.approx(14 / 100)
     # The naive "use the latest bar" version would have scored 59/100.
     assert float(s.iloc[-1]) / base - 1.0 == pytest.approx(59 / 100)
+
+
+def test_index_subject_uses_explicit_tradeable_proxy(tmp_path) -> None:
+    assert cache_symbol_for_subject("NDX") == "QQQ"
+    frame = pd.DataFrame({"close": _series("UTC", days=6)})
+    path = tmp_path / "etf" / "QQQ"
+    path.mkdir(parents=True)
+    frame.to_parquet(path / "1D.parquet")
+
+    out = _read_close(tmp_path, "NDX")
+    assert out is not None and len(out) == 6

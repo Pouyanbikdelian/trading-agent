@@ -4,13 +4,13 @@ The missing half of the learning loop, found 2026-08-06. The memory
 spine's stated design rule is "Everything gradeable… Skill is a number
 attached to memory, not a vibe", and the `episodes` table is where a
 lesson is supposed to meet reality: a lesson accumulates supporting or
-contradicting *episodes* and is promoted to `established` at +3 net.
+contradicting *measured outcomes* and is promoted to `established` at +3 net.
 
 `MemoryStore.add_episode` was written, indexed and documented — and
 never called from anywhere in `src/`. So the table stayed empty, and the
 historian filled the evidence slot with a synthetic ``week_tag``
-instead. Lesson promotion therefore ran on **an LLM voting weekly on its
-own lesson book**, with no contact with realised P&L at all.
+instead. Such weekly review is now retained as provenance, but only
+graded predictions or closed episodes can promote a lesson.
 
 This module derives episodes from the fill ledger, which is the only
 place a completed round-trip actually exists: `runner.db` snapshots show

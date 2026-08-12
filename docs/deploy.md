@@ -125,15 +125,15 @@ chmod 600 .env
 ## 6. First boot — paper mode
 
 ```bash
-docker compose up -d --build
-docker compose logs -f trader
+docker compose --profile paper up -d --build
+docker compose --profile paper logs -f trader
 ```
 
 The first cycle won't fire until the next crontab tick — usually 16:00
 weekdays. To validate the wiring right now without waiting:
 
 ```bash
-docker compose exec trader trading paper run us_large_cap --once
+docker compose --profile paper exec trader trading paper run us_large_cap --once
 ```
 
 You should see a `Cycle @ ...` table with `status=ok` or `no_orders`
@@ -153,7 +153,7 @@ mean your credentials or 2FA didn't pass. The gateway image documents the
 ## 8. Backfill data
 
 ```bash
-docker compose exec trader trading data fetch us_large_cap --from 2018-01-01
+docker compose --profile paper exec trader trading data fetch us_large_cap --from 2018-01-01
 ```
 
 The Parquet cache lives in the `data` named volume. Backfill once;
@@ -165,7 +165,7 @@ Edit `docker-compose.yml` if you need a different cron (default: weekdays
 16:00). Restart:
 
 ```bash
-docker compose restart trader
+docker compose --profile paper restart trader
 ```
 
 The healthcheck reads the heartbeat file every 60 s; if no cycle runs for
@@ -177,7 +177,7 @@ The healthcheck reads the heartbeat file every 60 s; if no cycle runs for
 Confirm the runner sent its "started" message. If not:
 
 ```bash
-docker compose exec trader python -c \
+docker compose --profile paper exec trader python -c \
   "from trading.runner.alerts import TelegramAlerts; \
    import os; \
    a = TelegramAlerts(token=os.environ['TELEGRAM_BOT_TOKEN'], \
@@ -210,12 +210,15 @@ IBKR_PORT=4001
 ```
 
 ```bash
+# Stop the paper profile before changing `.env` to live values.
+docker compose --profile paper stop trader
 docker compose --profile live up -d
-docker compose stop trader     # the paper service
 ```
 
-The `live` profile uses `trading live run`, which double-checks the gate
-and refuses without both flags.
+The runner profiles are deliberately separate: normal paper startup uses
+`--profile paper`; live startup uses `--profile live`. The `live` profile
+uses `trading live run`, which double-checks the gate and refuses without
+both flags.
 
 ## 12. Backups
 
@@ -236,12 +239,12 @@ VPS dies you want this archive somewhere else.
 
 ## 13. Day-2 operations
 
-- `docker compose logs -f trader` — follow the runner.
-- `docker compose exec trader trading status` — config sanity check.
-- `docker compose exec trader cat /app/state/heartbeat.json` — last cycle.
-- `docker compose exec trader sqlite3 /app/state/runner.db
+- `docker compose --profile paper logs -f trader` — follow the paper runner.
+- `docker compose --profile paper exec trader trading status` — paper config sanity check.
+- `docker compose --profile paper exec trader cat /app/state/heartbeat.json` — last cycle.
+- `docker compose --profile paper exec trader sqlite3 /app/state/runner.db
    'SELECT * FROM cycles ORDER BY ts DESC LIMIT 10;'` — recent cycles.
-- `docker compose exec trader cat /app/state/halt.json` — current halt state.
+- `docker compose --profile paper exec trader cat /app/state/halt.json` — current halt state.
 - Halt manually: `docker compose exec trader python -c "from pathlib import
    Path; import json; p = Path('/app/state/halt.json'); s = json.loads(p.read_text());
    s['halted']=True; s['reason']='manual'; p.write_text(json.dumps(s))"`.

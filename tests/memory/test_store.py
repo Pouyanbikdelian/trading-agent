@@ -80,6 +80,139 @@ def test_lesson_lifecycle_promote_and_retire(mem: MemoryStore) -> None:
     assert mem.lessons(status="retired")[0]["id"] == lid
 
 
+def test_repeated_evidence_does_not_count_twice(mem: MemoryStore) -> None:
+    """A retry is not a second observation supporting the lesson."""
+    lid = mem.add_lesson("Semi clusters become one risk factor in a broad selloff")
+
+    assert mem.add_evidence(lid, "wk-2026-W33", supports=True) is True
+    assert mem.add_evidence(lid, "wk-2026-W33", supports=True) is False
+
+    row = mem.lessons()[0]
+    assert row["support"] == 1
+
+
+def test_weekly_review_cannot_promote_a_lesson(mem: MemoryStore) -> None:
+    """A fluent weekly review is provenance, not a measured result."""
+    lid = mem.add_lesson("Semis lead the tape only when breadth is improving")
+    for week in ("wk-2026-W31", "wk-2026-W32", "wk-2026-W33"):
+        assert mem.add_evidence(lid, week, supports=True, reason="historian review") is True
+
+    assert mem.lessons(status="candidate")[0]["id"] == lid
+    evidence = mem.lesson_evidence(lid)
+    assert {row["kind"] for row in evidence} == {"review"}
+    assert all(row["reason"] == "historian review" for row in evidence)
+
+
+def test_contradictory_retry_for_one_outcome_is_ignored(mem: MemoryStore) -> None:
+    lid = mem.add_lesson("Quality rebounds after breadth washes out")
+    pid = mem.add_prediction(
+        agent="quant",
+        subject="SPY",
+        direction="up",
+        horizon_days=5,
+        confidence=0.6,
+        statement="washout rebound",
+    )
+    mem.grade_prediction(pid, realized_move=0.02)
+
+    assert mem.add_evidence(lid, pid, supports=True, reason="first reading") is True
+    assert mem.add_evidence(lid, pid, supports=False, reason="flipped retry") is False
+    row = mem.lessons()[0]
+    assert row["support"] == 1 and row["contradict"] == 0
+
+
+def test_fabricated_or_ungraded_outcome_cannot_count_as_evidence(mem: MemoryStore) -> None:
+    lid = mem.add_lesson("Breadth needs confirmation before a breakout")
+    ungraded = mem.add_prediction(
+        agent="quant",
+        subject="SMH",
+        direction="up",
+        horizon_days=5,
+        confidence=0.6,
+        statement="breakout holds",
+    )
+
+    assert mem.add_evidence(lid, "pr-does-not-exist", supports=True) is False
+    assert mem.add_evidence(lid, ungraded, supports=True) is False
+    assert mem.lessons()[0]["support"] == 0
+
+
+def test_measured_contradictions_challenge_an_established_lesson(mem: MemoryStore) -> None:
+    lid = mem.add_lesson("A narrow semiconductor rally is safe to chase")
+    supporting: list[str] = []
+    contradicting: list[str] = []
+    for i in range(6):
+        pid = mem.add_prediction(
+            agent="quant",
+            subject=f"S{i}",
+            direction="up",
+            horizon_days=5,
+            confidence=0.6,
+            statement="semiconductor breadth",
+        )
+        mem.grade_prediction(pid, realized_move=0.02)
+        (supporting if i < 3 else contradicting).append(pid)
+
+    for pid in supporting:
+        mem.add_evidence(lid, pid, supports=True, reason="supporting outcome")
+    assert mem.lessons(status="established")[0]["id"] == lid
+    for pid in contradicting:
+        mem.add_evidence(lid, pid, supports=False, reason="contradicting outcome")
+
+    assert mem.lessons(status="challenged")[0]["id"] == lid
+    assert "status: challenged" in (mem.lessons_dir / f"{lid}.md").read_text()
+
+
+def test_historian_dossier_retrieves_measured_history_and_related_retirements(
+    mem: MemoryStore,
+) -> None:
+    active = mem.add_lesson("Semiconductor breadth must confirm a breakout", tags="semis breadth")
+    retired = mem.add_lesson("Semiconductor breakouts failed in thin breadth", tags="semis breadth")
+    mem.retire_lesson(retired, "three measured failures in thin breadth")
+    pid = mem.add_prediction(
+        agent="quant",
+        subject="SMH",
+        direction="up",
+        horizon_days=5,
+        confidence=0.7,
+        statement="semiconductor breakout",
+    )
+    mem.grade_prediction(pid, realized_move=0.03)
+
+    dossier = mem.historian_dossier(focus_statements=[mem.lessons()[0]["statement"]])
+    assert dossier["scorecard"]["graded"] == 1
+    assert dossier["scorecard"]["recent_outcomes"][0]["id"] == pid
+    assert dossier["related_retired_lessons"][0]["id"] == retired
+    assert active in {row["id"] for row in mem.lessons(status="candidate")}
+
+
+def test_scorecard_backfill_targets_group_blocked_subjects(mem: MemoryStore) -> None:
+    first = mem.add_prediction(
+        agent="quant",
+        subject="SMH",
+        direction="up",
+        horizon_days=5,
+        confidence=0.6,
+        statement="semis recover",
+    )
+    second = mem.add_prediction(
+        agent="scout",
+        subject="SMH",
+        direction="down",
+        horizon_days=5,
+        confidence=0.6,
+        statement="semis weaken",
+    )
+    past = (datetime.now(tz=timezone.utc) - timedelta(days=20)).timestamp()
+    mem.conn.execute(
+        "UPDATE predictions SET ts = ?, due_ts = ? WHERE id IN (?, ?)",
+        (past, past + 5 * 86400, first, second),
+    )
+
+    targets = mem.scorecard_backfill_targets()
+    assert targets == [{"subject": "SMH", "earliest_ts": past, "n": 2}]
+
+
 def test_dossier_appends_keep_history(mem: MemoryStore) -> None:
     p = mem.update_dossier(
         "fomc_chair",

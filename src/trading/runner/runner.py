@@ -148,6 +148,49 @@ def _precycle_trigger(cron: str, tz: str, *, lead_minutes: int = 60) -> Any:
     )
 
 
+def _historian_trigger() -> Any:
+    """Tuesday and Friday distillation, after the nightly grader.
+
+    Keep the cadence in one helper so the schedule has a direct, testable
+    representation rather than being buried among the runner's jobs.
+    """
+    from apscheduler.triggers.cron import CronTrigger
+
+    return CronTrigger(day_of_week="tue,fri", hour=22, minute=45, timezone="UTC")
+
+
+def _add_scorecard_backfill_targets(
+    symbols: set[str],
+    starts: dict[str, datetime],
+    targets: list[dict[str, Any]],
+    *,
+    default_start: datetime,
+) -> None:
+    """Add cacheable ungraded subjects without letting one bad row block all.
+
+    A scorecard call may name an ETF or an index proxy outside the trading
+    universe. It must join both collections: ``starts`` determines the
+    requested history, while ``symbols`` controls which requests are made.
+    """
+    from trading.runtime.portfolio_stats import cache_symbol_for_subject
+
+    for target in targets:
+        try:
+            symbol = cache_symbol_for_subject(str(target["subject"]))
+            if (
+                symbol in {"PORTFOLIO", "BOOK", "MARKET"}
+                or not symbol.replace("-", "").replace(".", "").isalnum()
+            ):
+                continue  # aggregate prose such as "portfolio" is not a price series
+            earliest = datetime.fromtimestamp(float(target["earliest_ts"]), tz=timezone.utc)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            logger.bind(component="data").warning("invalid scorecard refresh target skipped")
+            continue
+        # ``starts`` alone is inert: the fetch loop iterates ``symbols``.
+        symbols.add(symbol)
+        starts[symbol] = min(starts.get(symbol, default_start), earliest - timedelta(days=3))
+
+
 def _humanize_cron(expr: str) -> str:
     """Translate a 5-field cron string into something humans read.
 
@@ -684,9 +727,11 @@ class Runner:
                 max_instances=1,
             )
 
-            # Historian: Fridays 22:45 UTC, after the 22:30 grading pass —
-            # distills the week into <=2 candidate lessons and votes on
-            # existing ones. One LLM call/week.
+            # Historian: Tuesdays + Fridays 22:45 UTC, after the 22:30
+            # grading pass — distills the rolling week into <=2 candidate
+            # lessons and votes on existing ones. Votes are deduplicated
+            # by ISO week in historian.py, so the extra pass cannot rush a
+            # candidate into established status.
             #
             # This was nested INSIDE `if _guards_enabled():` — an
             # indentation accident that coupled the weekly learning loop to
@@ -696,7 +741,7 @@ class Runner:
             # nothing anywhere would have said so.
             self._scheduler.add_job(
                 self._run_historian_async,
-                CronTrigger(day_of_week="fri", hour=22, minute=45, timezone="UTC"),
+                _historian_trigger(),
                 id="historian",
                 replace_existing=True,
             )
@@ -1484,6 +1529,9 @@ class Runner:
             # it was broken for as long as it existed.
             counts = grade_due_predictions(mem, settings.data_dir)
             graded, skipped = counts["graded"], counts["skipped"]
+            unpriced = list(counts.get("unpriced_subjects", []))
+            cache_behind = list(counts.get("cache_behind_subjects", []))
+            grading_failed = list(counts.get("failed_subjects", []))
             shadow_legs = self._grade_shadow(mem)
             # Closed round-trips into the episodes table. Until 2026-08-06
             # nothing ever called add_episode, so lessons were promoted by
@@ -1506,10 +1554,27 @@ class Runner:
                     "positions": len(getattr(snap, "positions", {}) or {}) if snap else 0,
                     "graded_today": graded,
                     "ungraded_today": skipped,
+                    "unpriced_subjects": unpriced,
+                    "cache_behind_subjects": cache_behind,
+                    "grading_failed_subjects": grading_failed,
                     "shadow_legs_graded": shadow_legs,
                     "episodes_recorded": episodes_written,
                 },
             )
+            if unpriced or cache_behind or grading_failed:
+                # A skipped count alone led to weeks of "the grader ran"
+                # while every outcome was still unscorable. This is a
+                # durable, inspectable diagnostic for the ops watchdog and
+                # the next cache refresh.
+                mem.journal(
+                    "scorecard_blocked",
+                    {
+                        "unpriced_subjects": unpriced,
+                        "cache_behind_subjects": cache_behind,
+                        "failed_subjects": grading_failed,
+                    },
+                    actor="memory_grader",
+                )
         except Exception:
             logger.bind(component="memory").exception("memory grader failed")
 
@@ -1652,10 +1717,26 @@ class Runner:
             from trading.core.universes import load_universe
 
             universe = os.getenv("UNIVERSE", "sp500")
-            symbols = [i.symbol for i in load_universe(universe)]
+            symbols = {i.symbol.upper() for i in load_universe(universe)}
             cache = ParquetCache(settings.data_dir)
             end = datetime.now(tz=timezone.utc)
-            start = end - _td(days=30)
+            default_start = end - _td(days=30)
+            starts = {symbol: default_start for symbol in symbols}
+            # Deliberately include subjects blocking the scorecard. The
+            # configured universe can be all stocks while a committee made
+            # calls on SPY, QQQ or a sector ETF; refreshing only the former
+            # leaves those calls ungradable forever.
+            try:
+                from trading.memory.store import default_store
+
+                _add_scorecard_backfill_targets(
+                    symbols,
+                    starts,
+                    default_store().scorecard_backfill_targets(asof=end),
+                    default_start=default_start,
+                )
+            except Exception:
+                logger.bind(component="data").exception("scorecard refresh targets unavailable")
             sem = _asyncio.Semaphore(4)
             ok = failed = 0
 
@@ -1663,7 +1744,7 @@ class Runner:
                 from trading.data.yfinance_source import YFinanceSource
 
                 ins = Instrument(symbol=sym, asset_class=AssetClass.EQUITY)
-                cache.get_bars(YFinanceSource(), ins, start, end, "1D")
+                cache.get_bars(YFinanceSource(), ins, starts[sym], end, "1D")
                 return True
 
             async def _guarded(sym: str) -> bool:
@@ -1673,7 +1754,7 @@ class Runner:
                     except Exception:
                         return False
 
-            for res in await _asyncio.gather(*(_guarded(s) for s in symbols)):
+            for res in await _asyncio.gather(*(_guarded(s) for s in sorted(symbols))):
                 if res:
                     ok += 1
                 else:

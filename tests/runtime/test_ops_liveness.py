@@ -12,6 +12,7 @@ produce anything?
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -71,6 +72,15 @@ class TestLoopLiveness:
         issues = check_learning_loops(memdb, now=NOW)
         assert any("nightly memory pass" in i and "9.0d ago" in i for i in issues)
 
+    def test_twice_weekly_historian_alerts_after_five_days(self, memdb: Path) -> None:
+        for kind in ("committee", "agent_pm", "daily"):
+            _journal(memdb, kind, days_ago=1)
+        _journal(memdb, "historian", days_ago=5.1)
+
+        issues = check_learning_loops(memdb, now=NOW)
+
+        assert any("historian distillation" in i and "5.1d ago" in i for i in issues)
+
     def test_missing_database_is_not_an_issue(self, tmp_path: Path) -> None:
         """Before the first run there is nothing to complain about."""
         assert check_learning_loops(tmp_path, now=NOW) == []
@@ -113,6 +123,46 @@ class TestScorecardHealth:
             _journal(memdb, kind, days_ago=1)
         self._preds(memdb, 30, graded=True, due_days_ago=5)
         assert check_learning_loops(memdb, now=NOW) == []
+
+    def test_scorecard_blocker_names_missing_subjects(self, memdb: Path) -> None:
+        for kind in ("committee", "agent_pm", "historian", "daily"):
+            _journal(memdb, kind, days_ago=1)
+        conn = sqlite3.connect(memdb / "memory" / "memory.db")
+        conn.execute(
+            "INSERT INTO journal (ts, kind, actor, payload) VALUES (?, ?, ?, ?)",
+            (
+                NOW.timestamp(),
+                "scorecard_blocked",
+                "memory_grader",
+                json.dumps({"unpriced_subjects": ["SMH"], "cache_behind_subjects": ["QQQ"]}),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        issues = check_learning_loops(memdb, now=NOW)
+        assert any(
+            "missing prices: SMH" in issue and "cache behind: QQQ" in issue for issue in issues
+        )
+
+    def test_latest_failed_historian_is_not_counted_as_healthy(self, memdb: Path) -> None:
+        for kind in ("committee", "agent_pm", "daily"):
+            _journal(memdb, kind, days_ago=1)
+        conn = sqlite3.connect(memdb / "memory" / "memory.db")
+        conn.execute(
+            "INSERT INTO journal (ts, kind, actor, payload) VALUES (?, ?, ?, ?)",
+            (
+                NOW.timestamp(),
+                "historian",
+                "historian",
+                json.dumps({"ok": False, "reason": "budget"}),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        issues = check_learning_loops(memdb, now=NOW)
+        assert any("historian distillation failed: budget" in issue for issue in issues)
 
 
 class TestErrorLogScan:

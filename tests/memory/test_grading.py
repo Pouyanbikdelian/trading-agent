@@ -76,7 +76,9 @@ class TestGradingActuallyGrades:
         """The assertion that would have caught the outage on day one."""
         mem, data = desk
         _predict(mem, agent="quant", horizon=14, days_ago=40)
-        assert grade_due_predictions(mem, data) == {"graded": 1, "skipped": 0}
+        out = grade_due_predictions(mem, data)
+        assert out["graded"] == 1 and out["skipped"] == 0
+        assert out["unpriced_subjects"] == []
         assert mem.due_predictions() == []
 
     def test_calibration_is_populated_afterwards(self, desk) -> None:
@@ -104,7 +106,8 @@ class TestGradingActuallyGrades:
         _predict(mem, agent="quant", horizon=14, days_ago=40, subject="NOSUCHTICKER")
         _predict(mem, agent="scout", horizon=14, days_ago=40, subject="AAPL")
         out = grade_due_predictions(mem, data)
-        assert out == {"graded": 1, "skipped": 1}
+        assert out["graded"] == 1 and out["skipped"] == 1
+        assert out["unpriced_subjects"] == ["NOSUCHTICKER"]
         assert [c["agent"] for c in mem.calibration()] == ["scout"]
 
     def test_horizon_is_respected_not_time_since(self, desk) -> None:
@@ -124,8 +127,12 @@ class TestGradingActuallyGrades:
         mem, data = desk
         _predict(mem, agent="quant", horizon=14, days_ago=40)
         grade_due_predictions(mem, data)
-        assert grade_due_predictions(mem, data) == {"graded": 0, "skipped": 0}
+        out = grade_due_predictions(mem, data)
+        assert out["graded"] == 0 and out["skipped"] == 0
+        assert out["unpriced_subjects"] == []
 
     def test_empty_book_is_quiet(self, desk) -> None:
         mem, data = desk
-        assert grade_due_predictions(mem, data) == {"graded": 0, "skipped": 0}
+        out = grade_due_predictions(mem, data)
+        assert out["graded"] == 0 and out["skipped"] == 0
+        assert out["unpriced_subjects"] == []

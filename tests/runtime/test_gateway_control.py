@@ -242,6 +242,30 @@ class TestTheComposeIsStructurallySane:
             assert ":" in str(v), f"{name}: {v!r} in volumes is not a mount"
 
 
+class TestRunnerProfiles:
+    """A live `.env` must never boot the paper runner alongside live.
+
+    The paper runner correctly refuses port 4001, but `restart:
+    unless-stopped` turned that safe refusal into an endless crash loop.
+    Profiles express the actual invariant, while bot/dashboard remain
+    available to supervise whichever runner is selected.
+    """
+
+    @staticmethod
+    def _svc(name: str) -> dict:
+        import yaml
+
+        return yaml.safe_load(COMPOSE)["services"][name]
+
+    def test_paper_and_live_use_explicit_separate_profiles(self) -> None:
+        assert self._svc("trader")["profiles"] == ["paper"]
+        assert self._svc("trader-live")["profiles"] == ["live"]
+
+    def test_operator_surfaces_do_not_force_the_paper_runner(self) -> None:
+        for service in ("bot", "dashboard"):
+            assert "trader" not in self._svc(service).get("depends_on", [])
+
+
 class TestTelegramCanActuallyRenderIt:
     """Legacy Markdown cannot nest a `code` span inside _italic_.
 

@@ -74,7 +74,7 @@ _FRESHNESS: dict[str, tuple[str, float]] = {
 _JOURNAL_CADENCE: dict[str, tuple[str, float]] = {
     "committee": ("committee debate", 96.0),  # 2x/week
     "agent_pm": ("agent PM run", 240.0),  # weekly
-    "historian": ("historian distillation", 264.0),  # weekly, Friday
+    "historian": ("historian distillation", 120.0),  # Tuesday + Friday
     "daily": ("nightly memory pass", 48.0),  # nightly
 }
 
@@ -135,7 +135,49 @@ def check_learning_loops(state_dir: Path, *, now: datetime | None = None) -> lis
                 issues.append(
                     f"{total} predictions recorded, ZERO ever graded — agent calibration is empty"
                 )
+
+            # A count says the scorecard is blocked; this names the missing
+            # data. The daily grader writes this only after its per-subject
+            # diagnosis, so an operator can repair the cache rather than
+            # guessing whether the grader itself is broken.
+            blocked = conn.execute(
+                """SELECT ts, payload FROM journal WHERE kind = 'scorecard_blocked'
+                   ORDER BY ts DESC LIMIT 1"""
+            ).fetchone()
+            if blocked and now.timestamp() - float(blocked["ts"]) <= 48 * 3600:
+                try:
+                    payload = json.loads(blocked["payload"])
+                    parts: list[str] = []
+                    for key, label in (
+                        ("unpriced_subjects", "missing prices"),
+                        ("cache_behind_subjects", "cache behind"),
+                        ("failed_subjects", "grading errors"),
+                    ):
+                        subjects = [str(s) for s in payload.get(key, [])][:8]
+                        if subjects:
+                            parts.append(f"{label}: {', '.join(subjects)}")
+                    if parts:
+                        issues.append("scorecard data blocked — " + "; ".join(parts))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
         except sqlite3.Error:
+            pass
+
+        # A fresh historian journal row with ``ok=false`` is not liveness;
+        # it is an explicit failed permanent-memory review and deserves an
+        # alert rather than being hidden by the timestamp alone.
+        try:
+            latest_hist = conn.execute(
+                "SELECT payload FROM journal WHERE kind = 'historian' ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+            if latest_hist:
+                payload = json.loads(latest_hist["payload"])
+                if payload.get("ok") is False:
+                    issues.append(
+                        "historian distillation failed: "
+                        + str(payload.get("reason", "unknown"))[:160]
+                    )
+        except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
             pass
 
         # Shadow legs matured but never filled — the counterfactual ledger

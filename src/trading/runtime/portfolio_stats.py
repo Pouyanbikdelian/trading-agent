@@ -16,6 +16,25 @@ import pandas as pd
 
 _ASSET_DIRS = ("equity", "etf")
 
+# Predictions are sometimes expressed in index language while the free
+# daily cache holds tradeable proxies. Keep this mapping narrow and
+# explicit: silently substituting an arbitrary symbol would make a
+# scorecard look complete while grading the wrong claim.
+_CLOSE_SYMBOL_ALIASES = {
+    "NDX": "QQQ",
+    "NASDAQ100": "QQQ",
+    "NASDAQ-100": "QQQ",
+    "SPX": "SPY",
+    "S&P500": "SPY",
+    "S&P 500": "SPY",
+}
+
+
+def cache_symbol_for_subject(symbol: str) -> str:
+    """Tradeable cached proxy for a scorecard subject, otherwise itself."""
+    normalized = str(symbol).strip().upper()
+    return _CLOSE_SYMBOL_ALIASES.get(normalized, normalized)
+
 
 def close_at(series: pd.Series | None, when: Any) -> float | None:
     """Last close at or before ``when``, tolerant of tz-aware/naive mixing.
@@ -73,9 +92,10 @@ def _read_close(data_dir: Path, symbol: str) -> pd.Series | None:
     # The cache names files after the Frequency literal "1D", but older
     # CLI fetches wrote "1d". macOS hides the difference (case-insensitive
     # filesystem); Linux does not — so try both spellings explicitly.
+    cached_symbol = cache_symbol_for_subject(symbol)
     for sub in _ASSET_DIRS:
         for fname in ("1D.parquet", "1d.parquet"):
-            p = Path(data_dir) / sub / symbol.upper() / fname
+            p = Path(data_dir) / sub / cached_symbol / fname
             if p.exists():
                 try:
                     s = pd.read_parquet(p)["close"].dropna()

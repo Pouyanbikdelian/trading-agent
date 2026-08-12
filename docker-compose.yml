@@ -129,6 +129,11 @@ services:
       - ib_settings:/home/ibgateway/Jts
 
   trader:
+    # Paper and live runners use separate profiles. Without this,
+    # `docker compose --profile live up` also created this default service
+    # under the live .env, where its explicit safety check correctly refused
+    # port 4001 and restart: unless-stopped turned that refusal into a loop.
+    profiles: ["paper"]
     build:
       context: .
       dockerfile: Dockerfile
@@ -242,8 +247,8 @@ services:
     container_name: trader-bot
     restart: unless-stopped
     logging: *default-logging
-    depends_on:
-      - trader
+    # Do not depend on either runner: the selected runner is profile-based,
+    # and the bot must remain available to halt/recover it when it is down.
     env_file:
       - .env
     volumes:
@@ -299,8 +304,8 @@ services:
     container_name: trader-dashboard
     restart: unless-stopped
     logging: *default-logging
-    depends_on:
-      - trader
+    # The dashboard is useful while a runner is recovering and supports
+    # both profiles, so it deliberately has no paper-runner dependency.
     env_file:
       - .env
     volumes:
@@ -350,10 +355,11 @@ services:
 
   # ---- LIVE runner (opt-in profile) -------------------------------------
   #
-  #   Arm:     docker compose --profile live up -d trader-live
+  #   Arm:     docker compose --profile live up -d
   #   Disarm:  docker compose --profile live stop trader-live
   #
-  # REPLACES the paper `trader` — it does not run alongside it. Two
+  # REPLACES the paper `trader` — normal startup selects one profile, never
+  # both. Two
   # runners would need two gateways, and two gateways cannot share host
   # networking (the second Xvfb collides with the first's X display
   # socket — seen 2026-07-09). Replacing keeps the plumbing identical to
