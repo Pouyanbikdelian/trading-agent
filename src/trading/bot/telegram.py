@@ -36,18 +36,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import shlex
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pandas as pd
 
 from trading.bot import registry
-from trading.core.config import settings
+from trading.core.config import PROJECT_ROOT, settings
 from trading.core.logging import logger
+
+if TYPE_CHECKING:
+    from trading.bot.desk import ChangeResult, DeskChangeStore
 
 BOT_API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 25  # seconds — long-poll
@@ -74,11 +78,12 @@ HELP_TEXT = (
     "*Trigger work*\n"
     "/cycle — force a rebalance now (~2 min)\n"
     "/refresh — queue a data refresh\n\n"
-    "*Copilot* (read-only — explains, never trades)\n"
+    "*Desk copilot* (never trades)\n"
     "/ask QUESTION — anything about past decisions or current state\n"
     "/why SYM — why did we buy/sell/hold it, and what happened\n"
     "/thesis SYM — latest thesis + is it still valid\n"
     "/committee SYM — decision history for a symbol (bare /committee still convenes)\n\n"
+    "/watchlist — show dashboard watchlist · `/watchlist add|remove|undo` stages a change\n"
     "*Manual orders* (queued, run within ~5s)\n"
     "/buy SYM QTY \\[LIMIT] — e.g. `/buy AAPL 10 180`\n"
     "/sell SYM \\[QTY|all] \\[LIMIT] — e.g. `/sell AAPL all`\n"
@@ -88,8 +93,8 @@ HELP_TEXT = (
     "/k N | /k clear — override the strategy top-K at runtime\n"
     "/correlation — 12m correlation matrix of current holdings\n"
     "/memory — permanent-memory vitals: calibration, trust, lessons\n"
-    "/lesson <text> — teach the desk something; a firm tone makes it binding\n"
-    "/lessons [harden|soften <id>] — review or re-weight what we've learned\n"
+    "/lesson <text> — propose a durable desk lesson; approval applies it\n"
+    "/lessons [harden|soften <id>] — review or propose a re-weighting\n"
     "/edge [5|21|63] — did our picks beat the names we passed on?\n"
     "/edge why — the breakdown: rank, market conditions, entry level\n"
     "/detail — full transcript of the latest committee debate\n"
@@ -148,10 +153,12 @@ class ButtonReply(str):
     """
 
     markup: dict[str, Any]
+    plain: bool
 
-    def __new__(cls, text: str, markup: dict[str, Any]) -> ButtonReply:
+    def __new__(cls, text: str, markup: dict[str, Any], *, plain: bool = False) -> ButtonReply:
         obj = super().__new__(cls, text)
         obj.markup = markup
+        obj.plain = plain
         return obj
 
 
@@ -438,112 +445,180 @@ def _cmd_correlation() -> str:
     return format_correlation(corr)
 
 
-def _cmd_lesson(args: list[str]) -> str:
-    """``/lesson <statement>`` — write a lesson into permanent memory.
+def _desk_store() -> DeskChangeStore:
+    """The only object the bot uses to change watchlists or lessons."""
+    from trading.bot.desk import DeskChangeStore
 
-    Status follows the operator's TONE, the same grading the mandate path
-    uses: an instruction phrased as an instruction ("I want you to add
-    this lesson…") lands as ``established`` and reaches every agent from
-    the next cycle; anything softer lands as a ``candidate`` and is shown
-    to the desk as under consideration.
+    path = Path(getattr(settings, "watchlist_path", PROJECT_ROOT / "config" / "watchlist.yaml"))
+    return DeskChangeStore(settings.state_dir, path)
 
-    Why tone rather than a flag: the operator already writes to this
-    system in natural language and the mandate path already reads
-    firmness from phrasing. A second, different convention for lessons
-    would be a thing to remember rather than a thing to use.
 
-    Before this existed there was no way to write a lesson at all — the
-    copilot filed "we should buy quality after 4-5 down days" as a soft
-    MANDATE, which influences one run and then expires, when what was
-    wanted was a durable, gradeable belief.
+def _desk_reply(result: ChangeResult) -> str:
+    """Wrap a staged change in a proposal-bound inline keyboard."""
+    if result.proposal is None:
+        return result.message
+    from trading.bot import keyboards
+    from trading.bot.desk import describe_proposal
+
+    # Operator text is arbitrary, so proposal messages bypass Telegram's
+    # fragile legacy Markdown parser.  The buttons survive that plain send.
+    return ButtonReply(
+        describe_proposal(result.proposal),
+        keyboards.desk_change_keyboard(result.proposal.id),
+        plain=True,
+    )
+
+
+def _cmd_watchlist(args: list[str]) -> str:
+    """Show or stage a dashboard-watchlist addition/removal.
+
+    This deliberately does not touch a tradable universe, current holdings,
+    target weights, or broker state.
     """
-    from trading.copilot.mandates import STRONG, grade_strength
-    from trading.core.text import clip
-    from trading.memory.store import default_store
+    try:
+        store = _desk_store()
+        if not args:
+            symbols = store.watchlist.items()
+            if not symbols:
+                return PlainReply("Operator watchlist is empty. Use /watchlist add NVDA.")
+            return PlainReply(
+                "Operator watchlist (dashboard/research only — no trading action):\n"
+                + "\n".join(f"{i}. {symbol}" for i, symbol in enumerate(symbols, start=1))
+            )
+        action = args[0].lower()
+        if action in {"add", "remove", "drop"}:
+            if len(args) != 2:
+                return f"usage: `/watchlist {action} SYMBOL`"
+            result = (
+                store.propose_watchlist_add(args[1])
+                if action == "add"
+                else store.propose_watchlist_remove(args[1])
+            )
+            return _desk_reply(result)
+        if action == "undo" and len(args) == 1:
+            return _desk_reply(store.propose_undo_last_watchlist_change())
+        return "usage: `/watchlist` · `/watchlist add SYMBOL` · `/watchlist remove SYMBOL` · `/watchlist undo`"
+    except Exception as e:
+        return f"could not read the operator watchlist: `{e}`"
 
-    statement = " ".join(args).strip()
-    if not statement:
+
+def _cmd_lesson_detail(lesson_id: str) -> str:
+    """Show one canonical lesson rather than asking an LLM to paraphrase it."""
+    from trading.memory.store import MemoryStore
+
+    mem = MemoryStore(settings.state_dir / "memory")
+    try:
+        row = next((r for r in mem.lessons() if r["id"] == lesson_id), None)
+        if row is None:
+            return f"No lesson `{lesson_id}`. Use /lessons to list the book."
+        author = "operator" if "operator" in (row["tags"] or "") else "historian"
+        lines = [
+            f"Lesson {row['id']} — {row['status']} ({author})",
+            str(row["statement"]),
+            f"Evidence: {row['support']} support / {row['contradict']} contradict",
+        ]
+        evidence = mem.lesson_evidence(lesson_id, limit=6)
+        if evidence:
+            lines.append("Recent evidence:")
+            lines.extend(
+                f"- {e['id']} {e['relation']} ({e['kind']}): {e['reason']}".rstrip(": ")
+                for e in evidence
+            )
+        if author == "operator" and row["status"] != "retired":
+            lines.append(
+                f"Edit: /lesson edit {lesson_id} <replacement> · archive: /lesson archive {lesson_id}"
+            )
+        return PlainReply("\n".join(lines))
+    except Exception as e:
+        return f"could not read lesson `{lesson_id}`: `{e}`"
+    finally:
+        mem.close()
+
+
+def _cmd_lesson(args: list[str]) -> str:
+    """Stage a lesson creation/edit/archive; direct writes are forbidden."""
+    if not args:
         return (
             "usage: `/lesson <what the desk should remember>`\n"
-            "Tone sets the weight — a firm instruction is added outright, "
-            "anything softer arrives as a candidate for the desk to weigh.\n"
-            "`/lessons` to review, `/lessons harden <id>` to promote."
+            "`/lesson show ID` · `/lesson edit ID <replacement>` · `/lesson archive ID`"
         )
-    if len(statement) < 15:
-        return "_that is too short to be a lesson — say what to do and when it applies._"
-
-    strength = grade_strength(statement)
-    status = "established" if strength == STRONG else "candidate"
+    action = args[0].lower()
+    if action in {"show", "view"}:
+        return (
+            _cmd_lesson_detail(args[1]) if len(args) == 2 else "usage: `/lesson show <lesson-id>`"
+        )
     try:
-        mem = default_store()
-        lid = mem.add_lesson(statement, tags=f"operator {strength}", status=status)
+        store = _desk_store()
+        if action in {"edit", "replace"}:
+            if len(args) < 3:
+                return "usage: `/lesson edit <lesson-id> <replacement>`"
+            return _desk_reply(store.propose_lesson_supersede(args[1], " ".join(args[2:])))
+        if action in {"archive", "retire"}:
+            if len(args) != 2:
+                return "usage: `/lesson archive <lesson-id>`"
+            return _desk_reply(store.propose_lesson_archive(args[1]))
+        return _desk_reply(store.propose_lesson_create(" ".join(args)))
     except Exception as e:
-        return f"could not write the lesson: `{e}`"
-
-    if status == "established":
-        head = "🧠 *Lesson added* — established, in front of every agent from the next cycle."
-        tail = f"Too strong? `/lessons soften {lid}`."
-    else:
-        head = "🧠 *Lesson recorded* — candidate, the desk will weigh it and may disagree."
-        tail = f"Want it binding? `/lessons harden {lid}`."
-    return f"{head}\n`{lid}` · {clip(statement, 300)}\n_{tail}_"
+        return f"could not stage the lesson change: `{e}`"
 
 
 def _cmd_lessons(args: list[str]) -> str:
-    """``/lessons [harden|soften <id>]`` — review or re-weight the book."""
+    """Review lesson memory, or stage a status change for approval."""
     from trading.core.text import clip
-    from trading.memory.store import default_store
-
-    try:
-        mem = default_store()
-    except Exception as e:
-        return f"could not open memory: `{e}`"
+    from trading.memory.store import MemoryStore
 
     if args and args[0].lower() in ("harden", "soften"):
-        if len(args) < 2:
+        if len(args) != 2:
             return f"usage: `/lessons {args[0].lower()} <lesson-id>`"
         want = "established" if args[0].lower() == "harden" else "candidate"
-        lid = args[1].strip()
         try:
-            ok = mem.set_lesson_status(lid, want)
+            return _desk_reply(_desk_store().propose_lesson_status(args[1], want))
         except Exception as e:
-            return f"could not change `{lid}`: `{e}`"
-        if not ok:
-            return f"_no live lesson `{lid}` — `/lessons` to list them._"
-        return f"`{lid}` is now *{want}*."
+            return f"could not stage lesson status change: `{e}`"
 
-    est = mem.lessons(status="established")
-    cand = mem.lessons(status="candidate")
-    challenged = mem.lessons(status="challenged")
-    if not est and not cand and not challenged:
-        return "_no lessons yet. `/lesson <statement>` writes the first one._"
+    mem = MemoryStore(settings.state_dir / "memory")
+    try:
+        est = mem.lessons(status="established")
+        cand = mem.lessons(status="candidate")
+        challenged = mem.lessons(status="challenged")
+        if not est and not cand and not challenged:
+            return PlainReply("No lessons yet. Use /lesson <statement> to propose the first one.")
 
-    def _rows(rows: list[Any], limit: int) -> list[str]:
-        out = []
-        for r in rows[:limit]:
-            who = "👤" if "operator" in (r["tags"] or "") else "📚"
-            score = (
-                f" ({r['support']}/{r['contradict']})" if r["support"] or r["contradict"] else ""
-            )
-            out.append(f"  {who} `{r['id']}`{score} {clip(r['statement'], 220)}")
-        return out
+        def _rows(rows: list[Any], limit: int) -> list[str]:
+            out = []
+            for r in rows[:limit]:
+                who = "operator" if "operator" in (r["tags"] or "") else "historian"
+                score = (
+                    f" ({r['support']}/{r['contradict']})"
+                    if r["support"] or r["contradict"]
+                    else ""
+                )
+                out.append(f"- {r['id']} [{r['status']}; {who}{score}] {clip(r['statement'], 220)}")
+            return out
 
-    lines = ["🧠 *Lessons* — 👤 yours · 📚 the historian's"]
-    if est:
-        lines.append(f"\n*Established* ({len(est)}) — every agent sees these:")
-        lines.extend(_rows(est, 8))
-    if cand:
-        lines.append(f"\n*Candidates* ({len(cand)}) — proposed, not yet earned:")
-        lines.extend(_rows(cand, 8))
-    if challenged:
-        lines.append(f"\n*Challenged* ({len(challenged)}) — withheld from agents pending review:")
-        lines.extend(_rows(challenged, 8))
-    lines.append("\n_`/lessons harden <id>` restores/promotes · `/lesson <text>` adds_")
-    return "\n".join(lines)
+        lines = ["Lessons — use /lesson show ID for full text"]
+        if est:
+            lines.append(f"\nEstablished ({len(est)}):")
+            lines.extend(_rows(est, 8))
+        if cand:
+            lines.append(f"\nCandidates ({len(cand)}):")
+            lines.extend(_rows(cand, 8))
+        if challenged:
+            lines.append(f"\nChallenged ({len(challenged)}):")
+            lines.extend(_rows(challenged, 8))
+        lines.append(
+            "\n/lesson <text> proposes an addition · /lessons harden|soften ID proposes a status change"
+        )
+        return PlainReply("\n".join(lines))
+    except Exception as e:
+        return f"could not open memory: `{e}`"
+    finally:
+        mem.close()
 
 
 def _cmd_memory() -> str:
     """``/memory`` — permanent-memory vitals: counts, calibration, trust."""
+    from trading.core.text import clip
     from trading.memory.store import default_store
 
     try:
@@ -574,7 +649,10 @@ def _cmd_memory() -> str:
     est = mem.lessons(status="established")
     if est:
         lines.append("")
-        lines.append(f"*Top lesson:* {est[0]['statement'][:140]}")
+        top = str(est[0]["statement"])
+        lines.append(f"*Top lesson* `{est[0]['id']}`: {clip(top, 220)}")
+        if len(top) > 220:
+            lines.append(f"_Full text: `/lesson show {est[0]['id']}`_")
     return "\n".join(lines)
 
 
@@ -2148,6 +2226,84 @@ async def _cmd_copilot(
         return f"copilot error: {type(e).__name__}: {e}"
 
 
+_LIST_REFERENCE_RE = r"(?:watch\s*list|(?:our|my|the)\s+list)"
+_EXPLICIT_TICKER_RE = re.compile(r"(?<![A-Za-z0-9])\$?([A-Z][A-Z0-9.-]{1,7})(?![A-Za-z0-9])")
+
+
+def _request_ticker(text: str) -> str | None:
+    """A ticker named by the operator, never an LLM-guessed company symbol."""
+    matches = {
+        m.group(1).upper()
+        for m in _EXPLICIT_TICKER_RE.finditer(text)
+        if m.group(1).upper() not in {"THE", "AND", "THIS", "THAT", "LIST"}
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _maybe_handle_desk_request(text: str) -> str | None:
+    """Recognise common natural-language watchlist/lesson requests.
+
+    This happens before mandate capture and the LLM.  The parser only stages
+    deterministic, fully-described changes; an ambiguous ticker or action
+    stays ordinary copilot chat rather than becoming an accidental write.
+    """
+    compact = " ".join(text.split())
+    low = compact.lower()
+
+    if low in {"approve", "approve it"}:
+        store = _desk_store()
+        pending = store.pending()
+        return _desk_reply(store.approve(pending.id)) if pending is not None else None
+    if low in {"cancel", "cancel it"}:
+        pending = _desk_store().pending()
+        return _desk_reply(_desk_store().cancel()) if pending is not None else None
+
+    has_list = re.search(_LIST_REFERENCE_RE, low) is not None
+    if has_list and (
+        re.search(r"\b(show|inside|contents|what(?:'s| is))\b", low)
+        or re.search(r"\blist\s+(?:the\s+)?watch\s*list\b", low)
+    ):
+        return _cmd_watchlist([])
+
+    add_request = has_list and re.search(r"\b(add|include|put)\b", low)
+    remove_request = has_list and re.search(r"\b(remove|drop|delete)\b", low)
+    ticker = _request_ticker(compact)
+    if add_request and ticker is not None:
+        return _desk_reply(_desk_store().propose_watchlist_add(ticker))
+    if remove_request and ticker is not None:
+        return _desk_reply(_desk_store().propose_watchlist_remove(ticker))
+    if has_list and re.search(r"\bundo\b", low):
+        return _desk_reply(_desk_store().propose_undo_last_watchlist_change())
+
+    show_lesson = re.search(r"\b(show|list|inside|contents|what)\b", low) and re.search(
+        r"\blessons?(?:\s+memory)?\b", low
+    )
+    if show_lesson:
+        return _cmd_lessons([])
+    detail = re.search(r"\b(?:show|view)\s+lesson\s+(ls-[A-Za-z0-9-]+)\b", compact, re.I)
+    if detail:
+        return _cmd_lesson_detail(detail.group(1))
+    edit = re.search(
+        r"\b(?:edit|replace|rewrite|change)\s+(?:the\s+)?lesson\s+"
+        r"(ls-[A-Za-z0-9-]+)\s*(?:to|:)\s*(.+)$",
+        compact,
+        re.I,
+    )
+    if edit:
+        return _desk_reply(_desk_store().propose_lesson_supersede(edit.group(1), edit.group(2)))
+    archive = re.search(
+        r"\b(?:archive|retire)\s+(?:the\s+)?lesson\s+(ls-[A-Za-z0-9-]+)\b", compact, re.I
+    )
+    if archive:
+        return _desk_reply(_desk_store().propose_lesson_archive(archive.group(1)))
+    create = re.search(
+        r"\b(?:add|create|remember|teach)\b.*?\blesson\s*[:\-]\s*(.+)$", compact, re.I
+    )
+    if create:
+        return _desk_reply(_desk_store().propose_lesson_create(create.group(1)))
+    return None
+
+
 async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
     """Parse a command and return a reply, or None to stay silent.
 
@@ -2162,6 +2318,9 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         # fragments ("ok", "👍") get a hint instead of an LLM call, and
         # the copilot's own 15s rate limit bounds a chatty evening.
         stripped = text.strip()
+        desk_reply = _maybe_handle_desk_request(stripped)
+        if desk_reply is not None:
+            return desk_reply
         if len(stripped) < 8 or not any(c.isalpha() for c in stripped):
             return "Ask me a full question — e.g. `why did we buy MU?` — or /help for commands."
         # A forward-looking instruction ("high conviction on GS, look at
@@ -2197,6 +2356,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_correlation()
     if cmd == "/memory":
         return _cmd_memory()
+    if cmd in ("/watchlist", "/watch"):
+        return _cmd_watchlist(args)
     if cmd == "/lesson":
         return _cmd_lesson(args)
     if cmd == "/lessons":
@@ -2493,6 +2654,17 @@ async def _handle_callback(data: str) -> str:
         reply = await _dispatch(tokentail)
         return reply if reply is not None else "done."
 
+    if action in (keyboards.ACT_DESK_APPROVE, keyboards.ACT_DESK_CANCEL):
+        # The proposal id is the binding token.  A button from an old chat
+        # message cannot affect whichever request happens to be newest.
+        store = _desk_store()
+        result = (
+            store.approve(tokentail)
+            if action == keyboards.ACT_DESK_APPROVE
+            else store.cancel(tokentail)
+        )
+        return _desk_reply(result)
+
     if action in (keyboards.ACT_APPROVE, keyboards.ACT_APPROVE_SCALED, keyboards.ACT_REJECT):
         cid, _, scale = tokentail.partition(":")
         pending = _read_cycle_pending()
@@ -2574,7 +2746,7 @@ async def _send_reply(client: httpx.AsyncClient, token: str, chat_id: str, reply
     buttons sit directly above the compose box where the operator's thumb
     already is, rather than scrolled off above three screens of text.
     """
-    plain = isinstance(reply, PlainReply)
+    plain = isinstance(reply, PlainReply) or bool(getattr(reply, "plain", False))
     markup = getattr(reply, "markup", None) if isinstance(reply, ButtonReply) else None
     chunks = _split_for_telegram(reply)
     for i, chunk in enumerate(chunks):

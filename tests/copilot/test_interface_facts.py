@@ -24,25 +24,29 @@ def _iface() -> dict:
     return facts.operator_interface(MISSING)
 
 
-class TestTheThreeDoors:
-    def test_all_three_doors_are_described(self) -> None:
-        doors = _iface()["three_doors"]
+class TestTheInterfaceDoors:
+    def test_all_four_doors_are_described(self) -> None:
+        doors = _iface()["four_doors"]
 
-        assert len(doors) == 3
+        assert len(doors) == 4
         joined = " ".join(doors).lower()
-        assert "command" in joined and "mandate" in joined and "copilot" in joined
+        assert (
+            "command" in joined
+            and "proposal" in joined
+            and "mandate" in joined
+            and "copilot" in joined
+        )
 
     def test_it_says_opinions_do_not_persist(self) -> None:
         """The operator's actual question: 'I'm bullish on TSLA' — and the
         answer is that it lands nowhere."""
-        assert "PERSISTS NOWHERE" in _iface()["three_doors"][2].upper()
+        assert "PERSISTS NOWHERE" in _iface()["four_doors"][3].upper()
 
     def test_it_states_that_the_copilot_cannot_act(self) -> None:
         text = _iface()["_the_copilot_cannot_act"]
 
         assert "cannot" in text
-        # It must not merely refuse — it must redirect to the command.
-        assert "naming the command" in text.lower()
+        assert "approval" in text.lower()
 
 
 class TestMandateGrading:
@@ -103,6 +107,12 @@ class TestTheAlwaysQuestion:
         assert hold.startswith("/hold")
         assert "/lesson" in hold and "wanted together" in hold
 
+    def test_watchlist_is_explicitly_separate_from_trading(self) -> None:
+        tracked = _iface()["which_tool_for_which_intent"]["track a research name"]
+
+        assert "/watchlist add NVDA" in tracked
+        assert "does not add a tradable universe member" in tracked
+
 
 def test_standing_mandates_are_included() -> None:
     """'What have I already told you?' is a question about evidence."""
@@ -113,7 +123,7 @@ def test_it_never_raises_on_a_missing_state_dir() -> None:
     """It runs on every question. It must not be able to break the copilot."""
     out = facts.operator_interface(MISSING)
 
-    assert "three_doors" in out and "mandates_expire" in out
+    assert "four_doors" in out and "mandates_expire" in out
 
 
 def test_it_is_wired_into_the_evidence_bundle() -> None:

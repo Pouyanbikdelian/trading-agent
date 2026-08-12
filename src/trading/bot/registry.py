@@ -71,14 +71,21 @@ REGISTRY: tuple[Spec, ...] = (
     Spec("/correlation", "12m correlation matrix of holdings", aliases=("/corr",)),
     Spec("/memory", "calibration, trust, lessons"),
     Spec(
+        "/watchlist",
+        "show the dashboard watchlist or propose an add/remove",
+        usage="/watchlist [add|remove SYMBOL|undo]",
+        example="/watchlist add NVDA",
+        aliases=("/watch",),
+    ),
+    Spec(
         "/lesson",
-        "teach the desk something durable — a firm tone makes it binding",
+        "propose a durable desk lesson; approval applies it",
         usage="/lesson <what the desk should remember, and when it applies>",
         example="/lesson I want you to add this lesson: never average into a falling knife",
     ),
     Spec(
         "/lessons",
-        "review what we've learned; harden or soften one",
+        "review what we've learned; propose hardening or softening one",
         usage="/lessons [harden|soften <lesson-id>]",
         example="/lessons harden ls-3f2a91c4",
     ),
@@ -236,7 +243,10 @@ def suggest(cmd: str, limit: int = 2, *, strict: bool = False) -> list[str]:
     token = cmd.lower()
     if not token.startswith("/"):
         token = "/" + token
-    if len(token) < 2:
+    # Three-letter fragments are usually the beginning of prose ("/wat…")
+    # rather than a command typo.  Suggesting a long command from one is
+    # noisier than helpful and can hide the /help fallback.
+    if len(token) < 5:
         return []
     pool = [n for n in all_names() if n[1:2] == token[1:2]]
     cutoff = _STRICT_CUTOFF if strict else _CUTOFF

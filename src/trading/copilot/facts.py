@@ -557,27 +557,28 @@ def operator_interface(state_dir: Path) -> dict[str, Any]:
     """
     out: dict[str, Any] = {
         "_read_this_first": (
-            "A typed message goes through exactly ONE of three doors, decided "
+            "A typed message goes through exactly ONE of four doors, decided "
             "by its shape, not by intent. Getting the door wrong is the most "
             "common reason an instruction has no effect."
         ),
-        "three_doors": [
+        "four_doors": [
             "1. Starts with '/' -> a COMMAND. Deterministic code. This is the only door that can change anything.",
-            "2. Free text that parses as an instruction -> stored as a MANDATE for the next run. It never reaches the copilot, so there is no conversational reply, just a confirmation.",
-            "3. Anything else -> the COPILOT (me). Read-only. I answer and the statement persists NOWHERE.",
+            "2. A recognised free-text request to show or change the operator watchlist or an operator lesson -> a DESK-CHANGE PROPOSAL. It changes nothing until the operator approves that exact proposal; it never reaches trading execution.",
+            "3. Other free text that parses as an instruction -> stored as a MANDATE for the next run. It never reaches the copilot, so there is no conversational reply, just a confirmation.",
+            "4. Anything else -> the COPILOT (me). Read-only. I answer and the statement persists NOWHERE.",
         ],
         "_opinions_do_not_persist": (
-            "This is the trap. 'I'm bullish on TSLA' is door 3: it has no "
+            "This is the trap. 'I'm bullish on TSLA' is door 4: it has no "
             "instruction verb and no forward marker, so it is answered and "
             "forgotten. Only a command or a recognised instruction survives "
             "the conversation. Earlier chat turns are never evidence."
         ),
         "_the_copilot_cannot_act": (
-            "I cannot place an order, write a lesson, set a hold or change a "
-            "setting — a test fails the build if this package so much as "
-            "imports an execution path. Asking me to do something is door 3 "
-            "and nothing happens. Always answer such a request by naming the "
-            "command the operator should type."
+            "I cannot place an order, set a hold, or change a trading setting "
+            "— a test fails the build if this package so much as imports an "
+            "execution path. The Telegram router can stage a recognised "
+            "watchlist or operator-lesson proposal, but it cannot apply one "
+            "without the operator's exact approval."
         ),
     }
 
@@ -629,10 +630,16 @@ def operator_interface(state_dir: Path) -> dict[str, Any]:
         "nudge the next run": "plain text with a forward marker, e.g. 'consider ASML next round' (soft)",
         "make the next run act": "'I want ASML in the book next run' (strong)",
         "a DURABLE belief": (
-            "/lesson <statement> — tone-graded like a mandate: a firm "
-            "instruction lands as ESTABLISHED and reaches every agent from "
-            "the next cycle; softer phrasing lands as a CANDIDATE. This is "
-            "the right answer for anything meant to last."
+            "/lesson <statement> — stages a tone-graded proposal: a firm "
+            "instruction will land as ESTABLISHED and reach every agent from "
+            "the next cycle; softer phrasing will land as a CANDIDATE. The "
+            "operator must approve the exact proposal first."
+        ),
+        "track a research name": (
+            "say 'add NVDA to our watchlist' or use /watchlist add NVDA. "
+            "The bot stages an approval-bound dashboard/research change only; "
+            "it does not add a tradable universe member or place an order. "
+            "/watchlist undo stages an approval-bound reversal of the last change."
         ),
         "stop a position being sold": (
             "/hold <SYMBOL> — a hard mechanical block, checked before every "
@@ -640,7 +647,10 @@ def operator_interface(state_dir: Path) -> dict[str, Any]:
             "the mechanical half of 'keep it long term'; /lesson is the "
             "reasoning half, and they are usually wanted together."
         ),
-        "review what is standing": "/mandates for instructions, /lessons for beliefs, /holds for protected names",
+        "review what is standing": (
+            "/watchlist for research names, /mandates for instructions, "
+            "/lessons for beliefs, /holds for protected names"
+        ),
     }
 
     try:

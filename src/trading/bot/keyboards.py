@@ -47,6 +47,8 @@ ACT_APPROVE_SCALED = "as"
 ACT_REJECT = "rj"
 ACT_MODE_CONFIRM = "mc"
 ACT_MODE_CANCEL = "mx"
+ACT_DESK_APPROVE = "da"
+ACT_DESK_CANCEL = "dx"
 ACT_RUN = "run"  # a read-only command, named in the token
 
 # Read-only commands a button may run. An allowlist rather than "any
@@ -147,6 +149,23 @@ def mode_keyboard(mode: str) -> dict[str, Any]:
             [
                 _button("✅ Confirm", ACT_MODE_CONFIRM, str(mode)[:16]),
                 _button("✖️ Cancel", ACT_MODE_CANCEL, str(mode)[:16]),
+            ]
+        ]
+    )
+
+
+def desk_change_keyboard(proposal_id: str) -> dict[str, Any]:
+    """Approve/cancel exactly one desk-state proposal.
+
+    Unlike a cycle decision, this only changes the operator watchlist or
+    permanent-memory metadata.  It is still bound to the full proposal id:
+    an old Telegram button must never approve a later request.
+    """
+    return _markup(
+        [
+            [
+                _button("✅ Approve", ACT_DESK_APPROVE, proposal_id),
+                _button("✖️ Cancel", ACT_DESK_CANCEL, proposal_id),
             ]
         ]
     )

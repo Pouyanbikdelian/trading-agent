@@ -46,6 +46,7 @@ class TestCallbackCodec:
             keyboards.approval_keyboard("abcdef1234567890"),
             keyboards.sentinel_keyboard(),
             keyboards.mode_keyboard("neutral"),
+            keyboards.desk_change_keyboard("dc-abcdef1234"),
             keyboards.read_only_keyboard("/positions", "/orders", "/health"),
         ]
         for m in markups:
@@ -67,6 +68,13 @@ class TestKeyboardsBindToTheirSubject:
         for d in _all_callback_data(keyboards.mode_keyboard("defense")):
             assert keyboards.decode(d)[1] == "defense"
 
+    def test_desk_change_buttons_carry_the_full_proposal_id(self) -> None:
+        proposal_id = "dc-abcdef1234"
+        for d in _all_callback_data(keyboards.desk_change_keyboard(proposal_id)):
+            action, token = keyboards.decode(d)
+            assert action in {keyboards.ACT_DESK_APPROVE, keyboards.ACT_DESK_CANCEL}
+            assert token == proposal_id
+
     def test_scale_button_encodes_its_percentage(self) -> None:
         data = _all_callback_data(keyboards.approval_keyboard("abc12345"))
         scaled = [d for d in data if keyboards.decode(d)[0] == keyboards.ACT_APPROVE_SCALED]
@@ -87,6 +95,7 @@ class TestNoOrderPathHasAButton:
             keyboards.approval_keyboard("abc12345"),
             keyboards.sentinel_keyboard(),
             keyboards.mode_keyboard("bear"),
+            keyboards.desk_change_keyboard("dc-abcdef1234"),
         ]
         for m in markups:
             blob = " ".join(_all_callback_data(m)) + " " + " ".join(_all_labels(m))
