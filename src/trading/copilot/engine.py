@@ -66,14 +66,22 @@ CHARTER = (
     "decisions that have nothing to do with the question — do not "
     "summarize or mention them unless they answer it.\n"
     "3. TWO SEPARATE BOOKS — never conflate them: "
-    "'NOW_trading_account_paper' is the real momentum trading account "
+    "'NOW_real_trading_account' is the real momentum trading account "
     "(the one with share positions and orders); "
     "'NOW_agent_pm_simulated_book' is the PM agent's virtual paper-money "
     "experiment. EVERY number you quote must name its book in plain "
-    "words: 'the trading account (paper)' or 'the PM's simulated book'. "
+    "words: 'the real trading account' or 'the PM's simulated book'. "
     "Never echo raw evidence key names (NOW_..., THEN_...) — they are "
     "JSON identifiers, not prose — and never write underscores at all "
     "(Telegram mangles them).\n"
+    "3b. EVIDENCE BOUNDARY: the JSON names an 'answer_scope' and "
+    "'authoritative_now_sources' for this question. For a claim about "
+    "current state, use ONLY those named sources. A source omitted from "
+    "that list is deliberately out of scope — do not mention it, infer "
+    "from it, or use it to fill a gap. In particular, a live-account "
+    "question must never be answered from the PM simulation, and a PM "
+    "question must never be answered from the trading account. Say what "
+    "is unavailable rather than borrowing facts from the other book.\n"
     "4. Cite evidence for factual claims: decision ids like D123, "
     "transcript ids like T456, order ids, or data timestamps. NEVER "
     "invent a rationale, vote, or price — if the evidence lacks the "
@@ -221,6 +229,11 @@ _DEEP_MARKERS = (
     "history",
     "what happened",
     "explain",
+    "elaborate",
+    "go deeper",
+    "tell me more",
+    "walk me through",
+    "full detail",
     "justify",
     "compare",
     "instead of",
@@ -250,6 +263,173 @@ def answer_budget(question: str) -> str:
         # "What is XLV?", "how much cash?", "are we halted?"
         return "1-2 sentences, no preamble"
     return "2-3 sentences"
+
+
+def evidence_scope(question: str) -> str:
+    """Classify the current-state evidence allowed for a question.
+
+    The copilot used to receive every current fact for every question. That
+    made a question about the real strategy vulnerable to the PM's separate
+    simulation (and vice versa), even though both facts were individually
+    correct. Ambiguous committee/market questions retain the full evidence
+    set; explicit book, proposal, risk, and process questions are scoped.
+    """
+    q = " ".join((question or "").lower().split())
+    if not q:
+        return "general"
+
+    configuration = any(
+        marker in q
+        for marker in (
+            "configuration",
+            "setting",
+            "pm sleeve",
+            "strategy sleeve",
+            "capital cap",
+            "max position",
+            "max gross",
+            "approval timeout",
+            "live armed",
+            "trading environment",
+        )
+    )
+    lessons = any(
+        marker in q
+        for marker in (
+            "lesson",
+            "lessons",
+            "what did we learn",
+            "what have we learned",
+            "desk memory",
+        )
+    )
+    pm = any(
+        marker in q
+        for marker in (
+            "agent pm",
+            "pm ",
+            " pm",
+            "simulated book",
+            "simulated portfolio",
+            "virtual book",
+            "virtual portfolio",
+            "paper-money",
+            "paper money",
+        )
+    )
+    live = any(
+        marker in q
+        for marker in (
+            "live strategy",
+            "real strategy",
+            "trading account",
+            "real account",
+            "live account",
+            "paper account",
+            "live trading",
+            "stocks do we own",
+            "what do we own",
+            "we own",
+            "our holdings",
+            "our positions",
+            "current holding",
+            "current position",
+            "why did we buy",
+            "why did we sell",
+            "why do we own",
+        )
+    ) or bool(re.search(r"\bwhy\s+did\s+we\s+(?:buy|sell|hold)\b", q))
+    proposal = any(
+        marker in q
+        for marker in (
+            "this cycle",
+            "cycle proposing",
+            "pending proposal",
+            "pending plan",
+            "order basket",
+            "awaiting approval",
+        )
+    )
+    risk = any(
+        marker in q
+        for marker in (
+            "halt",
+            "risk limit",
+            "risk cap",
+            "drawdown",
+            "daily loss",
+            "guard stop",
+            "trailing stop",
+        )
+    )
+    process = any(
+        marker in q
+        for marker in (
+            "how does the cycle",
+            "how do i approve",
+            "how do i run",
+            "how does approval",
+            "what command",
+            "how does the desk",
+            "how does the bot",
+        )
+    )
+
+    if configuration:
+        return "configuration"
+    if lessons:
+        return "lessons"
+    if pm and live:
+        return "book_comparison"
+    if pm:
+        return "pm_book"
+    if proposal:
+        return "active_proposal"
+    if risk:
+        return "risk"
+    if live:
+        return "live_account"
+    if process:
+        return "operating_process"
+    return "general"
+
+
+def _now_source_names(scope: str, *, has_symbol: bool) -> tuple[str, ...]:
+    """The present-state source keys that are authoritative for ``scope``."""
+    all_sources = (
+        "NOW_real_trading_account",
+        "NOW_trading_account_orders",
+        "NOW_active_cycle_proposal",
+        "NOW_agent_pm_simulated_book",
+        "NOW_risk_state",
+        "NOW_lesson_book",
+        "NOW_configuration",
+        "NOW_operating_manual",
+        "NOW_operator_interface",
+    )
+    scoped = {
+        "live_account": ("NOW_real_trading_account", "NOW_trading_account_orders"),
+        "pm_book": ("NOW_agent_pm_simulated_book",),
+        "active_proposal": ("NOW_active_cycle_proposal",),
+        "risk": ("NOW_real_trading_account", "NOW_risk_state", "NOW_configuration"),
+        "operating_process": (
+            "NOW_configuration",
+            "NOW_operating_manual",
+            "NOW_operator_interface",
+        ),
+        "configuration": ("NOW_configuration",),
+        "lessons": ("NOW_lesson_book",),
+        "book_comparison": (
+            "NOW_real_trading_account",
+            "NOW_trading_account_orders",
+            "NOW_agent_pm_simulated_book",
+        ),
+        "general": all_sources,
+    }
+    names = scoped.get(scope, all_sources)
+    if has_symbol and scope != "operating_process":
+        names = (*names, "NOW_market")
+    return names
 
 
 def _guess_symbol(question: str, known: set[str]) -> str | None:
@@ -319,6 +499,7 @@ def answer(
 
     store = CopilotStore(state_dir)
     try:
+        scope = evidence_scope(question)
         known = _known_symbols(state_dir)
         try:
             store.ingest(Path(state_dir) / "memory", known_symbols=known or None)
@@ -356,7 +537,7 @@ def answer(
         # history questions. General questions can still be answered
         # from the NOW facts (positions, orders, risk) without any
         # journal hit.
-        if sym and not decisions and not takes:
+        if sym and not decisions and not takes and not (scope == "live_account" and sym in known):
             no_evidence = (
                 f"No recorded committee or PM decision mentions {sym}. "
                 "The journal covers committee rulings, agent takes and PM "
@@ -399,50 +580,40 @@ def answer(
                     ),
                 }
 
-        now = {
-            # Two DIFFERENT books — labeled so the model can't conflate
-            # them (it did, 2026-07-16, calling the trading account "PM
-            # holdings").
-            "NOW_trading_account_paper": _safe("positions", facts.positions_now, state_dir, sym),
-            "NOW_trading_account_orders": _safe("orders", facts.orders_and_fills, state_dir, sym),
-            # The thing immediately awaiting approval is more relevant to
-            # 'what is this cycle buying?' than any historical PM decision.
-            "NOW_active_cycle_proposal": _safe("active_plan", facts.active_cycle_plan, state_dir),
-            "NOW_agent_pm_simulated_book": _safe("pm_book", facts.pm_book, state_dir, data_dir),
-            "NOW_risk_state": _safe("risk", facts.risk_now, state_dir),
-            # What the desk believes it has learned. Without this the
-            # copilot cannot answer "what lessons do we have" at all — it
-            # deflected to "I'm read-only" when asked, which was true
-            # about orders and irrelevant to the question.
-            "NOW_lesson_book": _safe("lessons", facts.lessons_now, state_dir),
-            # Every setting that governs what the system will DO, read
-            # live from Settings and the guards' own env helpers.
-            #
-            # Included unconditionally rather than on a keyword match:
-            # "should I be worried about this drawdown" needs the limits
-            # as much as "what is our max position size" does, and the
-            # operator should never have to phrase a question a
-            # particular way to get a correct answer. Without this the
-            # copilot answered configuration questions from the model's
-            # priors — i.e. invented them (operator, 2026-08-10).
-            "NOW_configuration": _safe("config", facts.config_now, state_dir),
-            # How to operate it: the cycle pipeline in order, the command
-            # sequences, and which order arming must happen in.
-            "NOW_operating_manual": _safe("manual", facts.operating_manual),
-            # How to TALK to it: which door a message goes through, how
-            # tone grades a mandate, and that mandates expire. Asked how
-            # to make a view stick, the copilot knew the desk's state but
-            # not the rules of its own interface (operator, 2026-08-11).
-            "NOW_operator_interface": _safe("interface", facts.operator_interface, state_dir),
+        providers: dict[str, Callable[[], Any]] = {
+            # Two DIFFERENT books. The scope selector below prevents a
+            # question about one from silently drawing facts from the other.
+            "NOW_real_trading_account": lambda: _safe(
+                "positions", facts.positions_now, state_dir, sym
+            ),
+            "NOW_trading_account_orders": lambda: _safe(
+                "orders", facts.orders_and_fills, state_dir, sym
+            ),
+            "NOW_active_cycle_proposal": lambda: _safe(
+                "active_plan", facts.active_cycle_plan, state_dir
+            ),
+            "NOW_agent_pm_simulated_book": lambda: _safe(
+                "pm_book", facts.pm_book, state_dir, data_dir
+            ),
+            "NOW_risk_state": lambda: _safe("risk", facts.risk_now, state_dir),
+            "NOW_lesson_book": lambda: _safe("lessons", facts.lessons_now, state_dir),
+            "NOW_configuration": lambda: _safe("config", facts.config_now, state_dir),
+            "NOW_operating_manual": lambda: _safe("manual", facts.operating_manual),
+            "NOW_operator_interface": lambda: _safe(
+                "interface", facts.operator_interface, state_dir
+            ),
+            "NOW_market": lambda: _safe("market", facts.last_close, data_dir, sym),
         }
-        if sym:
-            now["NOW_market"] = _safe("market", facts.last_close, data_dir, sym)
+        source_names = _now_source_names(scope, has_symbol=sym is not None)
+        now = {name: providers[name]() for name in source_names}
 
         evidence = json.dumps(
             {
                 "question": question,
                 "symbol": sym,
                 "answer_budget": answer_budget(question),
+                "answer_scope": scope,
+                "authoritative_now_sources": list(source_names),
                 # The message being replied to. Quoted data like any other
                 # transcript — it is something the BOT said earlier.
                 "CHAT_operator_is_replying_to": (replied_to or "")[:1500] or None,
@@ -479,6 +650,8 @@ def answer(
                 "ts": datetime.now(tz=timezone.utc).isoformat(),
                 "question": question,
                 "symbol": sym,
+                "answer_scope": scope,
+                "authoritative_now_sources": list(source_names),
                 "evidence_ids": [d["id"] for d in decisions] + [t["id"] for t in takes],
                 "evidence_chars": len(evidence),
             },

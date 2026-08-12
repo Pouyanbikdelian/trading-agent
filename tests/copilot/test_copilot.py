@@ -13,7 +13,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from trading.copilot.engine import answer
+from trading.copilot.engine import answer, evidence_scope
 from trading.copilot.store import CopilotStore
 
 # ------------------------------------------------------------ fixtures
@@ -192,6 +192,83 @@ def test_missing_evidence_is_honest_and_skips_llm(tmp_path: Path) -> None:
     )
     assert calls["n"] == 0  # no evidence → no LLM call
     assert "No recorded" in out
+
+
+def test_explicit_book_questions_select_the_correct_evidence_boundary() -> None:
+    assert evidence_scope("Explain our live trading account holdings") == "live_account"
+    assert evidence_scope("Why did we buy NVDA?") == "live_account"
+    assert evidence_scope("Explain the PM simulated book") == "pm_book"
+    assert (
+        evidence_scope("Compare the PM simulated book with the live account") == "book_comparison"
+    )
+    assert evidence_scope("What is this cycle proposing?") == "active_proposal"
+    assert evidence_scope("How big is the PM sleeve?") == "configuration"
+    assert evidence_scope("Tell me more about our lessons") == "lessons"
+
+
+def test_slash_why_prompt_shape_is_scoped_to_the_real_account() -> None:
+    assert (
+        evidence_scope("Why did we buy, sell, or hold NVDA? What was the thesis?") == "live_account"
+    )
+
+
+def test_live_account_explanation_excludes_the_pm_simulation(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    pm = state / "agent_pm"
+    pm.mkdir()
+    (pm / "portfolio.json").write_text(
+        json.dumps({"cash": 1_000.0, "holdings": {"XLE": 3.0}, "history": []})
+    )
+    captured: dict[str, object] = {}
+
+    def fake_llm(_system: str, prompt: str) -> str:
+        captured.update(json.loads(prompt))
+        return "The live account is separate from the PM book."
+
+    answer(
+        "Explain the live trading account and why did we buy NVDA?",
+        state_dir=state,
+        data_dir=tmp_path / "nodata",
+        llm=fake_llm,
+    )
+
+    assert captured["answer_scope"] == "live_account"
+    assert captured["authoritative_now_sources"] == [
+        "NOW_real_trading_account",
+        "NOW_trading_account_orders",
+        "NOW_market",
+    ]
+    assert "NOW_real_trading_account" in captured
+    assert "NOW_trading_account_orders" in captured
+    assert "NOW_agent_pm_simulated_book" not in captured
+    assert "NOW_configuration" not in captured
+
+
+def test_pm_explanation_excludes_the_real_trading_account(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    pm = state / "agent_pm"
+    pm.mkdir()
+    (pm / "portfolio.json").write_text(
+        json.dumps({"cash": 1_000.0, "holdings": {"XLE": 3.0}, "history": []})
+    )
+    captured: dict[str, object] = {}
+
+    def fake_llm(_system: str, prompt: str) -> str:
+        captured.update(json.loads(prompt))
+        return "The PM simulation is separate."
+
+    answer(
+        "Explain the PM simulated book",
+        state_dir=state,
+        data_dir=tmp_path / "nodata",
+        llm=fake_llm,
+    )
+
+    assert captured["answer_scope"] == "pm_book"
+    assert captured["authoritative_now_sources"] == ["NOW_agent_pm_simulated_book"]
+    assert "NOW_agent_pm_simulated_book" in captured
+    assert "NOW_real_trading_account" not in captured
+    assert "NOW_trading_account_orders" not in captured
 
 
 # ------------------------------------------------------------- safety

@@ -99,6 +99,37 @@ def test_plain_language_live_positions_are_a_compact_snapshot_inventory(
 @pytest.mark.parametrize(
     "question",
     [
+        "tell me the current live-account holdings",
+        "all tickers currently in the live strategy",
+    ],
+)
+def test_more_natural_live_inventory_phrases_stay_state_backed(
+    tmp_path: Path, monkeypatch, question: str
+) -> None:
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    nvda = Instrument(symbol="NVDA", asset_class=AssetClass.EQUITY)
+    RunnerStore(tmp_path / "runner.db").save_snapshot(
+        AccountSnapshot(
+            ts=datetime.now(tz=timezone.utc),
+            cash=10_000.0,
+            equity=20_000.0,
+            positions={nvda.key: Position(instrument=nvda, quantity=4, avg_price=900)},
+            base_currency="CHF",
+        )
+    )
+
+    async def boom(*args, **kwargs) -> str:
+        raise AssertionError("position inventory must not call the copilot")
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", boom)
+    out = asyncio.run(_dispatch(question))
+
+    assert out is not None and "NVDA" in out and "1 open" in out
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
         "what are we having on hold?",
         "Which tickers are pinned?",
         "show the no-sell positions",

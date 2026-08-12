@@ -57,7 +57,7 @@ def positions_now(state_dir: Path, symbol: str | None = None) -> dict[str, Any]:
         )
     out: dict[str, Any] = {
         "available": True,
-        "note": "the REAL momentum trading account (paper mode)",
+        "note": "the REAL momentum trading account, separate from the PM's simulated book",
         "as_of": datetime.fromtimestamp(row["ts"], tz=timezone.utc).isoformat(),
         "equity": row["equity"],
         "cash": row["cash"],

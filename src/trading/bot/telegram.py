@@ -2518,8 +2518,11 @@ def _looks_like_position_inventory_question(text: str) -> bool:
     This is intentionally about *what is owned*, not questions about price,
     performance, rationale, or what to buy.  Those remain copilot questions.
     """
-    low = " ".join(text.lower().split())
-    asks_inventory = bool(re.search(r"\b(?:what|which|show|list|display)\b", low))
+    low = " ".join(text.lower().replace("-", " ").split())
+    asks_inventory = bool(
+        re.search(r"\b(?:what|which|show|list|display|tell me|give me)\b", low)
+        or re.search(r"\b(?:all|current)\s+tickers?\b", low)
+    )
     describes_inventory = any(
         phrase in low
         for phrase in (

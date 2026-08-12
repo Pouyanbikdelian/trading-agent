@@ -96,6 +96,9 @@ class TestAnswerBudget:
     def test_thesis_questions_get_room(self) -> None:
         assert "sentences" in answer_budget("is the MU thesis still valid?")
 
+    def test_explicit_request_for_elaboration_gets_room(self) -> None:
+        assert "sentences" in answer_budget("elaborate on the MU thesis")
+
     def test_medium_factual_question_is_mid_sized(self) -> None:
         assert answer_budget("how much cash is in the trading account right now?") == (
             "2-3 sentences"

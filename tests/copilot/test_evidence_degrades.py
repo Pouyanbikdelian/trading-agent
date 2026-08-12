@@ -39,7 +39,7 @@ class TestEveryProviderIsWrapped:
 
     def test_the_symbol_only_provider_is_wrapped_too(self) -> None:
         """NOW_market is added conditionally and is easy to miss."""
-        assert 'now["NOW_market"] = _safe(' in ENGINE
+        assert '"NOW_market": lambda: _safe(' in ENGINE
 
     def test_all_seven_providers_go_through_safe(self) -> None:
         for label in ("positions", "orders", "pm_book", "risk", "lessons", "config", "interface"):
