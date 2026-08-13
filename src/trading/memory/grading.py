@@ -35,10 +35,11 @@ def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, Any]:
     around the whole batch is what turned one TypeError into a total
     outage of the scorecard.
     """
-    from trading.runtime.portfolio_stats import _read_close, close_at, covers
+    from trading.runtime.portfolio_stats import _read_close, close_at, coverage_status
 
     graded = skipped = 0
     unpriced_subjects: set[str] = set()
+    awaiting_next_daily_bar_subjects: set[str] = set()
     cache_behind_subjects: set[str] = set()
     failed_subjects: set[str] = set()
     for row in mem.due_predictions():
@@ -51,9 +52,13 @@ def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, Any]:
                 continue
             made = datetime.fromtimestamp(row["ts"], tz=timezone.utc)
             due = datetime.fromtimestamp(row["due_ts"], tz=timezone.utc)
-            if not covers(series, due):
+            status = coverage_status(series, due)
+            if status != "covered":
                 skipped += 1  # not matured in our data yet; retry tomorrow
-                cache_behind_subjects.add(subject)
+                if status == "awaiting_next_daily_bar":
+                    awaiting_next_daily_bar_subjects.add(subject)
+                else:
+                    cache_behind_subjects.add(subject)
                 continue
             base = close_at(series, made)
             end = close_at(series, due)
@@ -75,10 +80,16 @@ def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, Any]:
         )
     if graded:
         logger.bind(component="memory").info(f"graded {graded} due prediction(s)")
-    if unpriced_subjects or cache_behind_subjects or failed_subjects:
+    if (
+        unpriced_subjects
+        or awaiting_next_daily_bar_subjects
+        or cache_behind_subjects
+        or failed_subjects
+    ):
         logger.bind(component="memory").warning(
-            "scorecard blockers: "
+            "scorecard status: "
             f"unpriced={','.join(sorted(unpriced_subjects)) or '-'} "
+            f"awaiting_next_daily_bar={','.join(sorted(awaiting_next_daily_bar_subjects)) or '-'} "
             f"cache_behind={','.join(sorted(cache_behind_subjects)) or '-'} "
             f"failed={','.join(sorted(failed_subjects)) or '-'}"
         )
@@ -86,6 +97,7 @@ def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, Any]:
         "graded": graded,
         "skipped": skipped,
         "unpriced_subjects": sorted(unpriced_subjects),
+        "awaiting_next_daily_bar_subjects": sorted(awaiting_next_daily_bar_subjects),
         "cache_behind_subjects": sorted(cache_behind_subjects),
         "failed_subjects": sorted(failed_subjects),
     }

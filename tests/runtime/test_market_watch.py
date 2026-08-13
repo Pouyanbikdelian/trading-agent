@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -67,3 +68,28 @@ def test_collect_appends_and_is_idempotent_per_day(tmp_path, cache, monkeypatch)
     payload = json.loads((state / "market_watch.json").read_text())
     assert len(payload["history"]) == 1
     assert payload["latest"]["pct_above_50"] is not None
+
+
+def test_startup_catchup_only_runs_after_a_missed_weekday_slot(tmp_path) -> None:
+    state = tmp_path / "state"
+    late = datetime(2026, 8, 12, 20, 21, tzinfo=timezone.utc)  # Wednesday
+    assert mw.needs_startup_catchup(state, now=late) is True
+
+    (state / "market_watch.json").parent.mkdir(parents=True)
+    (state / "market_watch.json").write_text(
+        json.dumps({"latest": {"t": "2026-08-12T20:20:00+00:00"}})
+    )
+    assert mw.needs_startup_catchup(state, now=late) is False
+    assert (
+        mw.needs_startup_catchup(state, now=datetime(2026, 8, 12, 20, 20, tzinfo=timezone.utc))
+        is False
+    )
+    (state / "market_watch.json").unlink()
+    assert (
+        mw.needs_startup_catchup(state, now=datetime(2026, 8, 12, 20, 20, 1, tzinfo=timezone.utc))
+        is True
+    )
+    assert (
+        mw.needs_startup_catchup(state, now=datetime(2026, 8, 15, 22, 0, tzinfo=timezone.utc))
+        is False
+    )

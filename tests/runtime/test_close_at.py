@@ -24,7 +24,13 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
-from trading.runtime.portfolio_stats import _read_close, cache_symbol_for_subject, close_at, covers
+from trading.runtime.portfolio_stats import (
+    _read_close,
+    cache_symbol_for_subject,
+    close_at,
+    coverage_status,
+    covers,
+)
 
 
 def _series(tz: str | None, days: int = 30) -> pd.Series:
@@ -80,6 +86,12 @@ class TestCovers:
 
     def test_empty_never_covers(self) -> None:
         assert covers(None, datetime(2026, 1, 5)) is False
+
+    def test_same_day_daily_bar_waits_without_claiming_the_cache_is_stale(self) -> None:
+        s = _series("UTC", days=20)
+        due_after_close_label = datetime(2026, 1, 20, 17, tzinfo=timezone.utc)
+        assert coverage_status(s, due_after_close_label) == "awaiting_next_daily_bar"
+        assert covers(s, due_after_close_label) is False
 
 
 def test_horizon_is_respected_end_to_end() -> None:

@@ -70,22 +70,41 @@ def close_at(series: pd.Series | None, when: Any) -> float | None:
     return float(hist.iloc[-1])
 
 
-def covers(series: pd.Series | None, when: Any) -> bool:
-    """True when the cache actually extends to ``when``.
+def coverage_status(series: pd.Series | None, when: Any) -> str:
+    """Return whether a close series can safely grade ``when``.
 
     Grading a 14-day horizon against the newest bar available is not
     grading it over 14 days. If the cache stops short of the due date the
     prediction has not matured *in our data* and must wait.
+
+    A daily bar is labelled at midnight.  A prediction that expires later
+    on that same calendar date therefore has its closing price available,
+    but must wait for the *next* daily cache bar before we know that using
+    it cannot look ahead.  This is expected data timing, not a stale cache.
     """
     if series is None or len(series) == 0:
-        return False
+        return "unavailable"
     ts = pd.Timestamp(when)
     tz = getattr(series.index, "tz", None)
     if tz is not None:
         ts = ts.tz_localize(tz) if ts.tzinfo is None else ts.tz_convert(tz)
     elif ts.tzinfo is not None:
         ts = ts.tz_localize(None)
-    return bool(series.index.max() >= ts)
+    last = series.index.max()
+    if last >= ts:
+        return "covered"
+    if last.normalize() == ts.normalize():
+        return "awaiting_next_daily_bar"
+    return "cache_behind"
+
+
+def covers(series: pd.Series | None, when: Any) -> bool:
+    """True when the cache actually extends to ``when``.
+
+    Kept as the simple public predicate for existing callers; use
+    :func:`coverage_status` when the caller needs an operator-facing reason.
+    """
+    return coverage_status(series, when) == "covered"
 
 
 def _read_close(data_dir: Path, symbol: str) -> pd.Series | None:

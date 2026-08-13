@@ -136,28 +136,28 @@ def check_learning_loops(state_dir: Path, *, now: datetime | None = None) -> lis
                     f"{total} predictions recorded, ZERO ever graded — agent calibration is empty"
                 )
 
-            # A count says the scorecard is blocked; this names the missing
-            # data. The daily grader writes this only after its per-subject
-            # diagnosis, so an operator can repair the cache rather than
-            # guessing whether the grader itself is broken.
-            blocked = conn.execute(
-                """SELECT ts, payload FROM journal WHERE kind = 'scorecard_blocked'
+            # The latest daily pass is the current scorecard state. Reading
+            # an old one-off failure record kept an alert alive for 48 hours
+            # even after a later clean grading pass had recovered it.
+            latest_daily = conn.execute(
+                """SELECT ts, payload FROM journal WHERE kind = 'daily'
                    ORDER BY ts DESC LIMIT 1"""
             ).fetchone()
-            if blocked and now.timestamp() - float(blocked["ts"]) <= 48 * 3600:
+            if latest_daily and now.timestamp() - float(latest_daily["ts"]) <= 48 * 3600:
                 try:
-                    payload = json.loads(blocked["payload"])
-                    parts: list[str] = []
+                    payload = json.loads(latest_daily["payload"])
+                    payload = payload if isinstance(payload, dict) else {}
+                    blocked_parts: list[str] = []
                     for key, label in (
                         ("unpriced_subjects", "missing prices"),
                         ("cache_behind_subjects", "cache behind"),
-                        ("failed_subjects", "grading errors"),
+                        ("grading_failed_subjects", "grading errors"),
                     ):
                         subjects = [str(s) for s in payload.get(key, [])][:8]
                         if subjects:
-                            parts.append(f"{label}: {', '.join(subjects)}")
-                    if parts:
-                        issues.append("scorecard data blocked — " + "; ".join(parts))
+                            blocked_parts.append(f"{label}: {', '.join(subjects)}")
+                    if blocked_parts:
+                        issues.append("scorecard data blocked — " + "; ".join(blocked_parts))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
         except sqlite3.Error:

@@ -40,11 +40,11 @@ def memdb(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _journal(state_dir: Path, kind: str, *, days_ago: float) -> None:
+def _journal(state_dir: Path, kind: str, *, days_ago: float, payload: str = "{}") -> None:
     conn = sqlite3.connect(state_dir / "memory" / "memory.db")
     conn.execute(
-        "INSERT INTO journal (ts, kind, actor, payload) VALUES (?, ?, 'x', '{}')",
-        ((NOW - timedelta(days=days_ago)).timestamp(), kind),
+        "INSERT INTO journal (ts, kind, actor, payload) VALUES (?, ?, 'x', ?)",
+        ((NOW - timedelta(days=days_ago)).timestamp(), kind, payload),
     )
     conn.commit()
     conn.close()
@@ -125,25 +125,48 @@ class TestScorecardHealth:
         assert check_learning_loops(memdb, now=NOW) == []
 
     def test_scorecard_blocker_names_missing_subjects(self, memdb: Path) -> None:
-        for kind in ("committee", "agent_pm", "historian", "daily"):
+        for kind in ("committee", "agent_pm", "historian"):
             _journal(memdb, kind, days_ago=1)
-        conn = sqlite3.connect(memdb / "memory" / "memory.db")
-        conn.execute(
-            "INSERT INTO journal (ts, kind, actor, payload) VALUES (?, ?, ?, ?)",
-            (
-                NOW.timestamp(),
-                "scorecard_blocked",
-                "memory_grader",
-                json.dumps({"unpriced_subjects": ["SMH"], "cache_behind_subjects": ["QQQ"]}),
-            ),
+        _journal(
+            memdb,
+            "daily",
+            days_ago=0,
+            payload=json.dumps({"unpriced_subjects": ["SMH"], "cache_behind_subjects": ["QQQ"]}),
         )
-        conn.commit()
-        conn.close()
 
         issues = check_learning_loops(memdb, now=NOW)
         assert any(
             "missing prices: SMH" in issue and "cache behind: QQQ" in issue for issue in issues
         )
+
+    def test_scorecard_waiting_for_tomorrows_bar_is_not_an_ops_alert(self, memdb: Path) -> None:
+        for kind in ("committee", "agent_pm", "historian"):
+            _journal(memdb, kind, days_ago=1)
+        _journal(
+            memdb,
+            "daily",
+            days_ago=0,
+            payload=json.dumps({"awaiting_next_daily_bar_subjects": ["INTC", "SMH"]}),
+        )
+
+        issues = check_learning_loops(memdb, now=NOW)
+
+        assert not any("scorecard" in issue for issue in issues)
+
+    def test_clean_later_daily_pass_clears_an_old_blocker(self, memdb: Path) -> None:
+        for kind in ("committee", "agent_pm", "historian"):
+            _journal(memdb, kind, days_ago=1)
+        _journal(
+            memdb,
+            "scorecard_blocked",
+            days_ago=0,
+            payload=json.dumps({"cache_behind_subjects": ["STALE"]}),
+        )
+        _journal(memdb, "daily", days_ago=0, payload=json.dumps({"graded_today": 5}))
+
+        issues = check_learning_loops(memdb, now=NOW)
+
+        assert not any("scorecard data" in issue for issue in issues)
 
     def test_latest_failed_historian_is_not_counted_as_healthy(self, memdb: Path) -> None:
         for kind in ("committee", "agent_pm", "daily"):

@@ -32,8 +32,36 @@ from trading.core.logging import logger
 
 STATE_FILENAME = "market_watch.json"
 HISTORY_KEEP = 500
+_SCHEDULE_HOUR_UTC = 20
+_SCHEDULE_MINUTE_UTC = 20
 
 _YF_TICKERS = {"^IRX": "y_3m", "^TNX": "y_10y", "^VIX": "vix", "^VIX3M": "vix3m"}
+
+
+def needs_startup_catchup(state_dir: Path, *, now: datetime | None = None) -> bool:
+    """Whether a runner that started late must collect today's reading.
+
+    APScheduler deliberately does not replay a missed cron job after a
+    process restart.  That is normally the safest behaviour, but this
+    collector is idempotent and feeds an operator-facing dashboard, so a
+    runner starting after the 20:20 UTC post-close slot should make up the
+    missed reading once.  Never run early or on a weekend.
+    """
+    now = now or datetime.now(tz=timezone.utc)
+    scheduled_at = now.replace(
+        hour=_SCHEDULE_HOUR_UTC, minute=_SCHEDULE_MINUTE_UTC, second=0, microsecond=0
+    )
+    if now.weekday() >= 5 or now <= scheduled_at:
+        return False
+
+    path = Path(state_dir) / STATE_FILENAME
+    try:
+        payload = json.loads(path.read_text())
+        latest = payload.get("latest", {}) if isinstance(payload, dict) else {}
+        collected_on = str(latest.get("t", ""))[:10] if isinstance(latest, dict) else ""
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return True
+    return collected_on != now.date().isoformat()
 
 
 def compute_breadth(data_dir: Path, max_names: int = 600) -> dict[str, float | None]:

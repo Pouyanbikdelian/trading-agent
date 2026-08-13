@@ -99,6 +99,14 @@ class TestGradingActuallyGrades:
         out = grade_due_predictions(mem, data)
         assert out["graded"] == 0
 
+    def test_same_day_expiry_waits_for_next_daily_bar_not_a_cache_repair(self, desk) -> None:
+        mem, data = desk
+        _predict(mem, agent="scout", horizon=1, days_ago=1, subject="AAPL")
+        out = grade_due_predictions(mem, data)
+        assert out["graded"] == 0 and out["skipped"] == 1
+        assert out["awaiting_next_daily_bar_subjects"] == ["AAPL"]
+        assert out["cache_behind_subjects"] == []
+
     def test_an_unpriceable_symbol_does_not_stop_the_batch(self, desk) -> None:
         """One bad symbol used to kill every remaining prediction AND the
         shadow grading below it."""

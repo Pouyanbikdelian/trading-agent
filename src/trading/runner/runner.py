@@ -262,6 +262,10 @@ class Runner:
         # of the previous one starting (audit fix #11). Prevents overlap
         # if the cron and an off-cycle trigger fire near-simultaneously.
         self._last_cycle_start_ts: datetime | None = None
+        # A best-effort, read-only market-watch repair after a late restart.
+        # Keep its task so it cannot be garbage-collected while its network
+        # collection is in flight and can be cancelled during shutdown.
+        self._startup_market_watch_task: asyncio.Task[None] | None = None
 
     # -------------------------------------------------- factory
 
@@ -814,6 +818,12 @@ class Runner:
         for _job in sorted(self._scheduler.get_jobs(), key=lambda j: j.id):
             logger.bind(component="runner").info(f"  job {_job.id:<18} next={_job.next_run_time}")
 
+        # APScheduler does not replay missed cron slots on restart.  The
+        # market-watch collector is safe to replay (same-day writes replace
+        # rather than append), so a restart after its post-close slot should
+        # repair the dashboard's missing reading immediately.
+        self._start_startup_market_watch_catchup()
+
         # Startup reconciliation. Today (May 2026) we shipped a bug where
         # broker.get_account silently returned a zero-position snapshot on
         # IBKR timeout, and three cycles stacked to 3x target. The cycle
@@ -1277,6 +1287,19 @@ class Runner:
         except Exception:
             logger.bind(component="market_watch").exception("market watch failed")
 
+    def _start_startup_market_watch_catchup(self) -> None:
+        """Start a missed post-close collection without delaying trading."""
+        from trading.runtime.market_watch import needs_startup_catchup
+
+        if not needs_startup_catchup(settings.state_dir):
+            return
+        logger.bind(component="market_watch").info(
+            "runner started after market-watch slot; collecting catch-up reading"
+        )
+        self._startup_market_watch_task = asyncio.create_task(
+            self._run_market_watch_async(), name="market-watch-startup-catchup"
+        )
+
     async def _run_news_watch_async(self) -> None:
         """Collect headlines + sector momentum for the scout. Advisory."""
         try:
@@ -1533,6 +1556,7 @@ class Runner:
             counts = grade_due_predictions(mem, settings.data_dir)
             graded, skipped = counts["graded"], counts["skipped"]
             unpriced = list(counts.get("unpriced_subjects", []))
+            awaiting_next_daily_bar = list(counts.get("awaiting_next_daily_bar_subjects", []))
             cache_behind = list(counts.get("cache_behind_subjects", []))
             grading_failed = list(counts.get("failed_subjects", []))
             shadow_legs = self._grade_shadow(mem)
@@ -1558,26 +1582,13 @@ class Runner:
                     "graded_today": graded,
                     "ungraded_today": skipped,
                     "unpriced_subjects": unpriced,
+                    "awaiting_next_daily_bar_subjects": awaiting_next_daily_bar,
                     "cache_behind_subjects": cache_behind,
                     "grading_failed_subjects": grading_failed,
                     "shadow_legs_graded": shadow_legs,
                     "episodes_recorded": episodes_written,
                 },
             )
-            if unpriced or cache_behind or grading_failed:
-                # A skipped count alone led to weeks of "the grader ran"
-                # while every outcome was still unscorable. This is a
-                # durable, inspectable diagnostic for the ops watchdog and
-                # the next cache refresh.
-                mem.journal(
-                    "scorecard_blocked",
-                    {
-                        "unpriced_subjects": unpriced,
-                        "cache_behind_subjects": cache_behind,
-                        "failed_subjects": grading_failed,
-                    },
-                    actor="memory_grader",
-                )
         except Exception:
             logger.bind(component="memory").exception("memory grader failed")
 
@@ -2003,6 +2014,8 @@ class Runner:
     async def _shutdown(self) -> None:
         if self._scheduler is not None:
             self._scheduler.shutdown(wait=False)
+        if self._startup_market_watch_task is not None:
+            self._startup_market_watch_task.cancel()
         self.alerts.info("👋 Runner stopped — no further cycles until restart.")
         logger.bind(component="runner").info("scheduler stopped")
         try:
