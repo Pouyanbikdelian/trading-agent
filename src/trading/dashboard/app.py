@@ -266,9 +266,11 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         _s = get_settings()
         out["env"] = getattr(_s, "trading_env", "") or ""
         out["cycle_cron"] = os.getenv("CRON", "") or getattr(_s, "schedule_cron", "") or ""
+        out["pm_pre_cycle_lead_minutes"] = _s.pm_pre_cycle_lead_minutes
     except Exception:
         out["env"] = ""
         out["cycle_cron"] = ""
+        out["pm_pre_cycle_lead_minutes"] = 45
 
     # Memory vitals.
     try:
@@ -766,8 +768,8 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
 
  // Schedule: next occurrences of the recurring jobs (computed in UTC).
  // The cycle and the PM run are DERIVED from the runner's actual cron
- // (CRON in .env); the PM fires 45 min ahead of it, exactly as
- // runner._precycle_trigger does. These were hardcoded to Fri 21:05 and
+ // (CRON in .env); the PM lead is supplied by the same environment setting
+ // as runner._precycle_trigger. These were hardcoded to Fri 21:05 and
  // Mon 14:30 and kept saying so long after the cron moved to 19:00.
  const DOWMAP={SUN:0,MON:1,TUE:2,WED:3,THU:4,FRI:5,SAT:6};
  const parseCron=t=>{ // "M H * * FRI" / "M H * * 1-5" -> {h,m,dow[]}
@@ -790,7 +792,7 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   {n:'🎓 prediction grading',dow:[0,1,2,3,4,5,6],h:22,m:30},
   {n:'📜 historian',dow:[5],h:22,m:45}];
  if(cyc){
-  const pm=shift(cyc,45);
+  const pm=shift(cyc,Number(d.pm_pre_cycle_lead_minutes)||45);
   if(pm) jobs.push({n:'🧪 PM rebalance',...pm});
   jobs.push({n:'⚖️ rebalance ('+envl+')',...cyc});
  }

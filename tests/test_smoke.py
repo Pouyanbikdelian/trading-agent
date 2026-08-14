@@ -71,6 +71,13 @@ def test_settings_defaults_are_safe() -> None:
     # Defaults must NOT enable live trading.
     assert s.trading_env in ("research", "paper", "live")
     assert s.is_live_armed() is False or (s.trading_env == "live" and s.allow_live_trading)
+    assert s.pm_pre_cycle_lead_minutes == 45
+
+
+def test_pm_pre_cycle_lead_is_bounded() -> None:
+    assert Settings(PM_PRE_CYCLE_LEAD_MINUTES=15).pm_pre_cycle_lead_minutes == 15  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        Settings(PM_PRE_CYCLE_LEAD_MINUTES=0)  # type: ignore[call-arg]
 
 
 def test_live_armed_requires_both_flags() -> None:

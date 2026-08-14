@@ -594,7 +594,9 @@ class Runner:
                 # time) — simulation keeps running; the bridge will refuse
                 # on freshness and say so, which is the safe direction.
                 _pm_trigger = _precycle_trigger(
-                    self.config.schedule_cron, self.config.schedule_tz, lead_minutes=45
+                    self.config.schedule_cron,
+                    self.config.schedule_tz,
+                    lead_minutes=settings.pm_pre_cycle_lead_minutes,
                 ) or CronTrigger(day_of_week="mon", hour=14, minute=30, timezone="UTC")
                 self._scheduler.add_job(
                     self._run_agent_pm_async,

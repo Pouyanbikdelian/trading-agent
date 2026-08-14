@@ -58,9 +58,9 @@ class TestScheduleComesFromTheRealCron:
     def test_the_pm_slot_is_not_hardcoded_to_monday(self) -> None:
         assert "{n:'🧪 PM rebalance',dow:[1],h:14,m:30}" not in APP
 
-    def test_the_pm_slot_is_derived_45_minutes_before_the_cycle(self) -> None:
-        """Mirrors runner._precycle_trigger(lead_minutes=45)."""
-        assert "shift(cyc,45)" in APP
+    def test_the_pm_slot_uses_the_server_supplied_lead_time(self) -> None:
+        """Mirrors runner._precycle_trigger's configurable lead time."""
+        assert "shift(cyc,Number(d.pm_pre_cycle_lead_minutes)||45)" in APP
 
     def test_the_server_supplies_the_cron(self) -> None:
         assert 'out["cycle_cron"] = os.getenv("CRON", "")' in APP

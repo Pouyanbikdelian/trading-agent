@@ -112,9 +112,15 @@ class Settings(BaseSettings):
     # benchmark-only — signals, shadow ledger and dashboard all still
     # compute, but every weight is zero so it can never reach an order.
     strategy_sleeve_pct: float = Field(default=1.0, alias="STRATEGY_SLEEVE_PCT", ge=0.0, le=1.0)
+    # The PM decision runs shortly before the cycle that may consume it.
+    # Keep this operator-configurable rather than duplicating a timing
+    # constant in the scheduler and dashboard.
+    pm_pre_cycle_lead_minutes: int = Field(
+        default=45, alias="PM_PRE_CYCLE_LEAD_MINUTES", ge=1, le=240
+    )
     # How stale a PM decision may be and still be executed. The PM is
-    # scheduled 45 minutes ahead of the cycle; anything approaching this
-    # limit means the two have drifted apart and the decision no longer
+    # normally scheduled shortly ahead of the cycle; anything approaching
+    # this limit means the two have drifted apart and the decision no longer
     # describes the tape it would trade against.
     agent_pm_signal_max_age_h: float = Field(default=6.0, alias="AGENT_PM_SIGNAL_MAX_AGE_H", gt=0.0)
     # How long the cycle waits for an /approve or /reject before

@@ -231,7 +231,7 @@ services:
     command: ["paper", "run", "${UNIVERSE:-us_large_cap}",
               "--strategy", "${STRATEGY:-donchian}",
               "--cron", "${CRON:-0 16 * * MON-FRI}",
-              "--tz",   "${TZ:-UTC}",
+              "--tz",   "${SCHEDULE_TZ:-UTC}",
               "-p", "rebalance=${REBALANCE:-5}",
               "--use-ibkr"]
     # NB: network_mode: host is incompatible with the `networks` key,
@@ -446,7 +446,7 @@ services:
     command: ["live", "run", "${UNIVERSE:-sp500}",
               "--strategy", "${STRATEGY:-top_k_momentum}",
               "--cron", "${CRON:-5 21 * * FRI}",
-              "--tz",   "${TZ:-UTC}",
+              "--tz",   "${SCHEDULE_TZ:-UTC}",
               "-p", "rebalance=${REBALANCE:-5}"]
     # NB: network_mode: host is incompatible with the `networks` key.
     network_mode: host
