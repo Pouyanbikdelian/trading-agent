@@ -41,10 +41,14 @@ def memdb(tmp_path: Path) -> Path:
 
 
 def _journal(state_dir: Path, kind: str, *, days_ago: float, payload: str = "{}") -> None:
+    _journal_at(state_dir, kind, at=NOW - timedelta(days=days_ago), payload=payload)
+
+
+def _journal_at(state_dir: Path, kind: str, *, at: datetime, payload: str = "{}") -> None:
     conn = sqlite3.connect(state_dir / "memory" / "memory.db")
     conn.execute(
         "INSERT INTO journal (ts, kind, actor, payload) VALUES (?, ?, 'x', ?)",
-        ((NOW - timedelta(days=days_ago)).timestamp(), kind, payload),
+        (at.timestamp(), kind, payload),
     )
     conn.commit()
     conn.close()
@@ -110,6 +114,146 @@ class TestScorecardHealth:
         self._preds(memdb, 8, graded=False, due_days_ago=5)
         issues = check_learning_loops(memdb, now=NOW)
         assert any("overdue and ungraded" in i for i in issues)
+
+    def test_expected_next_session_rows_are_exempt_from_overdue_alarm(self, memdb: Path) -> None:
+        """A Friday/Sunday expiry can legitimately remain ungraded until
+        Monday's bar arrives. Only exact IDs from a fresh daily pass receive
+        that exemption; a stale payload or a subject-level match is unsafe."""
+        for kind in ("committee", "agent_pm", "historian"):
+            _journal(memdb, kind, days_ago=1)
+        self._preds(memdb, 8, graded=False, due_days_ago=5)
+        _journal(
+            memdb,
+            "daily",
+            days_ago=0,
+            payload=json.dumps(
+                {"awaiting_next_daily_bar_prediction_ids": [f"pr-False-{i}" for i in range(8)]}
+            ),
+        )
+
+        issues = check_learning_loops(memdb, now=NOW)
+
+        assert not any("overdue and ungraded" in issue for issue in issues)
+
+    def test_only_exact_pending_ids_are_exempt_from_overdue_alarm(self, memdb: Path) -> None:
+        """An unrelated old prediction must not hide behind another
+        subject's normal next-session wait."""
+        for kind in ("committee", "agent_pm", "historian"):
+            _journal(memdb, kind, days_ago=1)
+        self._preds(memdb, 10, graded=False, due_days_ago=5)
+        _journal(
+            memdb,
+            "daily",
+            days_ago=0,
+            payload=json.dumps(
+                {"awaiting_next_daily_bar_prediction_ids": [f"pr-False-{i}" for i in range(5)]}
+            ),
+        )
+
+        issues = check_learning_loops(memdb, now=NOW)
+
+        assert any("5 prediction(s) overdue and ungraded" in issue for issue in issues)
+
+    def test_calendar_failure_fails_closed_to_an_overdue_alert(
+        self, memdb: Path, monkeypatch
+    ) -> None:
+        """Health checks must not die or suppress an alert if calendar data breaks."""
+        for kind in ("committee", "agent_pm", "historian"):
+            _journal(memdb, kind, days_ago=1)
+        self._preds(memdb, 8, graded=False, due_days_ago=5)
+        _journal(
+            memdb,
+            "daily",
+            days_ago=0,
+            payload=json.dumps(
+                {"awaiting_next_daily_bar_prediction_ids": [f"pr-False-{i}" for i in range(8)]}
+            ),
+        )
+
+        def unavailable_calendar(*_args, **_kwargs) -> bool:
+            raise RuntimeError("calendar unavailable")
+
+        monkeypatch.setattr(
+            "trading.runtime.portfolio_stats.nyse_session_settled_since", unavailable_calendar
+        )
+        issues = check_learning_loops(memdb, now=NOW)
+
+        assert any("8 prediction(s) overdue and ungraded" in issue for issue in issues)
+
+    def test_awaiting_ids_expire_after_the_next_session_settles(self, memdb: Path) -> None:
+        """A Sunday journal must not mute a Monday cache/grader failure.
+
+        The grader normally replaces the row on Monday night.  If it does
+        not, exact IDs from Sunday are historical evidence only once the
+        Monday's cache window and scheduled daily grader have both passed.
+        """
+        pre_grader = datetime(2026, 8, 17, 22, 44, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 17, 23, 1, tzinfo=timezone.utc)
+        for kind in ("committee", "agent_pm", "historian"):
+            _journal_at(memdb, kind, at=now - timedelta(days=1))
+        ids = [f"pr-weekend-{i}" for i in range(8)]
+        _journal_at(
+            memdb,
+            "daily",
+            at=datetime(2026, 8, 16, 22, 30, tzinfo=timezone.utc),
+            payload=json.dumps({"awaiting_next_daily_bar_prediction_ids": ids}),
+        )
+        conn = sqlite3.connect(memdb / "memory" / "memory.db")
+        for prediction_id in ids:
+            conn.execute(
+                "INSERT INTO predictions VALUES (?, ?, ?, NULL)",
+                (
+                    prediction_id,
+                    datetime(2026, 7, 31, tzinfo=timezone.utc).timestamp(),
+                    datetime(2026, 8, 14, 12, tzinfo=timezone.utc).timestamp(),
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+        before_grader = check_learning_loops(memdb, now=pre_grader)
+        issues = check_learning_loops(memdb, now=now)
+
+        assert not any("overdue and ungraded" in issue for issue in before_grader)
+        assert any("8 prediction(s) overdue and ungraded" in issue for issue in issues)
+
+    def test_awaiting_ids_survive_a_long_market_holiday(self, memdb: Path) -> None:
+        """Wall-clock age is not evidence of failure while NYSE is shut.
+
+        Labor Day follows this Friday, so the historical awaiting IDs are
+        still correct after more than 48 hours. Tuesday's settled close is
+        what finally makes them stale.
+        """
+        holiday = datetime(2026, 9, 7, 23, tzinfo=timezone.utc)
+        ids = [f"pr-holiday-{i}" for i in range(8)]
+        for kind in ("committee", "agent_pm", "historian"):
+            _journal_at(memdb, kind, at=holiday - timedelta(days=1))
+        _journal_at(
+            memdb,
+            "daily",
+            at=datetime(2026, 9, 4, 22, 30, tzinfo=timezone.utc),
+            payload=json.dumps({"awaiting_next_daily_bar_prediction_ids": ids}),
+        )
+        conn = sqlite3.connect(memdb / "memory" / "memory.db")
+        for prediction_id in ids:
+            conn.execute(
+                "INSERT INTO predictions VALUES (?, ?, ?, NULL)",
+                (
+                    prediction_id,
+                    datetime(2026, 8, 21, tzinfo=timezone.utc).timestamp(),
+                    datetime(2026, 9, 4, 12, tzinfo=timezone.utc).timestamp(),
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+        holiday_issues = check_learning_loops(memdb, now=holiday)
+        settled_issues = check_learning_loops(
+            memdb, now=datetime(2026, 9, 8, 23, 1, tzinfo=timezone.utc)
+        )
+
+        assert not any("overdue and ungraded" in issue for issue in holiday_issues)
+        assert any("8 prediction(s) overdue and ungraded" in issue for issue in settled_issues)
 
     def test_many_predictions_none_ever_graded_alerts(self, memdb: Path) -> None:
         for kind in ("committee", "agent_pm", "historian", "daily"):

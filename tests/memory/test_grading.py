@@ -24,10 +24,17 @@ from trading.memory.store import MemoryStore
 NOW = datetime.now(tz=timezone.utc)
 
 
-def _write_prices(data_dir: Path, symbol: str, *, bars: int = 400, drift: float = 0.001) -> None:
+def _write_prices(
+    data_dir: Path,
+    symbol: str,
+    *,
+    bars: int = 400,
+    drift: float = 0.001,
+    end: datetime | None = None,
+) -> None:
     """Bars ending TODAY, tz-aware UTC — exactly the shape the live cache
     has, which is what made the naive comparison raise in production."""
-    idx = pd.date_range(end=NOW.date(), periods=bars, freq="B", tz="UTC")
+    idx = pd.date_range(end=(end or NOW).date(), periods=bars, freq="B", tz="UTC")
     close = 100.0 * np.exp(np.arange(bars) * drift)
     df = pd.DataFrame(
         {
@@ -36,6 +43,25 @@ def _write_prices(data_dir: Path, symbol: str, *, bars: int = 400, drift: float 
             "low": close * 0.999,
             "close": close,
             "volume": np.full(bars, 1e6),
+            "adj_close": close,
+        },
+        index=idx,
+    )
+    df.index.name = "ts"
+    ParquetCache(data_dir).write(Instrument(symbol=symbol, asset_class=AssetClass.EQUITY), "1D", df)
+
+
+def _write_daily_closes(data_dir: Path, symbol: str, closes: dict[str, float]) -> None:
+    """Write a deliberately shaped daily cache for endpoint-timing tests."""
+    idx = pd.DatetimeIndex(pd.to_datetime(list(closes), utc=True))
+    close = np.array(list(closes.values()), dtype=float)
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "volume": np.full(len(close), 1e6),
             "adj_close": close,
         },
         index=idx,
@@ -106,6 +132,102 @@ class TestGradingActuallyGrades:
         assert out["graded"] == 0 and out["skipped"] == 1
         assert out["awaiting_next_daily_bar_subjects"] == ["AAPL"]
         assert out["cache_behind_subjects"] == []
+
+    def test_weekend_expiry_is_pending_with_exact_ids_for_the_watchdog(self, desk) -> None:
+        """Friday's valid bar must not look stale merely because the due
+        timestamp lands on Sunday; ops needs the exact pending row to avoid
+        suppressing an unrelated genuinely overdue prediction."""
+        mem, data = desk
+        _write_prices(data, "AAPL", end=datetime(2026, 8, 14, tzinfo=timezone.utc))
+        pid = _predict(mem, agent="scout", horizon=14, days_ago=30, subject="AAPL")
+        made = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
+        due = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+        mem.conn.execute(
+            "UPDATE predictions SET ts = ?, due_ts = ? WHERE id = ?",
+            (made.timestamp(), due.timestamp(), pid),
+        )
+        mem.conn.commit()
+
+        out = grade_due_predictions(mem, data, asof=datetime(2026, 8, 16, 18, tzinfo=timezone.utc))
+
+        assert out["graded"] == 0 and out["skipped"] == 1
+        assert out["awaiting_next_daily_bar_subjects"] == ["AAPL"]
+        assert out["awaiting_next_daily_bar_prediction_ids"] == [pid]
+        assert out["cache_behind_subjects"] == []
+
+    def test_weekend_expiry_grades_once_mondays_bar_arrives(self, desk) -> None:
+        mem, data = desk
+        _write_prices(data, "AAPL", end=datetime(2026, 8, 17, tzinfo=timezone.utc))
+        pid = _predict(mem, agent="scout", horizon=14, days_ago=30, subject="AAPL")
+        made = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
+        due = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+        mem.conn.execute(
+            "UPDATE predictions SET ts = ?, due_ts = ? WHERE id = ?",
+            (made.timestamp(), due.timestamp(), pid),
+        )
+        mem.conn.commit()
+
+        out = grade_due_predictions(mem, data, asof=datetime(2026, 8, 17, 23, tzinfo=timezone.utc))
+
+        assert out["graded"] == 1 and out["skipped"] == 0
+        assert out["awaiting_next_daily_bar_prediction_ids"] == []
+        assert mem.due_predictions(asof=datetime(2026, 8, 17, 23, tzinfo=timezone.utc)) == []
+
+    def test_missing_entry_close_is_not_mislabeled_as_session_pending(self, desk) -> None:
+        """Only a row that can eventually grade earns an awaiting-ID exemption."""
+        mem, data = desk
+        _write_prices(data, "AAPL", end=datetime(2026, 8, 14, tzinfo=timezone.utc))
+        pid = _predict(mem, agent="scout", horizon=14, days_ago=30, subject="AAPL")
+        made = datetime(2020, 8, 2, 12, tzinfo=timezone.utc)
+        due = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+        mem.conn.execute(
+            "UPDATE predictions SET ts = ?, due_ts = ? WHERE id = ?",
+            (made.timestamp(), due.timestamp(), pid),
+        )
+        mem.conn.commit()
+
+        out = grade_due_predictions(mem, data, asof=datetime(2026, 8, 16, 18, tzinfo=timezone.utc))
+
+        assert out["graded"] == 0 and out["skipped"] == 1
+        assert out["awaiting_next_daily_bar_prediction_ids"] == []
+        assert out["cache_behind_subjects"] == ["AAPL"]
+
+    def test_mid_session_endpoints_exclude_the_same_sessions_future_close(self, desk) -> None:
+        """A later cache read must not rewrite a 10:00 ET forecast.
+
+        The deliberately huge Monday close demonstrates the old failure:
+        midnight-label slicing would have scored Friday-to-Monday instead of
+        Thursday-to-Friday. Tuesday merely proves the Monday horizon bar is
+        final and allows the conservative coverage gate to release it.
+        """
+        mem, data = desk
+        _write_daily_closes(
+            data,
+            "AAPL",
+            {
+                "2026-01-07": 90.0,
+                "2026-01-08": 100.0,
+                "2026-01-09": 120.0,
+                "2026-01-12": 1_000.0,
+                "2026-01-13": 130.0,
+            },
+        )
+        pid = _predict(mem, agent="quant", horizon=3, days_ago=30, subject="AAPL")
+        made = datetime(2026, 1, 9, 15, tzinfo=timezone.utc)  # Friday 10:00 ET
+        due = datetime(2026, 1, 12, 15, tzinfo=timezone.utc)  # Monday 10:00 ET
+        mem.conn.execute(
+            "UPDATE predictions SET ts = ?, due_ts = ? WHERE id = ?",
+            (made.timestamp(), due.timestamp(), pid),
+        )
+        mem.conn.commit()
+
+        out = grade_due_predictions(mem, data, asof=datetime(2026, 1, 13, 23, tzinfo=timezone.utc))
+        row = mem.conn.execute(
+            "SELECT realized_move FROM predictions WHERE id = ?", (pid,)
+        ).fetchone()
+
+        assert out["graded"] == 1 and out["skipped"] == 0
+        assert row["realized_move"] == pytest.approx(0.20)
 
     def test_an_unpriceable_symbol_does_not_stop_the_batch(self, desk) -> None:
         """One bad symbol used to kill every remaining prediction AND the

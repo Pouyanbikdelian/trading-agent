@@ -86,3 +86,44 @@ def test_it_never_reaches_the_broker(unarmed, monkeypatch) -> None:
 
     with pytest.raises((typer.Exit, typer.BadParameter, SystemExit)):
         _run_live()
+
+
+def test_armed_cli_defers_broker_connection_to_the_safe_runner_bootstrap(monkeypatch) -> None:
+    """The CLI must construct state/config before it attempts a live login.
+
+    ``Runner.run_forever`` owns the bounded no-orders bootstrap loop, so a
+    2FA outage remains observable instead of preventing the watchdog from
+    coming up at all.
+    """
+    monkeypatch.setattr(cli, "settings", types.SimpleNamespace(is_live_armed=lambda: True))
+    calls: list[str] = []
+
+    class _Broker:
+        def connect(self) -> None:
+            calls.append("connect")
+            raise AssertionError("CLI connected before Runner bootstrap")
+
+    class _Runner:
+        async def run_forever(self) -> None:
+            calls.append("run_forever")
+
+    monkeypatch.setattr("trading.execution.ibkr.IbkrBroker", _Broker)
+    monkeypatch.setattr(
+        cli,
+        "Runner",
+        types.SimpleNamespace(from_config=lambda _cfg, *, broker: _Runner()),
+    )
+
+    live_fn = cli._live_run.__wrapped__ if hasattr(cli._live_run, "__wrapped__") else cli._live_run
+    live_fn(
+        universe="sp500",
+        strategy=["donchian"],
+        freq="1D",
+        cron="5 21 * * FRI",
+        tz="UTC",
+        vol_target_value=None,
+        initial_cash=100_000.0,
+        param=[],
+    )
+
+    assert calls == ["run_forever"]

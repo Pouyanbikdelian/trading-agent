@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -52,6 +55,37 @@ def test_ratios_normalized_to_100_base(cache) -> None:
         assert r[k] == pytest.approx(100.0, abs=0.5)
 
 
+def test_ratios_aligns_utc_cache_with_naive_fallback(tmp_path, monkeypatch) -> None:
+    """A cache/fallback mix must not make pandas reject ratio alignment."""
+    from trading.runtime import portfolio_stats
+
+    index = pd.bdate_range("2024-01-01", periods=300)
+    prices = np.linspace(100.0, 200.0, len(index))
+    cached = {
+        symbol: pd.Series(prices, index=index.tz_localize("UTC"))
+        for symbol in ("SPY", "GLD", "IEF")
+    }
+
+    def fake_read_close(_data_dir: object, symbol: str) -> pd.Series | None:
+        return cached.get(symbol)
+
+    fallback = {
+        symbol: pd.DataFrame({"Close": prices}, index=index)
+        for symbol in ("TLT", "QQQ", "DBC", "HYG")
+    }
+    monkeypatch.setattr(portfolio_stats, "_read_close", fake_read_close)
+    monkeypatch.setitem(
+        sys.modules,
+        "yfinance",
+        types.SimpleNamespace(download=lambda *_args, **_kwargs: fallback),
+    )
+
+    ratios = mw.compute_ratios(tmp_path)
+
+    for name in ("spy_tlt", "qqq_spy", "gld_dbc", "hyg_ief"):
+        assert ratios[name] == pytest.approx(100.0)
+
+
 def test_collect_appends_and_is_idempotent_per_day(tmp_path, cache, monkeypatch) -> None:
     monkeypatch.setattr(
         mw,
@@ -70,26 +104,60 @@ def test_collect_appends_and_is_idempotent_per_day(tmp_path, cache, monkeypatch)
     assert payload["latest"]["pct_above_50"] is not None
 
 
+@pytest.mark.parametrize(
+    ("before_slot", "after_slot"),
+    [
+        # 18:50 New York is 23:50 UTC in standard time.
+        (
+            datetime(2026, 1, 5, 23, 49, tzinfo=timezone.utc),
+            datetime(2026, 1, 5, 23, 51, tzinfo=timezone.utc),
+        ),
+        # It is 22:50 UTC in daylight time.
+        (
+            datetime(2026, 8, 12, 22, 49, tzinfo=timezone.utc),
+            datetime(2026, 8, 12, 22, 51, tzinfo=timezone.utc),
+        ),
+    ],
+)
+def test_startup_catchup_tracks_the_new_york_slot_across_dst(
+    tmp_path, before_slot: datetime, after_slot: datetime
+) -> None:
+    state = tmp_path / "state"
+    assert mw.needs_startup_catchup(state, now=before_slot) is False
+    assert mw.needs_startup_catchup(state, now=after_slot) is True
+
+
 def test_startup_catchup_only_runs_after_a_missed_weekday_slot(tmp_path) -> None:
     state = tmp_path / "state"
-    late = datetime(2026, 8, 12, 20, 21, tzinfo=timezone.utc)  # Wednesday
+    late = datetime(2026, 8, 12, 22, 51, tzinfo=timezone.utc)  # Wednesday, 18:51 ET
     assert mw.needs_startup_catchup(state, now=late) is True
 
     (state / "market_watch.json").parent.mkdir(parents=True)
     (state / "market_watch.json").write_text(
-        json.dumps({"latest": {"t": "2026-08-12T20:20:00+00:00"}})
+        json.dumps({"latest": {"t": "2026-08-12T22:50:00+00:00"}})
     )
     assert mw.needs_startup_catchup(state, now=late) is False
     assert (
-        mw.needs_startup_catchup(state, now=datetime(2026, 8, 12, 20, 20, tzinfo=timezone.utc))
+        mw.needs_startup_catchup(state, now=datetime(2026, 8, 12, 22, 50, tzinfo=timezone.utc))
         is False
     )
     (state / "market_watch.json").unlink()
     assert (
-        mw.needs_startup_catchup(state, now=datetime(2026, 8, 12, 20, 20, 1, tzinfo=timezone.utc))
+        mw.needs_startup_catchup(state, now=datetime(2026, 8, 12, 22, 50, 1, tzinfo=timezone.utc))
         is True
     )
     assert (
         mw.needs_startup_catchup(state, now=datetime(2026, 8, 15, 22, 0, tzinfo=timezone.utc))
         is False
+    )
+
+
+def test_market_watch_schedule_constants_are_new_york_wall_time() -> None:
+    assert mw.SCHEDULE_TIMEZONE == "America/New_York"
+    assert (mw.SCHEDULE_HOUR, mw.SCHEDULE_MINUTE) == (18, 50)
+    assert (
+        datetime(2026, 1, 5, 23, 50, tzinfo=timezone.utc)
+        .astimezone(ZoneInfo(mw.SCHEDULE_TIMEZONE))
+        .hour
+        == mw.SCHEDULE_HOUR
     )

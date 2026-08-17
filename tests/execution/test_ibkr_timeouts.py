@@ -7,10 +7,14 @@ broker raises BrokerTimeoutError instead of hanging the test runner.
 
 from __future__ import annotations
 
+import asyncio
 import time
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
+from trading.execution.base import NotConnectedError
 from trading.execution.ibkr import BrokerTimeoutError, IbkrBroker
 
 
@@ -49,6 +53,10 @@ class _SlowStubIB:
         time.sleep(self._sleep)
         return []
 
+    def reqCurrentTime(self):
+        time.sleep(self._sleep)
+        return datetime.now(tz=timezone.utc)
+
 
 @pytest.fixture
 def slow_broker() -> IbkrBroker:
@@ -86,6 +94,206 @@ def test_timeout_message_mentions_recovery_hint(slow_broker: IbkrBroker) -> None
     msg = str(exc_info.value)
     assert "gateway" in msg.lower()
     assert "restart" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Authenticated-session liveness
+# ---------------------------------------------------------------------------
+
+
+def test_probe_liveness_times_out_without_reconnect_or_retry(
+    slow_broker: IbkrBroker, monkeypatch
+) -> None:
+    """A watchdog must report a dead session, not restart it every minute."""
+    reconnect_calls: list[object] = []
+    restart_calls: list[object] = []
+    monkeypatch.setattr(slow_broker, "_reconnect_session", lambda: reconnect_calls.append(True))
+    monkeypatch.setattr(
+        slow_broker,
+        "_trigger_gateway_restart",
+        lambda **_kwargs: restart_calls.append(True),
+    )
+
+    with pytest.raises(BrokerTimeoutError, match="reqCurrentTime"):
+        slow_broker.probe_liveness(timeout=0.3)
+
+    assert reconnect_calls == []
+    assert restart_calls == []
+
+
+def test_probe_liveness_refuses_to_reconnect_a_disconnected_client() -> None:
+    """A missing authenticated session is a red result, not a login attempt."""
+
+    class _DisconnectedIb:
+        def __init__(self) -> None:
+            self.current_time_calls = 0
+            self.connect_calls = 0
+
+        def isConnected(self) -> bool:
+            return False
+
+        def reqCurrentTime(self) -> datetime:
+            self.current_time_calls += 1
+            return datetime.now(tz=timezone.utc)
+
+        async def connectAsync(self, *_args: object, **_kwargs: object) -> None:
+            self.connect_calls += 1
+
+    ib = _DisconnectedIb()
+    broker = IbkrBroker(ib=ib)
+
+    with pytest.raises(NotConnectedError, match="will not reconnect"):
+        broker.probe_liveness()
+
+    assert ib.current_time_calls == 0
+    assert ib.connect_calls == 0
+
+
+def test_probe_liveness_uses_current_time_async_on_the_transport_loop() -> None:
+    """The real ib-async async method returns an Awaitable, not a coroutine.
+
+    It must be called on the loop that owns the IB transport.  Calling its
+    sync wrapper from the watchdog worker can otherwise manufacture the same
+    false timeout that this probe is intended to detect.
+    """
+    calls = {"sync": 0, "async": 0}
+    expected = datetime(2026, 8, 17, 8, 0, tzinfo=timezone.utc)
+
+    class _IbWithCurrentTime:
+        def isConnected(self) -> bool:
+            return True
+
+        def reqCurrentTime(self) -> datetime:
+            calls["sync"] += 1
+            return expected
+
+        def reqCurrentTimeAsync(self):
+            calls["async"] += 1
+            future = asyncio.get_running_loop().create_future()
+            future.set_result(expected)
+            return future
+
+    broker = IbkrBroker(ib=_IbWithCurrentTime())
+    broker._connected = True
+    broker._ensure_ib_loop_thread()
+
+    assert broker.probe_liveness(timeout=0.3) == expected
+    assert calls == {"sync": 0, "async": 1}
+
+
+def test_strict_position_read_uses_reqpositions_async_without_recovery(monkeypatch) -> None:
+    """Live bootstrap must force a fresh position reply, never the cached
+    portfolio reader or the normal reconnect/restart wrapper."""
+
+    calls = {"req_positions": 0, "positions": 0, "portfolio": 0}
+    contract = SimpleNamespace(
+        symbol="AAPL", secType="STK", exchange="SMART", currency="USD", multiplier=None
+    )
+
+    class _IbWithFreshPositions:
+        def isConnected(self) -> bool:
+            return True
+
+        def reqPositionsAsync(self):
+            calls["req_positions"] += 1
+            future = asyncio.get_running_loop().create_future()
+            future.set_result([SimpleNamespace(contract=contract, position=10, avgCost=150.0)])
+            return future
+
+        def positions(self):
+            calls["positions"] += 1
+            raise AssertionError("strict preflight must not use cached positions()")
+
+        def portfolio(self):
+            calls["portfolio"] += 1
+            raise AssertionError("strict preflight must not use cached portfolio()")
+
+    broker = IbkrBroker(ib=_IbWithFreshPositions())
+    broker._connected = True
+    broker._ensure_ib_loop_thread()
+
+    def _normal_path_used(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("strict preflight used a recovery-capable normal path")
+
+    reconnects: list[object] = []
+    restarts: list[object] = []
+    monkeypatch.setattr(broker, "_ensure_connected", _normal_path_used)
+    monkeypatch.setattr(broker, "_bounded", _normal_path_used)
+    monkeypatch.setattr(broker, "_reconnect_session", lambda: reconnects.append(True))
+    monkeypatch.setattr(broker, "_trigger_gateway_restart", lambda **_kwargs: restarts.append(True))
+
+    positions = broker.get_positions_strict(timeout=0.3)
+
+    assert [(p.instrument.symbol, p.quantity, p.avg_price) for p in positions] == [
+        ("AAPL", 10.0, 150.0)
+    ]
+    assert calls == {"req_positions": 1, "positions": 0, "portfolio": 0}
+    assert reconnects == []
+    assert restarts == []
+
+
+def test_strict_position_read_timeout_never_recovers_or_restarts(monkeypatch) -> None:
+    """A 2FA/login wedge remains an observable bootstrap failure, not a
+    reconnect or Docker-restart side effect."""
+
+    calls = {"req_positions": 0}
+
+    class _NeverReplies:
+        def isConnected(self) -> bool:
+            return True
+
+        def reqPositionsAsync(self):
+            calls["req_positions"] += 1
+            return asyncio.get_running_loop().create_future()
+
+    broker = IbkrBroker(ib=_NeverReplies())
+    broker._connected = True
+    broker._ensure_ib_loop_thread()
+
+    def _normal_path_used(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("strict preflight used a recovery-capable normal path")
+
+    reconnects: list[object] = []
+    restarts: list[object] = []
+    monkeypatch.setattr(broker, "_ensure_connected", _normal_path_used)
+    monkeypatch.setattr(broker, "_bounded", _normal_path_used)
+    monkeypatch.setattr(broker, "_reconnect_session", lambda: reconnects.append(True))
+    monkeypatch.setattr(broker, "_trigger_gateway_restart", lambda **_kwargs: restarts.append(True))
+
+    with pytest.raises(BrokerTimeoutError, match="refusing to start"):
+        broker.get_positions_strict(timeout=0.1)
+
+    assert calls == {"req_positions": 1}
+    assert reconnects == []
+    assert restarts == []
+
+
+def test_strict_position_read_refuses_a_disconnected_client_without_reconnect() -> None:
+    """Bootstrap must record a failed connection, not make an implicit one."""
+
+    class _DisconnectedIb:
+        def __init__(self) -> None:
+            self.req_positions_calls = 0
+            self.connect_calls = 0
+
+        def isConnected(self) -> bool:
+            return False
+
+        def reqPositionsAsync(self):
+            self.req_positions_calls += 1
+            return asyncio.get_running_loop().create_future()
+
+        async def connectAsync(self, *_args: object, **_kwargs: object) -> None:
+            self.connect_calls += 1
+
+    ib = _DisconnectedIb()
+    broker = IbkrBroker(ib=ib)
+
+    with pytest.raises(NotConnectedError, match="will not reconnect"):
+        broker.get_positions_strict()
+
+    assert ib.req_positions_calls == 0
+    assert ib.connect_calls == 0
 
 
 # ---------------------------------------------------------------------------

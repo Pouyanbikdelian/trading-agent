@@ -205,6 +205,125 @@ class IbkrBroker(Broker):
 
     # ------------------------------------------------------------ helpers
 
+    #: A health probe should fail quickly enough to be useful to a watchdog,
+    #: but leave room for a briefly busy Gateway.  It is deliberately shorter
+    #: than a normal account read: this check has no trading work to finish.
+    DEFAULT_LIVENESS_TIMEOUT_S: float = 10.0
+
+    def probe_liveness(self, *, timeout: float | None = None) -> datetime:
+        """Force one read-only IBKR API round trip without trying to heal it.
+
+        ``isConnected()`` only describes the local API socket.  It can remain
+        true while Gateway's authenticated IBKR session has died, and account
+        values are cached after startup.  ``reqCurrentTime`` requires a fresh
+        TWS/Gateway response, so it distinguishes that state from a merely
+        open TCP port.
+
+        This method intentionally does *not* call :meth:`_ensure_connected`
+        or :meth:`_bounded`: those helpers reconnect/retry (and can restart
+        Gateway) on failure.  A periodic health probe must report a 2FA or
+        login outage, not amplify it into a reconnect storm.  Recovery stays
+        with the existing cycle and explicit reconnect paths.
+
+        Returns the Gateway-supplied time normalized to UTC.  Raises
+        ``NotConnectedError`` or the original request error when unhealthy.
+        """
+        if self._ib is None or not self._connected or not self._ib.isConnected():
+            raise NotConnectedError(
+                "IbkrBroker has no active API connection; liveness probe will not reconnect"
+            )
+
+        request_timeout = timeout if timeout is not None else self.DEFAULT_LIVENESS_TIMEOUT_S
+
+        # ib-async's ``reqCurrentTimeAsync`` is a regular function returning
+        # an Awaitable (rather than an ``async def``).  Calling it outside the
+        # transport-owning loop binds its Future to the wrong loop, so wrap the
+        # invocation itself in a coroutine before handing it to _await_async.
+        # Test stubs injected without a dedicated loop use the sync fallback.
+        request_async = getattr(self._ib, "reqCurrentTimeAsync", None)
+        if self._ib_loop is not None and callable(request_async):
+
+            async def _request_current_time() -> Any:
+                return await request_async()
+
+            gateway_time = self._await_async(_request_current_time(), timeout=request_timeout)
+        else:
+            request_sync = getattr(self._ib, "reqCurrentTime", None)
+            if not callable(request_sync):
+                raise BrokerError("IBKR client does not support reqCurrentTime liveness probes")
+            # Non-retrying by design; see this method's docstring.
+            gateway_time = self._call_with_timeout("reqCurrentTime", request_sync, request_timeout)
+
+        if not isinstance(gateway_time, datetime):
+            raise BrokerError(
+                "IBKR reqCurrentTime returned an invalid response; authenticated session is not usable"
+            )
+        if gateway_time.tzinfo is None:
+            return gateway_time.replace(tzinfo=timezone.utc)
+        return gateway_time.astimezone(timezone.utc)
+
+    def get_positions_strict(self, *, timeout: float | None = None) -> list[Position]:
+        """Read a fresh position snapshot without any recovery side effects.
+
+        This is deliberately narrower than :meth:`get_positions`.  Live
+        startup needs to know that a real position request completed before
+        it arms an execution scheduler, but it must not turn a failed 2FA or
+        login into an automatic reconnect/restart storm.  Therefore this
+        path never calls ``_ensure_connected`` or ``_bounded``; in
+        particular, it cannot invoke ``_reconnect_session`` or
+        ``_trigger_gateway_restart``.
+
+        ``reqPositionsAsync`` is a one-shot request that completes at
+        ``positionEnd``.  Unlike the adapter's normal ``portfolio()`` /
+        ``positions()`` cache reads, it proves that the transport-owning
+        event loop received a current positions response.  It is intended
+        only for strict live bootstrap preflight; normal runner reads keep
+        their existing self-healing behaviour.
+        """
+        if self._ib is None or not self._connected or not self._ib.isConnected():
+            raise NotConnectedError(
+                "IbkrBroker has no active API connection; strict position read will not reconnect"
+            )
+        if self._ib_loop is None:
+            # A real ib-async transport must be owned by the dedicated loop.
+            # Running a request on a transient loop would recreate the very
+            # cross-loop false timeout this preflight is intended to avoid.
+            raise NotConnectedError(
+                "IbkrBroker has no transport loop; strict position read will not reconnect"
+            )
+
+        request_async = getattr(self._ib, "reqPositionsAsync", None)
+        if not callable(request_async):
+            raise BrokerError(
+                "IBKR client does not support reqPositionsAsync strict position reads"
+            )
+        request_timeout = timeout if timeout is not None else self.DEFAULT_LIVENESS_TIMEOUT_S
+
+        async def _request_positions() -> Any:
+            # Call the non-coroutine ib-async method *inside* the transport
+            # loop: it creates a Future associated with that loop.
+            return await request_async()
+
+        try:
+            raw = self._await_async(_request_positions(), timeout=request_timeout)
+        except TimeoutError as e:
+            raise BrokerTimeoutError(
+                "IBKR reqPositions strict preflight timed out after "
+                f"{request_timeout:.0f}s — refusing to start without a fresh position read"
+            ) from e
+
+        out: list[Position] = []
+        for position in raw or []:
+            instrument = _ibkr_contract_to_instrument(position.contract)
+            out.append(
+                Position(
+                    instrument=instrument,
+                    quantity=float(position.position),
+                    avg_price=float(position.avgCost) / max(instrument.multiplier, 1.0),
+                )
+            )
+        return out
+
     # Hard per-call timeout for IBKR Gateway requests. Gateway can be
     # connected at the TCP layer while its broker session is dead, in which
     # case API calls hang forever — exactly what we lived through earlier.

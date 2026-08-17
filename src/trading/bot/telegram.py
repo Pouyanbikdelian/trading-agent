@@ -1793,6 +1793,20 @@ def _cmd_health() -> str:
     sd = settings.state_dir
     hb_age = _heartbeat_age()
     hb_line = "unknown (no cycle yet)" if hb_age is None else f"{hb_age:.0f}s ago"
+    # A fresh heartbeat can come from cached account data while Gateway has
+    # lost its authenticated IBKR session. Surface the separate wire probe
+    # here rather than leaving the operator to infer it from an ops alert.
+    from trading.runtime.broker_liveness import FILENAME
+    from trading.runtime.ops_watch import check_broker_liveness
+
+    liveness_path = sd / FILENAME
+    liveness_issues = check_broker_liveness(sd)
+    if liveness_issues:
+        broker_line = f"🔴 {liveness_issues[0]}"
+    elif liveness_path.exists():
+        broker_line = "🟢 authenticated API probe fresh"
+    else:
+        broker_line = "⚪ unknown (no authenticated API probe recorded)"
     halt_path = sd / "halt.json"
     halt_state = "🟢 not halted"
     if halt_path.exists():
@@ -1811,6 +1825,7 @@ def _cmd_health() -> str:
         f"env: `{settings.trading_env}`  live armed: `{settings.is_live_armed()}`\n"
         f"halt: {halt_state}\n"
         f"heartbeat: {hb_line}\n"
+        f"broker API: {broker_line}\n"
         f"command queue: `{n_pending}` pending, `{n_running}` running\n"
     )
 

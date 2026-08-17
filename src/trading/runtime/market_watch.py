@@ -27,15 +27,36 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from trading.core.logging import logger
 
 STATE_FILENAME = "market_watch.json"
 HISTORY_KEEP = 500
-_SCHEDULE_HOUR_UTC = 20
-_SCHEDULE_MINUTE_UTC = 20
+# A daily close is only meaningful after the US session and cache refresh.
+# Keep the scheduler and restart catch-up on the same New York wall-clock
+# time so daylight saving time cannot turn the collector into a pre-close
+# read in winter.
+SCHEDULE_TIMEZONE = "America/New_York"
+SCHEDULE_HOUR = 18
+SCHEDULE_MINUTE = 50
+_SCHEDULE_TZ = ZoneInfo(SCHEDULE_TIMEZONE)
 
 _YF_TICKERS = {"^IRX": "y_3m", "^TNX": "y_10y", "^VIX": "vix", "^VIX3M": "vix3m"}
+
+
+def _close_index_as_utc(series: Any) -> Any:
+    """Give cache and fallback closes one joinable timestamp convention.
+
+    Cache writers have produced UTC-aware indexes while yfinance daily
+    downloads use naïve session dates.  Treating a naïve daily label as UTC
+    preserves that label and prevents pandas from rejecting their alignment.
+    """
+    import pandas as pd
+
+    normalized = series.copy()
+    normalized.index = pd.to_datetime(normalized.index, utc=True)
+    return normalized.sort_index()
 
 
 def needs_startup_catchup(state_dir: Path, *, now: datetime | None = None) -> bool:
@@ -44,14 +65,17 @@ def needs_startup_catchup(state_dir: Path, *, now: datetime | None = None) -> bo
     APScheduler deliberately does not replay a missed cron job after a
     process restart.  That is normally the safest behaviour, but this
     collector is idempotent and feeds an operator-facing dashboard, so a
-    runner starting after the 20:20 UTC post-close slot should make up the
-    missed reading once.  Never run early or on a weekend.
+    runner starting after the 18:50 New York post-cache slot should make up
+    the missed reading once. Never run early or on a weekend.
     """
     now = now or datetime.now(tz=timezone.utc)
-    scheduled_at = now.replace(
-        hour=_SCHEDULE_HOUR_UTC, minute=_SCHEDULE_MINUTE_UTC, second=0, microsecond=0
+    if now.tzinfo is None:
+        raise ValueError("market-watch catch-up timestamp must be timezone-aware")
+    local_now = now.astimezone(_SCHEDULE_TZ)
+    scheduled_at = local_now.replace(
+        hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, second=0, microsecond=0
     )
-    if now.weekday() >= 5 or now <= scheduled_at:
+    if local_now.weekday() >= 5 or local_now <= scheduled_at:
         return False
 
     path = Path(state_dir) / STATE_FILENAME
@@ -61,7 +85,7 @@ def needs_startup_catchup(state_dir: Path, *, now: datetime | None = None) -> bo
         collected_on = str(latest.get("t", ""))[:10] if isinstance(latest, dict) else ""
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return True
-    return collected_on != now.date().isoformat()
+    return collected_on != local_now.date().isoformat()
 
 
 def compute_breadth(data_dir: Path, max_names: int = 600) -> dict[str, float | None]:
@@ -143,6 +167,8 @@ def compute_ratios(data_dir: Path) -> dict[str, float | None]:
         if sa is None or sb is None:
             out[name] = None
             continue
+        sa = _close_index_as_utc(sa)
+        sb = _close_index_as_utc(sb)
         ratio = (sa / sb).dropna()
         if len(ratio) < 252:
             out[name] = None

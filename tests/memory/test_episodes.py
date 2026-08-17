@@ -10,10 +10,15 @@ an LLM voting on its own book.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 
-from trading.memory.episodes import _round_trips
+from trading.core.types import AssetClass, Instrument
+from trading.data.cache import ParquetCache
+from trading.memory.episodes import _entry_pctile_52w, _round_trips
 
 
 def _fill(ts: float, symbol: str, side: str, qty: float, px: float) -> dict:
@@ -132,3 +137,37 @@ def test_recording_is_idempotent(tmp_path) -> None:
     assert record_closed_episodes(mem, tmp_path, tmp_path / "data") == 1
     assert record_closed_episodes(mem, tmp_path, tmp_path / "data") == 0
     assert len(mem.episodes_for()) == 1
+
+
+def test_entry_percentile_excludes_a_future_same_session_daily_close(tmp_path: Path) -> None:
+    """An intraday fill cannot be judged using the close printed hours later."""
+    data = tmp_path / "data"
+    index = pd.date_range(end="2026-01-09", periods=70, freq="B", tz="UTC")
+    # Thursday's close is deliberately middle-of-range; Friday's eventual
+    # close is an outlier that would turn the old midnight-label slice into
+    # an artificial 100th-percentile entry.
+    close = np.linspace(10.0, 100.0, len(index))
+    close[-2] = 50.0
+    close[-1] = 1_000.0
+    frame = pd.DataFrame(
+        {
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "volume": np.ones(len(index)),
+            "adj_close": close,
+        },
+        index=index,
+    )
+    ParquetCache(data).write(Instrument(symbol="AAPL", asset_class=AssetClass.EQUITY), "1D", frame)
+
+    # The final index date is Friday 2026-01-09, so 15:00 UTC is 10:00 ET;
+    # the only completed close is Thursday's second-to-last observation.
+    when = datetime(2026, 1, 9, 15, tzinfo=timezone.utc)
+    prior = frame["close"].iloc[:-1]
+    expected = round(
+        (float(close[-2]) - float(prior.min())) / (float(prior.max()) - float(prior.min())), 3
+    )
+
+    assert _entry_pctile_52w(data, "AAPL", when) == expected

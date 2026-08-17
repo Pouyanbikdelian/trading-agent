@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from trading.core.logging import logger
 
 
@@ -103,23 +105,25 @@ def _entry_pctile_52w(data_dir: Path, symbol: str, when: datetime) -> float | No
     how a lesson could ever be evidenced against that claim.
     """
     try:
-        from trading.runtime.portfolio_stats import _read_close, close_at
+        from trading.runtime.portfolio_stats import (
+            _read_close,
+            completed_session_close,
+            last_completed_nyse_session,
+        )
 
         s = _read_close(data_dir, symbol)
         if s is None or len(s) < 60:
             return None
-        px = close_at(s, when)
+        entry_session = last_completed_nyse_session(when)
+        px = completed_session_close(s, when)
         if px is None:
             return None
         # The 52 weeks BEFORE the entry, not the whole series — using
         # bars from after the trade would score the decision with
-        # information the decision did not have.
-        import pandas as pd
-
-        ts = pd.Timestamp(when)
-        tz = getattr(s.index, "tz", None)
-        ts = ts.tz_localize(tz) if (tz is not None and ts.tzinfo is None) else ts
-        yr = s[s.index <= ts].iloc[-252:]
+        # information the decision did not have. Daily labels are midnight
+        # placeholders, so an intraday fill must exclude its own eventual
+        # session close until that close has actually happened.
+        yr = s[[pd.Timestamp(label).date() <= entry_session for label in s.index]].iloc[-252:]
         if len(yr) < 60:
             return None
         lo, hi = float(yr.min()), float(yr.max())

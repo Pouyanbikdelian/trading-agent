@@ -28,14 +28,22 @@ from trading.runtime.portfolio_stats import (
     _read_close,
     cache_symbol_for_subject,
     close_at,
+    completed_session_close,
     coverage_status,
     covers,
+    nyse_session_settled_since,
 )
 
 
 def _series(tz: str | None, days: int = 30) -> pd.Series:
     idx = pd.date_range("2026-01-01", periods=days, freq="D", tz=tz)
     return pd.Series(range(100, 100 + days), index=idx, dtype="float64")
+
+
+def _nyse_daily_series(last: str) -> pd.Series:
+    """A realistic daily cache through one US trading-session label."""
+    idx = pd.date_range("2026-08-10", last, freq="B", tz="UTC")
+    return pd.Series(range(100, 100 + len(idx)), index=idx, dtype="float64")
 
 
 class TestCloseAt:
@@ -68,6 +76,26 @@ class TestCloseAt:
         assert close_at(pd.Series(dtype="float64"), datetime(2026, 1, 10)) is None
 
 
+class TestCompletedSessionClose:
+    def test_mid_session_timestamp_uses_the_prior_completed_close(self) -> None:
+        """The midnight label for Friday must not leak Friday's later close
+        into a forecast made at 10:00 ET."""
+        s = pd.Series(
+            [100.0, 110.0],
+            index=pd.DatetimeIndex(["2026-01-08", "2026-01-09"], tz="UTC"),
+        )
+
+        assert completed_session_close(s, datetime(2026, 1, 9, 15, tzinfo=timezone.utc)) == 100.0
+
+    def test_after_close_timestamp_can_use_that_sessions_close(self) -> None:
+        s = pd.Series(
+            [100.0, 110.0],
+            index=pd.DatetimeIndex(["2026-01-08", "2026-01-09"], tz="UTC"),
+        )
+
+        assert completed_session_close(s, datetime(2026, 1, 9, 22, tzinfo=timezone.utc)) == 110.0
+
+
 class TestCovers:
     def test_true_when_the_cache_reaches_the_date(self) -> None:
         s = _series("UTC")
@@ -92,6 +120,154 @@ class TestCovers:
         due_after_close_label = datetime(2026, 1, 20, 17, tzinfo=timezone.utc)
         assert coverage_status(s, due_after_close_label) == "awaiting_next_daily_bar"
         assert covers(s, due_after_close_label) is False
+
+
+class TestDailySessionCoverage:
+    @pytest.mark.parametrize(
+        "due",
+        [
+            datetime(2026, 8, 14, 22, tzinfo=timezone.utc),  # Friday after NYSE close
+            datetime(2026, 8, 15, 12, tzinfo=timezone.utc),  # Saturday
+            datetime(2026, 8, 16, 12, tzinfo=timezone.utc),  # Sunday
+        ],
+    )
+    def test_friday_close_is_a_normal_wait_through_the_weekend(self, due: datetime) -> None:
+        friday_cache = _nyse_daily_series("2026-08-14")
+
+        assert (
+            coverage_status(
+                friday_cache,
+                due,
+                asof=datetime(2026, 8, 16, 18, tzinfo=timezone.utc),
+            )
+            == "awaiting_next_daily_bar"
+        )
+
+    @pytest.mark.parametrize(
+        "due",
+        [
+            datetime(2026, 8, 14, 22, tzinfo=timezone.utc),
+            datetime(2026, 8, 15, 12, tzinfo=timezone.utc),
+            datetime(2026, 8, 16, 12, tzinfo=timezone.utc),
+        ],
+    )
+    def test_due_is_covered_by_the_following_monday_bar(self, due: datetime) -> None:
+        monday_cache = _nyse_daily_series("2026-08-17")
+
+        assert (
+            coverage_status(
+                monday_cache,
+                due,
+                asof=datetime(2026, 8, 17, 23, tzinfo=timezone.utc),
+            )
+            == "covered"
+        )
+
+    def test_missing_monday_bar_is_stale_after_the_post_close_cache_window(self) -> None:
+        friday_cache = _nyse_daily_series("2026-08-14")
+
+        assert (
+            coverage_status(
+                friday_cache,
+                datetime(2026, 8, 16, 12, tzinfo=timezone.utc),
+                asof=datetime(2026, 8, 17, 23, tzinfo=timezone.utc),
+            )
+            == "cache_behind"
+        )
+
+    def test_missing_due_session_is_not_hidden_by_a_later_cache_bar(self) -> None:
+        """A file can have a hole: Monday is not proof Friday was cached.
+
+        If Friday is absent but Monday exists, ``close_at`` would otherwise
+        fall back to Thursday and silently grade the wrong interval.
+        """
+        gap_cache = pd.Series(
+            [100.0, 110.0],
+            index=pd.DatetimeIndex(["2026-08-13", "2026-08-17"], tz="UTC"),
+        )
+
+        assert (
+            coverage_status(
+                gap_cache,
+                datetime(2026, 8, 16, 12, tzinfo=timezone.utc),
+                asof=datetime(2026, 8, 17, 23, tzinfo=timezone.utc),
+            )
+            == "cache_behind"
+        )
+        assert covers(gap_cache, datetime(2026, 8, 16, 12, tzinfo=timezone.utc)) is False
+
+    def test_standard_time_grader_detects_missing_monday_bar_that_night(self) -> None:
+        """The NY-local evening grader must not wait until Tuesday in winter."""
+        friday_cache = pd.Series(
+            range(5),
+            index=pd.date_range("2026-01-05", "2026-01-09", freq="B", tz="UTC"),
+            dtype="float64",
+        )
+
+        assert (
+            coverage_status(
+                friday_cache,
+                datetime(2026, 1, 11, 12, tzinfo=timezone.utc),
+                asof=datetime(2026, 1, 12, 23, 45, tzinfo=timezone.utc),
+            )
+            == "cache_behind"
+        )
+
+    def test_missing_friday_bar_is_not_hidden_by_the_weekend(self) -> None:
+        thursday_cache = _nyse_daily_series("2026-08-13")
+
+        assert (
+            coverage_status(
+                thursday_cache,
+                datetime(2026, 8, 16, 12, tzinfo=timezone.utc),
+                asof=datetime(2026, 8, 16, 18, tzinfo=timezone.utc),
+            )
+            == "cache_behind"
+        )
+
+    def test_market_holiday_is_also_a_normal_wait(self) -> None:
+        # Labor Day 2026 is Monday, September 7.  A weekday-only heuristic
+        # would falsely ask for a bar that cannot exist.
+        friday_cache = _nyse_daily_series("2026-09-04")
+
+        assert (
+            coverage_status(
+                friday_cache,
+                datetime(2026, 9, 7, 22, tzinfo=timezone.utc),
+                asof=datetime(2026, 9, 7, 23, tzinfo=timezone.utc),
+            )
+            == "awaiting_next_daily_bar"
+        )
+
+    def test_early_close_waits_for_the_regular_cache_and_grader_slots(self) -> None:
+        """A 13:00 ET close must not pre-empt jobs scheduled for that evening."""
+        before_early_close = pd.Series(
+            [100.0, 101.0],
+            index=pd.DatetimeIndex(["2026-11-24", "2026-11-25"], tz="UTC"),
+        )
+        thanksgiving_due = datetime(2026, 11, 26, 22, tzinfo=timezone.utc)
+        journal_at = datetime(2026, 11, 26, 23, tzinfo=timezone.utc)
+
+        assert (
+            coverage_status(
+                before_early_close,
+                thanksgiving_due,
+                asof=datetime(2026, 11, 27, 22, tzinfo=timezone.utc),  # 17:00 ET
+            )
+            == "awaiting_next_daily_bar"
+        )
+        assert (
+            nyse_session_settled_since(
+                journal_at, datetime(2026, 11, 27, 23, 44, tzinfo=timezone.utc)
+            )
+            is False
+        )
+        assert (
+            nyse_session_settled_since(
+                journal_at, datetime(2026, 11, 28, 0, 1, tzinfo=timezone.utc)
+            )
+            is True
+        )
 
 
 def test_horizon_is_respected_end_to_end() -> None:

@@ -18,6 +18,7 @@ from trading.bot import telegram as telegram_module
 from trading.bot.telegram import (
     _atomic_write_json,
     _cmd_halt,
+    _cmd_health,
     _cmd_heartbeat,
     _cmd_resume,
     _cmd_status,
@@ -25,6 +26,7 @@ from trading.bot.telegram import (
 )
 from trading.core.types import AccountSnapshot, AssetClass, Instrument, Position
 from trading.runner.state import RunnerStore
+from trading.runtime.broker_liveness import FILENAME
 
 
 def _settings_stub(state_dir: Path) -> SimpleNamespace:
@@ -263,6 +265,54 @@ def test_cmd_heartbeat_with_recent_file(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "heartbeat.json").write_text("{}")
     out = _cmd_heartbeat()
     assert "ago" in out
+
+
+def test_cmd_health_marks_a_missing_authenticated_probe_as_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+
+    out = _cmd_health()
+
+    assert "broker API: ⚪ unknown (no authenticated API probe recorded)" in out
+
+
+def test_cmd_health_surfaces_a_failed_authenticated_probe(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    now = datetime.now(tz=timezone.utc).isoformat()
+    (tmp_path / FILENAME).write_text(
+        json.dumps(
+            {
+                "checked_at": now,
+                "ready": False,
+                "probe": "connect",
+                "detail": "ConnectionRefusedError: Gateway needs 2FA",
+                "last_success_at": None,
+            }
+        )
+    )
+
+    out = _cmd_health()
+
+    assert "broker API: 🔴 broker API liveness: unavailable" in out
+    assert "Gateway needs 2FA" in out
+
+
+def test_cmd_health_marks_a_fresh_authenticated_probe_green(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    now = datetime.now(tz=timezone.utc).isoformat()
+    (tmp_path / FILENAME).write_text(
+        json.dumps(
+            {
+                "checked_at": now,
+                "ready": True,
+                "probe": "reqCurrentTime",
+                "last_success_at": now,
+            }
+        )
+    )
+
+    assert "broker API: 🟢 authenticated API probe fresh" in _cmd_health()
 
 
 @pytest.mark.parametrize(

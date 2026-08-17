@@ -1,6 +1,6 @@
 """Ops watchdog — infrastructure health, no LLM, separate channel.
 
-Hourly mechanical checks on the box and the data plumbing:
+Five-minute mechanical checks on the box and the data plumbing:
 
 * disk usage and available memory on the host (as seen from the container);
 * freshness of every state artifact (broker snapshot, news, econ, macro,
@@ -43,6 +43,10 @@ STATE_FILENAME = "ops_watch.json"
 DEBOUNCE_HOURS = 6.0
 DISK_WARN_PCT = 85.0
 MEM_WARN_AVAILABLE_MB = 150.0
+# Snapshot/account data can be a stale IBKR subscription. A separate
+# reqCurrentTime response must arrive at least this often to call the
+# authenticated broker session healthy.
+BROKER_LIVENESS_MAX_AGE_SECONDS = 5 * 60.0
 
 # artifact -> (relative path, max age in hours before it counts as stale)
 _FRESHNESS: dict[str, tuple[str, float]] = {
@@ -115,14 +119,67 @@ def check_learning_loops(state_dir: Path, *, now: datetime | None = None) -> lis
             if age_h > max_h:
                 issues.append(f"{label}: last ran {age_h / 24:.1f}d ago (limit {max_h / 24:.0f}d)")
 
+        # The latest daily pass explains whether individual due predictions
+        # are a normal next-session wait. Read it before counting overdue
+        # rows: a Friday/Saturday/Sunday daily close needs Monday's cache
+        # bar, and those exact IDs are not evidence that grading is broken.
+        # Old journal payloads have no IDs and therefore receive no
+        # exemption — conservative compatibility is intentional.
+        latest_daily_payload: dict[str, Any] | None = None
+        latest_daily_at: datetime | None = None
+        latest_daily_is_fresh = False
+        try:
+            latest_daily = conn.execute(
+                """SELECT ts, payload FROM journal WHERE kind = 'daily'
+                   ORDER BY ts DESC LIMIT 1"""
+            ).fetchone()
+            if latest_daily:
+                daily_ts = float(latest_daily["ts"])
+                daily_age = now.timestamp() - daily_ts
+                # Do not let a clock-skewed future row suppress an alert.
+                # Unlike the status payload below, the exact-ID exemption
+                # deliberately survives a long market holiday: it expires
+                # on the next settled NYSE session, not after 48 hours.
+                if daily_age >= 0:
+                    payload = json.loads(latest_daily["payload"])
+                    if isinstance(payload, dict):
+                        latest_daily_payload = payload
+                        latest_daily_at = datetime.fromtimestamp(daily_ts, tz=timezone.utc)
+                        latest_daily_is_fresh = daily_age <= 48 * 3600
+        except (sqlite3.Error, TypeError, ValueError, OverflowError, json.JSONDecodeError):
+            pass
+
         # Predictions that came due and were never scored. This is the
         # exact signature of the tz bug: they accumulate forever while the
         # grader logs a cheerful nothing every night.
         try:
-            overdue = conn.execute(
-                "SELECT COUNT(*) FROM predictions WHERE graded_ts IS NULL AND due_ts <= ?",
+            overdue_rows = conn.execute(
+                "SELECT id FROM predictions WHERE graded_ts IS NULL AND due_ts <= ?",
                 (now.timestamp() - 48 * 3600,),
-            ).fetchone()[0]
+            ).fetchall()
+            awaiting_ids: set[str] = set()
+            if latest_daily_payload is not None and latest_daily_at is not None:
+                raw_awaiting = latest_daily_payload.get(
+                    "awaiting_next_daily_bar_prediction_ids", []
+                )
+                if isinstance(raw_awaiting, list):
+                    # A journal row is evidence of the state at its own
+                    # timestamp, not a 48-hour blanket exemption.  Once a
+                    # later NYSE session has settled, a stale row must not
+                    # hide a cache or grader failure that prevented the next
+                    # daily pass from replacing it.
+                    try:
+                        from trading.runtime.portfolio_stats import nyse_session_settled_since
+
+                        still_expected = not nyse_session_settled_since(latest_daily_at, now)
+                    except Exception:
+                        # This watchdog promises never to raise. Fail closed
+                        # to an overdue alert if the local calendar cannot
+                        # establish that a stale journal is still legitimate.
+                        still_expected = False
+                    if still_expected:
+                        awaiting_ids = {str(prediction_id) for prediction_id in raw_awaiting}
+            overdue = sum(str(row["id"]) not in awaiting_ids for row in overdue_rows)
             graded = conn.execute(
                 "SELECT COUNT(*) FROM predictions WHERE graded_ts IS NOT NULL"
             ).fetchone()[0]
@@ -136,32 +193,24 @@ def check_learning_loops(state_dir: Path, *, now: datetime | None = None) -> lis
                     f"{total} predictions recorded, ZERO ever graded — agent calibration is empty"
                 )
 
-            # The latest daily pass is the current scorecard state. Reading
-            # an old one-off failure record kept an alert alive for 48 hours
-            # even after a later clean grading pass had recovered it.
-            latest_daily = conn.execute(
-                """SELECT ts, payload FROM journal WHERE kind = 'daily'
-                   ORDER BY ts DESC LIMIT 1"""
-            ).fetchone()
-            if latest_daily and now.timestamp() - float(latest_daily["ts"]) <= 48 * 3600:
-                try:
-                    payload = json.loads(latest_daily["payload"])
-                    payload = payload if isinstance(payload, dict) else {}
-                    blocked_parts: list[str] = []
-                    for key, label in (
-                        ("unpriced_subjects", "missing prices"),
-                        ("cache_behind_subjects", "cache behind"),
-                        ("grading_failed_subjects", "grading errors"),
-                    ):
-                        subjects = [str(s) for s in payload.get(key, [])][:8]
-                        if subjects:
-                            blocked_parts.append(f"{label}: {', '.join(subjects)}")
-                    if blocked_parts:
-                        issues.append("scorecard data blocked — " + "; ".join(blocked_parts))
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    pass
         except sqlite3.Error:
             pass
+
+        # The latest daily pass is the current scorecard state. Reading an
+        # old one-off failure record kept an alert alive for 48 hours even
+        # after a later clean grading pass had recovered it.
+        if latest_daily_payload is not None and latest_daily_is_fresh:
+            blocked_parts: list[str] = []
+            for key, label in (
+                ("unpriced_subjects", "missing prices"),
+                ("cache_behind_subjects", "cache behind"),
+                ("grading_failed_subjects", "grading errors"),
+            ):
+                subjects = [str(s) for s in latest_daily_payload.get(key, [])][:8]
+                if subjects:
+                    blocked_parts.append(f"{label}: {', '.join(subjects)}")
+            if blocked_parts:
+                issues.append("scorecard data blocked — " + "; ".join(blocked_parts))
 
         # A fresh historian journal row with ``ok=false`` is not liveness;
         # it is an explicit failed permanent-memory review and deserves an
@@ -221,7 +270,7 @@ def check_recent_errors(log_dir: Path, *, hours: float = 1.5) -> list[str]:
     counts: dict[str, int] = {}
     try:
         # Tail only: these files reach tens of MB and the watchdog runs
-        # hourly on a 1-vCPU box.
+        # every five minutes on a 1-vCPU box.
         with path.open("rb") as f:
             f.seek(0, 2)
             start = max(0, f.tell() - 400_000)
@@ -263,6 +312,62 @@ def _mem_available_mb() -> float | None:
     return None
 
 
+def _parse_aware_timestamp(value: object) -> datetime | None:
+    """Read a timestamp from state without silently treating naive time as UTC."""
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        return None
+    return stamp.astimezone(timezone.utc)
+
+
+def check_broker_liveness(state_dir: Path, *, now: datetime | None = None) -> list[str]:
+    """Return authenticated-IBKR-session issues, if this runner supports it.
+
+    ``broker_liveness.json`` is intentionally optional: simulator and
+    third-party broker deployments do not expose a wire-level probe. Once an
+    IBKR-capable runner writes it, however, its boolean result is meaningful
+    immediately and its last successful request is a stronger freshness
+    signal than a file mtime or cached account snapshot.
+    """
+    from trading.runtime.broker_liveness import FILENAME
+
+    path = Path(state_dir) / FILENAME
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return [f"broker API liveness: unreadable ({FILENAME})"]
+    if not isinstance(payload, dict) or not isinstance(payload.get("ready"), bool):
+        return [f"broker API liveness: invalid ({FILENAME})"]
+
+    now = now or datetime.now(tz=timezone.utc)
+    last_success = _parse_aware_timestamp(payload.get("last_success_at"))
+    if payload["ready"] is False:
+        detail = str(payload.get("detail", "unknown failure"))[:180]
+        if last_success is None:
+            success_text = "no authenticated response recorded"
+        else:
+            age_s = max(0.0, (now - last_success).total_seconds())
+            success_text = f"last authenticated response {age_s / 60.0:.1f}m ago"
+        return [f"broker API liveness: unavailable ({detail}; {success_text})"]
+
+    if last_success is None:
+        return ["broker API liveness: no authenticated response timestamp"]
+    age_s = max(0.0, (now - last_success).total_seconds())
+    if age_s > BROKER_LIVENESS_MAX_AGE_SECONDS:
+        return [
+            "broker API liveness: last authenticated response "
+            f"{age_s / 60.0:.1f}m ago (limit {BROKER_LIVENESS_MAX_AGE_SECONDS / 60.0:.0f}m)"
+        ]
+    return []
+
+
 def check_health(state_dir: Path, *, now: datetime | None = None) -> list[str]:
     """Mechanical pass. Returns human-readable issue strings; [] = healthy."""
     now = now or datetime.now(tz=timezone.utc)
@@ -293,6 +398,8 @@ def check_health(state_dir: Path, *, now: datetime | None = None) -> list[str]:
         age_h = _secs / 3600.0
         if age_h > max_h:
             issues.append(f"{label}: stale ({age_h:.0f}h old, limit {max_h:.0f}h)")
+
+    issues.extend(check_broker_liveness(state_dir, now=now))
 
     try:
         halt = json.loads((state_dir / "halt.json").read_text())
@@ -375,7 +482,7 @@ def run_ops_watch(
 
     # Issue identity = text before the first ':' — values change, kind doesn't.
     current = {i.split(":")[0].split("(")[0].strip(): i for i in issues}
-    new_alerts: list[str] = []
+    new_alerts: list[tuple[str, str]] = []
     for key, text in current.items():
         last = reported.get(key)
         if last:
@@ -385,19 +492,27 @@ def run_ops_watch(
                     continue
             except Exception:
                 pass
-        new_alerts.append(text)
-        reported[key] = now.isoformat()
+        new_alerts.append((key, text))
 
     recovered = [k for k in list(reported) if k not in current]
-    for k in recovered:
-        del reported[k]
+    alerted: list[str] = []
+    recovered_reported: list[str] = []
 
     if new_alerts:
-        _send_ops("⚠️ Ops watchdog\n" + "\n".join(f"• {a}" for a in new_alerts))
-    if recovered and not new_alerts:
-        _send_ops("✅ Ops watchdog: recovered — " + ", ".join(recovered))
+        message = "⚠️ Ops watchdog\n" + "\n".join(f"• {text}" for _, text in new_alerts)
+        if _send_ops(message):
+            for key, _ in new_alerts:
+                reported[key] = now.isoformat()
+            alerted = [text for _, text in new_alerts]
+    # Recovery is independently useful information. Suppressing it merely
+    # because a different issue appeared in the same pass leaves an outage
+    # looking active long after its authenticated probe has recovered.
+    if recovered and _send_ops("✅ Ops watchdog: recovered — " + ", ".join(recovered)):
+        for key in recovered:
+            del reported[key]
+        recovered_reported = recovered
 
     _save(state_dir, {"reported": reported, "last_run": now.isoformat()})
-    if new_alerts:
-        logger.bind(component="ops_watch").warning(f"issues: {new_alerts}")
-    return {"issues": issues, "alerted": new_alerts, "recovered": recovered}
+    if alerted:
+        logger.bind(component="ops_watch").warning(f"issues: {alerted}")
+    return {"issues": issues, "alerted": alerted, "recovered": recovered_reported}

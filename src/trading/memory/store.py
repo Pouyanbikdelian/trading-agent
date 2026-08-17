@@ -982,6 +982,47 @@ class MemoryStore:
             "SELECT * FROM predictions WHERE graded_ts IS NULL AND due_ts <= ?", (cutoff,)
         ).fetchall()
 
+    def _session_pending_prediction_ids(self, *, asof: datetime) -> set[str]:
+        """Exact daily-bar waits that remain valid at ``asof``.
+
+        The daily journal is intentionally the source of truth for which
+        rows were waiting: the store has no price-cache path and must not
+        infer that every weekend expiry is healthy.  Its answer expires when
+        a later NYSE session has settled, so a stale journal cannot disguise
+        a grader/cache failure as a normal pending row.
+        """
+        try:
+            row = self.conn.execute(
+                """SELECT ts, payload FROM journal WHERE kind = 'daily'
+                   ORDER BY ts DESC LIMIT 1"""
+            ).fetchone()
+            if row is None:
+                return set()
+            journal_ts = float(row["ts"])
+            # A future-dated journal is not evidence about the current
+            # scorecard state. Otherwise calendar settlement, rather than a
+            # fixed 48-hour TTL, governs the exemption: a holiday weekend
+            # can legitimately last longer than two days.
+            if journal_ts > asof.timestamp():
+                return set()
+            payload = json.loads(row["payload"])
+            if not isinstance(payload, dict):
+                return set()
+            raw_ids = payload.get("awaiting_next_daily_bar_prediction_ids", [])
+            if not isinstance(raw_ids, list):
+                return set()
+            from trading.runtime.portfolio_stats import nyse_session_settled_since
+
+            journal_at = datetime.fromtimestamp(journal_ts, tz=timezone.utc)
+            if nyse_session_settled_since(journal_at, asof):
+                return set()
+            return {str(prediction_id) for prediction_id in raw_ids}
+        except Exception:
+            # A malformed journal or unavailable local calendar is never
+            # permission to suppress an overdue count in long-horizon
+            # memory. This helper is deliberately fail-closed.
+            return set()
+
     def scorecard_backfill_targets(
         self, *, asof: datetime | None = None, max_age_days: int = 730
     ) -> list[dict[str, Any]]:
@@ -1060,6 +1101,7 @@ class MemoryStore:
         since_days: int = 365,
         recent_limit: int = 12,
         retired_limit: int = 8,
+        asof: datetime | None = None,
     ) -> dict[str, Any]:
         """Compact, auditable long-horizon memory for a Historian pass.
 
@@ -1069,8 +1111,11 @@ class MemoryStore:
         the prompt retain a year of measured history without pretending that
         hundreds of raw journal rows are useful context.
         """
-        cutoff = _now() - since_days * 86400.0
-        now_ts = _now()
+        now = asof or datetime.now(tz=timezone.utc)
+        if now.tzinfo is None:
+            raise ValueError("historian dossier asof must be timezone-aware")
+        now_ts = now.timestamp()
+        cutoff = now_ts - since_days * 86400.0
 
         scorecard = self.conn.execute(
             """SELECT COUNT(*) AS graded,
@@ -1080,10 +1125,12 @@ class MemoryStore:
                FROM predictions WHERE graded_ts IS NOT NULL AND graded_ts >= ?""",
             (cutoff,),
         ).fetchone()
-        overdue = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM predictions WHERE graded_ts IS NULL AND due_ts <= ?",
-            (now_ts,),
-        ).fetchone()
+        mature_ungraded = self.conn.execute(
+            "SELECT id FROM predictions WHERE graded_ts IS NULL AND due_ts <= ?", (now_ts,)
+        ).fetchall()
+        pending_ids = self._session_pending_prediction_ids(asof=now)
+        session_pending = sum(str(row["id"]) in pending_ids for row in mature_ungraded)
+        overdue_ungraded = len(mature_ungraded) - session_pending
         by_agent = self.conn.execute(
             """SELECT agent, COUNT(*) AS n,
                       AVG(CASE WHEN outcome = 'hit' THEN 1.0 ELSE 0.0 END) AS hit_rate,
@@ -1185,7 +1232,8 @@ class MemoryStore:
                 "hit_rate": scorecard["hit_rate"],
                 "brier": scorecard["brier"],
                 "mean_move": scorecard["mean_move"],
-                "overdue_ungraded": int(overdue["n"] or 0),
+                "overdue_ungraded": overdue_ungraded,
+                "session_pending_ungraded": session_pending,
                 "by_agent": [dict(r) for r in by_agent],
                 "by_subject": [dict(r) for r in by_subject],
                 "recent_outcomes": [prediction_card(r) for r in predictions],

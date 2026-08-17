@@ -23,7 +23,12 @@ from typing import Any
 from trading.core.logging import logger
 
 
-def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, Any]:
+def grade_due_predictions(
+    mem: Any,
+    data_dir: Path,
+    *,
+    asof: datetime | None = None,
+) -> dict[str, Any]:
     """Grade every matured prediction and expose why any row was blocked.
 
     Grades at the DUE date, not at the newest available bar: scoring a
@@ -34,15 +39,27 @@ def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, Any]:
     stop scoring the other seven agents — the original single try block
     around the whole batch is what turned one TypeError into a total
     outage of the scorecard.
-    """
-    from trading.runtime.portfolio_stats import _read_close, close_at, coverage_status
 
+    ``asof`` makes the cache-timing decision reproducible and tells
+    session-aware coverage when a missing next-session bar is genuinely
+    stale rather than a normal weekend wait.
+    """
+    from trading.runtime.portfolio_stats import (
+        _read_close,
+        completed_session_close,
+        coverage_status,
+    )
+
+    now = asof or datetime.now(tz=timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("scorecard grading asof must be timezone-aware")
     graded = skipped = 0
     unpriced_subjects: set[str] = set()
     awaiting_next_daily_bar_subjects: set[str] = set()
+    awaiting_next_daily_bar_prediction_ids: set[str] = set()
     cache_behind_subjects: set[str] = set()
     failed_subjects: set[str] = set()
-    for row in mem.due_predictions():
+    for row in mem.due_predictions(asof=now):
         subject = str(row["subject"]).upper()
         try:
             series = _read_close(data_dir, subject)
@@ -52,17 +69,30 @@ def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, Any]:
                 continue
             made = datetime.fromtimestamp(row["ts"], tz=timezone.utc)
             due = datetime.fromtimestamp(row["due_ts"], tz=timezone.utc)
-            status = coverage_status(series, due)
+            # Validate the entry endpoint before classifying a weekend or
+            # holiday expiry as a normal pending session. Otherwise an old
+            # prediction outside cache history could receive an exact-ID
+            # watchdog exemption despite already being ungradeable.
+            base = completed_session_close(series, made)
+            if not base:
+                skipped += 1
+                cache_behind_subjects.add(subject)
+                continue
+            status = coverage_status(series, due, asof=now)
             if status != "covered":
                 skipped += 1  # not matured in our data yet; retry tomorrow
                 if status == "awaiting_next_daily_bar":
                     awaiting_next_daily_bar_subjects.add(subject)
+                    awaiting_next_daily_bar_prediction_ids.add(str(row["id"]))
                 else:
                     cache_behind_subjects.add(subject)
                 continue
-            base = close_at(series, made)
-            end = close_at(series, due)
-            if not base or end is None:
+            # Predictions can be created or expire mid-session.  The cache's
+            # midnight date label is not the session close, so selecting by
+            # timestamp alone would retrospectively use that day's eventual
+            # close.  Score only completed NYSE sessions at both endpoints.
+            end = completed_session_close(series, due)
+            if end is None:
                 skipped += 1
                 cache_behind_subjects.add(subject)
                 continue
@@ -98,6 +128,7 @@ def grade_due_predictions(mem: Any, data_dir: Path) -> dict[str, Any]:
         "skipped": skipped,
         "unpriced_subjects": sorted(unpriced_subjects),
         "awaiting_next_daily_bar_subjects": sorted(awaiting_next_daily_bar_subjects),
+        "awaiting_next_daily_bar_prediction_ids": sorted(awaiting_next_daily_bar_prediction_ids),
         "cache_behind_subjects": sorted(cache_behind_subjects),
         "failed_subjects": sorted(failed_subjects),
     }

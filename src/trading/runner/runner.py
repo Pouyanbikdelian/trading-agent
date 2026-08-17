@@ -156,7 +156,10 @@ def _historian_trigger() -> Any:
     """
     from apscheduler.triggers.cron import CronTrigger
 
-    return CronTrigger(day_of_week="tue,fri", hour=22, minute=45, timezone="UTC")
+    # Keep the full post-close learning chain on New York wall time.  A UTC
+    # literal put the winter grader before the cache refresh, then let the
+    # historian distil that incomplete result.
+    return CronTrigger(day_of_week="tue,fri", hour=19, minute=0, timezone="America/New_York")
 
 
 def _add_scorecard_backfill_targets(
@@ -266,6 +269,10 @@ class Runner:
         # Keep its task so it cannot be garbage-collected while its network
         # collection is in flight and can be cancelled during shutdown.
         self._startup_market_watch_task: asyncio.Task[None] | None = None
+        # The cron trigger and a post-restart catch-up can meet just after
+        # the scheduled slot.  One async lock keeps that benign race from
+        # issuing duplicate yfinance batches or racing the state artifact.
+        self._market_watch_lock: asyncio.Lock | None = None
 
     # -------------------------------------------------- factory
 
@@ -343,27 +350,171 @@ class Runner:
         the broker is already up-to-date."""
         return self.cycle.run_cycle()
 
+    def _register_core_background_jobs(self) -> None:
+        """Register data, safety, and ops work independent of main-chat setup.
+
+        The primary Telegram bot is an operator interface, not a dependency
+        of cache maintenance, scorecard grading, position guards, or the
+        separate ops channel.  Their own alert calls already degrade to
+        no-ops when no chat is configured.
+        """
+        from apscheduler.triggers.cron import CronTrigger
+
+        from trading.runtime.guards import enabled as guards_enabled
+        from trading.runtime.market_watch import (
+            SCHEDULE_HOUR,
+            SCHEDULE_MINUTE,
+            SCHEDULE_TIMEZONE,
+        )
+
+        # Position guards: ATR trailing stops + profit ratchet. Same RTH
+        # cadence as the sentinel, offset 5 min. This is safety work, not a
+        # notification feature, so a missing chat configuration must not
+        # disable it.
+        if guards_enabled():
+            self._scheduler.add_job(
+                self._run_guards_async,
+                CronTrigger(day_of_week="mon-fri", hour="13-20", minute="5-59/15", timezone="UTC"),
+                id="guards",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # Broker readiness, ONE HOUR before the cycle. IBKR mandates 2FA
+        # for every user and re-prompts after its daily restart and weekly
+        # shutdown; IBC retries a missed prompt, but only a human can answer
+        # it. This remains useful with an ops-only Telegram channel.
+        try:
+            pre = _precycle_trigger(self.config.schedule_cron, self.config.schedule_tz)
+            if pre is None:
+                logger.bind(component="runner").warning(
+                    "pre-cycle broker check NOT scheduled: cannot derive a lead time from "
+                    f"cron {self.config.schedule_cron!r} (crosses midnight, or an "
+                    "unsupported shape). A dead gateway will only be discovered AT the cycle."
+                )
+            else:
+                self._scheduler.add_job(
+                    self._check_broker_ready_async,
+                    pre,
+                    id="broker_ready",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+                logger.bind(component="runner").info(
+                    f"pre-cycle broker check scheduled {self.PRECYCLE_LEAD_MINUTES}min "
+                    f"before the cycle: {pre}"
+                )
+        except Exception:
+            logger.bind(component="runner").exception(
+                "pre-cycle broker check could not be scheduled — a dead gateway will "
+                "only be discovered at the cycle itself"
+            )
+
+        # Refresh at 17:40 New York time, leaving the free daily source room
+        # to publish final bars after the regular close. Market watch runs
+        # later from this refreshed cache.
+        self._scheduler.add_job(
+            self._refresh_price_cache_async,
+            CronTrigger(day_of_week="mon-fri", hour=17, minute=40, timezone="America/New_York"),
+            id="price_cache_refresh",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Index constituents are trading inputs, not an alert-only feature.
+        self._scheduler.add_job(
+            self._refresh_universes_async,
+            CronTrigger(day_of_week="sun", hour=3, minute=0, timezone="UTC"),
+            id="universe_refresh",
+            replace_existing=True,
+            max_instances=1,
+        )
+
+        # Ops watchdog: a dedicated OPS_TELEGRAM_* channel is sufficient.
+        self._scheduler.add_job(
+            self._run_ops_watch_async,
+            CronTrigger(minute="*/5", timezone="UTC"),
+            id="ops_watch",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Scorecard grading is local learning-state maintenance and should
+        # not stop just because the interactive chat is unavailable.  It
+        # starts 65 minutes after the cache refresh, after the two-hour
+        # post-close data-settlement window in both DST seasons.
+        self._scheduler.add_job(
+            self._run_memory_grader_async,
+            CronTrigger(hour=18, minute=45, timezone="America/New_York"),
+            id="memory_grader",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # The Historian owns persistent learning state, rather than the
+        # interactive Telegram chat.  Preserve its existing explicit agent
+        # and API-key gate, but do not make a missing primary chat disable a
+        # working OPS-only deployment.
+        if os.getenv("AGENTS_ENABLED", "false").lower() in ("true", "1", "yes") and (
+            os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
+        ):
+            self._scheduler.add_job(
+                self._run_historian_async,
+                _historian_trigger(),
+                id="historian",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+
+        # Market watch follows the cache by 70 minutes. The local constants
+        # also drive restart catch-up, preventing DST drift between paths.
+        self._scheduler.add_job(
+            self._run_market_watch_async,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=SCHEDULE_HOUR,
+                minute=SCHEDULE_MINUTE,
+                timezone=SCHEDULE_TIMEZONE,
+            ),
+            id="market_watch",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
     # -------------------------------------------------- scheduler
 
-    def preflight_unheld(self) -> None:
+    def preflight_unheld(self, *, require_reachable: bool = False) -> bool:
         """Refuse to arm live while positions sit unprotected.
 
         Only on the live path, and only once at startup — a paper runner
         trading a simulated book has nothing personal to protect, and a
         mid-session check would block a restart during market hours.
 
-        Raises ``RuntimeError``. That is deliberately blunt: on
-        2026-08-07 the guards sold a personal VST position seven minutes
-        into the first live session, and the runbook step that would have
-        prevented it ("resolve WMT/VST with /hold") had been dropped when
-        the scope narrowed. A checklist item that can be dropped is not a
-        gate.
+        Returns ``False`` only when a strict bootstrap could not verify the
+        account's positions.  An actual unheld position still writes the
+        existing halt and returns ``True``: the process remains observable
+        and no risk path can submit an order while halted.
         """
         from trading.runtime.broker_ready import check_unheld_positions, format_unheld_alert
 
-        result = check_unheld_positions(self.cycle.broker, state_dir=settings.state_dir)
+        result = check_unheld_positions(
+            self.cycle.broker,
+            state_dir=settings.state_dir,
+            require_reachable=require_reachable,
+        )
+        if require_reachable and not result.get("reachable", False):
+            logger.bind(component="preflight").warning(
+                "live bootstrap waiting for a verified broker position read: "
+                + str(result.get("reason", "unknown failure"))
+            )
+            return False
         if result["ok"]:
-            return
+            return True
         # ALERT AND HALT — do not raise.
         #
         # This raised until 2026-08-11, and raising inside a service with
@@ -401,6 +552,7 @@ class Runner:
             f"starting HALTED — unprotected positions: {unheld}. "
             "/hold them or `trading preflight ack`, then /resume."
         )
+        return True
 
     #: Remembers the last set we alerted about, so a restart with the same
     #: unprotected names is silent. A CHANGED set re-alerts: a new
@@ -431,10 +583,142 @@ class Runner:
             logger.bind(component="preflight").exception("could not record the unheld alert")
         return True
 
+    BROKER_BOOTSTRAP_RETRY_SECONDS: float = 60.0
+
+    def _write_bootstrap_heartbeat(self, detail: str) -> None:
+        """Mark the process alive while authenticated broker bootstrap waits.
+
+        Docker's heartbeat healthcheck should distinguish a live process
+        waiting for 2FA from a dead process.  The separate liveness artifact
+        remains red, and the watchdog reports it; this heartbeat never claims
+        that the broker itself is usable.
+        """
+        import json
+        import tempfile
+
+        path = settings.state_dir / "heartbeat.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ts": datetime.now(tz=timezone.utc).isoformat(),
+            "source": "broker_bootstrap",
+            "status": "broker_unavailable",
+            "detail": detail[:240],
+        }
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp, path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+
+    async def _report_live_bootstrap_failure(
+        self,
+        detail: str,
+        *,
+        probe: str,
+        already_recorded: bool = False,
+    ) -> None:
+        """Persist and alert a no-orders bootstrap failure, then back off."""
+        if not already_recorded:
+            try:
+                from trading.runtime.broker_liveness import record_broker_liveness_failure
+
+                await asyncio.to_thread(
+                    record_broker_liveness_failure,
+                    settings.state_dir,
+                    detail,
+                    probe=probe,
+                )
+            except Exception:
+                logger.bind(component="broker_liveness").exception(
+                    "could not record live bootstrap failure"
+                )
+        try:
+            await asyncio.to_thread(self._write_bootstrap_heartbeat, detail)
+        except Exception:
+            logger.bind(component="runner").exception("could not write bootstrap heartbeat")
+        try:
+            from trading.runtime.ops_watch import run_ops_watch
+
+            await asyncio.to_thread(
+                run_ops_watch,
+                settings.state_dir,
+                log_dir=settings.log_dir,
+            )
+        except Exception:
+            logger.bind(component="ops_watch").exception("bootstrap ops-watch pass failed")
+        logger.bind(component="runner").warning(
+            f"live broker bootstrap waiting ({probe}): {detail[:240]}"
+        )
+        await asyncio.sleep(self.BROKER_BOOTSTRAP_RETRY_SECONDS)
+
+    async def _bootstrap_live_broker(self) -> None:
+        """Connect, prove authentication, and verify positions before jobs exist.
+
+        A lost IBKR login must not merely look like a stale account cache.
+        Until all three checks succeed, this loop does not construct or start
+        APScheduler: no cycle, flag consumer, queued command, guard, or
+        recovery path can submit an order.  It deliberately relies on the
+        IBKR adapter's non-recovering liveness and strict-position seams, so
+        this observer never invokes automatic gateway restarts; deliberate
+        bounded connection retries remain visible through the liveness file.
+        """
+        from trading.runtime.broker_liveness import record_broker_liveness
+
+        while True:
+            try:
+                await asyncio.to_thread(self.broker.connect)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._report_live_bootstrap_failure(
+                    f"{type(exc).__name__}: {exc}", probe="connect"
+                )
+                continue
+
+            try:
+                observation = await asyncio.to_thread(
+                    record_broker_liveness, self.broker, settings.state_dir
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._report_live_bootstrap_failure(
+                    f"{type(exc).__name__}: {exc}", probe="reqCurrentTime"
+                )
+                continue
+            if not isinstance(observation, dict) or observation.get("ready") is not True:
+                detail = (
+                    str(observation.get("detail", "authenticated liveness probe unavailable"))
+                    if isinstance(observation, dict)
+                    else "authenticated liveness probe unsupported"
+                )
+                probe = (
+                    str(observation.get("probe", "reqCurrentTime"))
+                    if observation
+                    else "reqCurrentTime"
+                )
+                await self._report_live_bootstrap_failure(
+                    detail,
+                    probe=probe,
+                    already_recorded=isinstance(observation, dict),
+                )
+                continue
+
+            if self.preflight_unheld(require_reachable=True):
+                return
+            await self._report_live_bootstrap_failure(
+                "position inventory unavailable after an authenticated liveness probe",
+                probe="positions",
+            )
+
     async def run_forever(self) -> None:
         """Start APScheduler and block until SIGINT / SIGTERM."""
         if settings.is_live_armed():
-            self.preflight_unheld()
+            await self._bootstrap_live_broker()
 
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
@@ -508,12 +792,12 @@ class Runner:
                 id="risk_advisor",
                 replace_existing=True,
             )
-            # HMM regime advisor: once daily after US close (≈ 22:00 UTC).
+            # HMM regime advisor: once daily after the cache is refreshed.
             # Slow signal — daily granularity is enough. Complements the
             # hourly SMA/VIX advisor without spamming.
             self._scheduler.add_job(
                 self._run_hmm_advisor_async,
-                CronTrigger(hour=22, minute=15, timezone="UTC"),
+                CronTrigger(hour=18, minute=15, timezone="America/New_York"),
                 id="hmm_advisor",
                 replace_existing=True,
             )
@@ -611,12 +895,14 @@ class Runner:
                     replace_existing=True,
                     max_instances=1,
                 )
-                # Daily PM mark-to-market: weekdays 21:15 UTC, after the
-                # US close. No LLM — one price fetch so the simulated
+                # Daily PM mark-to-market: weekdays 17:15 New York, after
+                # the US close. No LLM — one price fetch so the simulated
                 # sleeve has a daily equity curve and SPY benchmark.
                 self._scheduler.add_job(
                     self._mark_agent_pm_async,
-                    CronTrigger(day_of_week="mon-fri", hour=21, minute=15, timezone="UTC"),
+                    CronTrigger(
+                        day_of_week="mon-fri", hour=17, minute=15, timezone="America/New_York"
+                    ),
                     id="agent_pm_mark",
                     replace_existing=True,
                 )
@@ -646,144 +932,13 @@ class Runner:
                     replace_existing=True,
                     max_instances=1,
                 )
-            # Position guards: ATR trailing stops + profit ratchet. Same
-            # RTH cadence as the sentinel, offset 5 min. Master-switched
-            # by GUARDS_ENABLED; exits flow through the command pipeline
-            # (halt-aware, audited) — never a new order path.
-            from trading.runtime.guards import enabled as _guards_enabled
-
-            if _guards_enabled():
-                self._scheduler.add_job(
-                    self._run_guards_async,
-                    CronTrigger(
-                        day_of_week="mon-fri", hour="13-20", minute="5-59/15", timezone="UTC"
-                    ),
-                    id="guards",
-                    replace_existing=True,
-                    max_instances=1,
-                )
-            # Broker readiness, ONE HOUR before the cycle. IBKR mandates
-            # 2FA for every user and re-prompts after its daily restart
-            # and weekly shutdown; IBC retries a missed prompt, but only
-            # a human can answer it. Every other consequence of a dead
-            # gateway is non-fatal — this is the one moment it is not,
-            # because a cycle that cannot reach the broker submits
-            # nothing and looks identical to one that chose to.
-            #
-            # Derived from the cycle's own cron so the two can never
-            # drift apart: change CRON and the warning moves with it.
-            # Registration is logged on EVERY path, including the failures.
-            # A check that exists to catch a silent failure must not itself
-            # fail silently: the first cut wrapped this in a bare
-            # `contextlib.suppress(Exception)` with no logging, so a cron
-            # shape `_precycle_trigger` could not parse would have left the
-            # job unregistered and said nothing. "Is the 2FA warning armed?"
-            # has to be answerable from the log, not inferred.
-            try:
-                pre = _precycle_trigger(self.config.schedule_cron, self.config.schedule_tz)
-                if pre is None:
-                    logger.bind(component="runner").warning(
-                        "pre-cycle broker check NOT scheduled: cannot derive a lead time from "
-                        f"cron {self.config.schedule_cron!r} (crosses midnight, or an "
-                        "unsupported shape). A dead gateway will only be discovered AT the cycle."
-                    )
-                else:
-                    self._scheduler.add_job(
-                        self._check_broker_ready_async,
-                        pre,
-                        id="broker_ready",
-                        replace_existing=True,
-                        max_instances=1,
-                    )
-                    logger.bind(component="runner").info(
-                        f"pre-cycle broker check scheduled {self.PRECYCLE_LEAD_MINUTES}min "
-                        f"before the cycle: {pre}"
-                    )
-            except Exception:
-                logger.bind(component="runner").exception(
-                    "pre-cycle broker check could not be scheduled — a dead gateway will "
-                    "only be discovered at the cycle itself"
-                )
-
-            # Price cache refresh: weekdays 21:40 UTC, after the close and
-            # after the rebalance. Until now NOTHING refreshed the parquet
-            # cache on a schedule — it updated only as a side effect of the
-            # trading cycle, whose loader falls back to disk whenever a
-            # fetch times out. So the agents' candidate ladder, the
-            # prediction grader and the shadow ledger could all be reading
-            # week-old bars while looking perfectly healthy.
-            self._scheduler.add_job(
-                self._refresh_price_cache_async,
-                CronTrigger(day_of_week="mon-fri", hour=21, minute=40, timezone="UTC"),
-                id="price_cache_refresh",
-                replace_existing=True,
-                max_instances=1,
-            )
-
-            # Index constituents: Sundays 03:00 UTC. Two Wikipedia reads,
-            # written to state/. Nothing refreshed these before — the file
-            # lived in a read-only bind mount, so the S&P 500 / NDX / R1000
-            # membership the candidate ladder ranks over was two months
-            # out of date and silently drifting further.
-            self._scheduler.add_job(
-                self._refresh_universes_async,
-                CronTrigger(day_of_week="sun", hour=3, minute=0, timezone="UTC"),
-                id="universe_refresh",
-                replace_existing=True,
-                max_instances=1,
-            )
-
-            # Historian: Tuesdays + Fridays 22:45 UTC, after the 22:30
-            # grading pass — distills the rolling week into <=2 candidate
-            # lessons and votes on existing ones. Votes are deduplicated
-            # by ISO week in historian.py, so the extra pass cannot rush a
-            # candidate into established status.
-            #
-            # This was nested INSIDE `if _guards_enabled():` — an
-            # indentation accident that coupled the weekly learning loop to
-            # an unrelated stop-loss feature whose env flag defaults to
-            # FALSE. Any deployment that had not explicitly opted into
-            # position guards silently never distilled a single lesson, and
-            # nothing anywhere would have said so.
-            self._scheduler.add_job(
-                self._run_historian_async,
-                _historian_trigger(),
-                id="historian",
-                replace_existing=True,
-            )
-            # Ops watchdog: hourly infra health (disk, memory, data
-            # freshness, halt state). No LLM. Alerts to the ops Telegram
-            # channel (OPS_TELEGRAM_*) or main channel; silent when healthy.
-            self._scheduler.add_job(
-                self._run_ops_watch_async,
-                CronTrigger(minute=7, timezone="UTC"),
-                id="ops_watch",
-                replace_existing=True,
-            )
-            # Memory grader: nightly, grade due predictions against
-            # cached prices and journal the day. Cheap; advisory infra.
-            self._scheduler.add_job(
-                self._run_memory_grader_async,
-                CronTrigger(hour=22, minute=30, timezone="UTC"),
-                id="memory_grader",
-                replace_existing=True,
-            )
-            # Daily P&L note: just after the US close (20:10 UTC during
-            # DST; harmlessly mid-evening in winter). One read of
+            # Daily P&L note: just after the US close, in the same NYSE
+            # wall-clock time across DST. One read of
             # runner.db + one Telegram message — negligible load.
             self._scheduler.add_job(
                 self._run_daily_summary_async,
-                CronTrigger(day_of_week="mon-fri", hour=20, minute=10, timezone="UTC"),
+                CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone="America/New_York"),
                 id="daily_summary",
-                replace_existing=True,
-            )
-            # Market watch collector: daily 20:20 UTC (post-close) —
-            # yield curve, VIX term structure, breadth, risk ratios.
-            # Feeds the dashboard's Macro tab; history is bounded.
-            self._scheduler.add_job(
-                self._run_market_watch_async,
-                CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone="UTC"),
-                id="market_watch",
                 replace_existing=True,
             )
             # Macro financial-conditions monitor: daily 13:30 UTC
@@ -808,45 +963,49 @@ class Runner:
                 replace_existing=True,
             )
 
+        self._register_core_background_jobs()
+
         self._scheduler.start()
-        self.alerts.info(self._format_runner_started_message())
-        logger.bind(component="runner").info(
-            f"scheduler started — next run: {self._scheduler.get_job('cycle').next_run_time}"
-        )
-        # Inventory every registered job. Several are conditional on env
-        # flags or on parsing the cron, and until now the only way to know
-        # whether one had actually armed was to wait and see whether it
-        # ever fired. One line at startup answers it instead.
-        for _job in sorted(self._scheduler.get_jobs(), key=lambda j: j.id):
-            logger.bind(component="runner").info(f"  job {_job.id:<18} next={_job.next_run_time}")
-
-        # APScheduler does not replay missed cron slots on restart.  The
-        # market-watch collector is safe to replay (same-day writes replace
-        # rather than append), so a restart after its post-close slot should
-        # repair the dashboard's missing reading immediately.
-        self._start_startup_market_watch_catchup()
-
-        # Startup reconciliation. Today (May 2026) we shipped a bug where
-        # broker.get_account silently returned a zero-position snapshot on
-        # IBKR timeout, and three cycles stacked to 3x target. The cycle
-        # itself now fails-closed on that path, but a sibling failure
-        # mode is: container restarts mid-cycle, local order_store is
-        # empty, broker still holds positions, next cycle thinks book is
-        # flat and re-buys. We can't *fix* that automatically (the
-        # safest thing is to make the operator notice + decide), but we
-        # CAN make the drift loud at startup so they intervene.
         try:
-            await asyncio.to_thread(self._reconcile_startup)
-        except Exception:
-            logger.bind(component="runner").exception("startup reconciliation failed")
+            self.alerts.info(self._format_runner_started_message())
+            logger.bind(component="runner").info(
+                f"scheduler started — next run: {self._scheduler.get_job('cycle').next_run_time}"
+            )
+            # Inventory every registered job. Several are conditional on env
+            # flags or on parsing the cron, and until now the only way to know
+            # whether one had actually armed was to wait and see whether it
+            # ever fired. One line at startup answers it instead.
+            for _job in sorted(self._scheduler.get_jobs(), key=lambda j: j.id):
+                logger.bind(component="runner").info(
+                    f"  job {_job.id:<18} next={_job.next_run_time}"
+                )
 
-        # Park until cancelled.
-        stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            with contextlib.suppress(NotImplementedError):  # Windows / restricted env
-                loop.add_signal_handler(sig, stop_event.set)
-        try:
+            # APScheduler does not replay missed cron slots on restart.  The
+            # market-watch collector is safe to replay (same-day writes replace
+            # rather than append), so a restart after its post-close slot should
+            # repair the dashboard's missing reading immediately.
+            self._start_startup_market_watch_catchup()
+
+            # Startup reconciliation. Today (May 2026) we shipped a bug where
+            # broker.get_account silently returned a zero-position snapshot on
+            # IBKR timeout, and three cycles stacked to 3x target. The cycle
+            # itself now fails-closed on that path, but a sibling failure
+            # mode is: container restarts mid-cycle, local order_store is
+            # empty, broker still holds positions, next cycle thinks book is
+            # flat and re-buys. We can't *fix* that automatically (the
+            # safest thing is to make the operator notice + decide), but we
+            # CAN make the drift loud at startup so they intervene.
+            try:
+                await asyncio.to_thread(self._reconcile_startup)
+            except Exception:
+                logger.bind(component="runner").exception("startup reconciliation failed")
+
+            # Park until cancelled.
+            stop_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                with contextlib.suppress(NotImplementedError):  # Windows / restricted env
+                    loop.add_signal_handler(sig, stop_event.set)
             await stop_event.wait()
         finally:
             await self._shutdown()
@@ -1158,7 +1317,21 @@ class Runner:
         the last working call). Snapshot-refresh ALSO touches
         heartbeat.json so /status reflects "broker alive" between
         cycles, not just at end-of-cycle.
+
+        Before reading that cached account state, an IBKR broker also gets a
+        bounded, read-only ``reqCurrentTime`` probe. It is recorded in a
+        separate artifact because a fresh account subscription and open TCP
+        socket do not prove Gateway still has an authenticated IBKR session.
+        The probe never reconnects or restarts Gateway; it makes a 2FA/login
+        outage visible to the ops watchdog instead of hiding it.
         """
+        try:
+            from trading.runtime.broker_liveness import record_broker_liveness
+
+            await asyncio.to_thread(record_broker_liveness, self.broker, settings.state_dir)
+        except Exception:
+            logger.bind(component="broker_liveness").exception("broker API liveness record failed")
+
         try:
             snap = self.broker.get_account()
         except Exception as e:
@@ -1281,13 +1454,25 @@ class Runner:
             logger.bind(component="options_monitor").exception("options monitor poll failed")
 
     async def _run_market_watch_async(self) -> None:
-        """Daily macro instrument panel refresh. Failures swallowed."""
-        try:
-            from trading.runtime.market_watch import collect
+        """Daily macro instrument panel refresh. Failures are swallowed.
 
-            await asyncio.to_thread(collect, settings.state_dir, settings.data_dir)
-        except Exception:
-            logger.bind(component="market_watch").exception("market watch failed")
+        A startup catch-up can race the regular cron job by a few seconds;
+        skip the duplicate rather than launching a second network batch.
+        """
+        lock = getattr(self, "_market_watch_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._market_watch_lock = lock
+        if lock.locked():
+            logger.bind(component="market_watch").info("market watch already in flight; skipping")
+            return
+        async with lock:
+            try:
+                from trading.runtime.market_watch import collect
+
+                await asyncio.to_thread(collect, settings.state_dir, settings.data_dir)
+            except Exception:
+                logger.bind(component="market_watch").exception("market watch failed")
 
     def _start_startup_market_watch_catchup(self) -> None:
         """Start a missed post-close collection without delaying trading."""
@@ -1403,7 +1588,7 @@ class Runner:
             logger.bind(component="agent_pm").exception("agent PM mark failed")
 
     async def _run_ops_watch_async(self) -> None:
-        """Hourly infra health check — silence means healthy."""
+        """Five-minute infra health check — silence means healthy."""
         try:
             from trading.runtime.ops_watch import run_ops_watch
 
@@ -1559,6 +1744,9 @@ class Runner:
             graded, skipped = counts["graded"], counts["skipped"]
             unpriced = list(counts.get("unpriced_subjects", []))
             awaiting_next_daily_bar = list(counts.get("awaiting_next_daily_bar_subjects", []))
+            awaiting_next_daily_bar_ids = list(
+                counts.get("awaiting_next_daily_bar_prediction_ids", [])
+            )
             cache_behind = list(counts.get("cache_behind_subjects", []))
             grading_failed = list(counts.get("failed_subjects", []))
             shadow_legs = self._grade_shadow(mem)
@@ -1585,6 +1773,7 @@ class Runner:
                     "ungraded_today": skipped,
                     "unpriced_subjects": unpriced,
                     "awaiting_next_daily_bar_subjects": awaiting_next_daily_bar,
+                    "awaiting_next_daily_bar_prediction_ids": awaiting_next_daily_bar_ids,
                     "cache_behind_subjects": cache_behind,
                     "grading_failed_subjects": grading_failed,
                     "shadow_legs_graded": shadow_legs,
@@ -1803,7 +1992,11 @@ class Runner:
         benchmark cannot be computed is left ungraded rather than graded
         against nothing, and picked up on a later pass.
         """
-        from trading.runtime.portfolio_stats import _read_close, close_at, covers
+        from trading.runtime.portfolio_stats import (
+            _read_close,
+            completed_session_close,
+            coverage_status,
+        )
 
         bench_symbol = "SPY"
         bench = _read_close(settings.data_dir, bench_symbol)
@@ -1824,14 +2017,15 @@ class Runner:
             rather than broken, for every leg, since it was built.
             """
             try:
-                base = close_at(series, ts0)
-                end = close_at(series, ts0 + timedelta(days=leg_days))
+                due = ts0 + timedelta(days=leg_days)
+                base = completed_session_close(series, ts0)
+                end = completed_session_close(series, due)
                 if not base or end is None:
                     return None
-                # close_at returns the last bar AT OR BEFORE the date, so
-                # an immature leg would silently score ~0 rather than
-                # waiting. Require the window to have actually elapsed.
-                if not covers(series, ts0 + timedelta(days=leg_days)):
+                # A midnight-labelled daily bar can otherwise appear before
+                # its session has actually finished.  Require the next bar
+                # after the end session before permanently scoring a leg.
+                if coverage_status(series, due, asof=datetime.now(tz=timezone.utc)) != "covered":
                     return None
                 return end / base - 1.0
             except Exception:

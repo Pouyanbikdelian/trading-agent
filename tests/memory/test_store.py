@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -268,6 +269,48 @@ def test_historian_dossier_retrieves_measured_history_and_related_retirements(
     assert dossier["scorecard"]["recent_outcomes"][0]["id"] == pid
     assert dossier["related_retired_lessons"][0]["id"] == retired
     assert active in {row["id"] for row in mem.lessons(status="candidate")}
+
+
+def test_historian_dossier_separates_current_session_pending_predictions(
+    mem: MemoryStore,
+) -> None:
+    """A valid weekend wait is not evidence that scorecard calibration failed."""
+    prediction_id = mem.add_prediction(
+        agent="quant",
+        subject="SPY",
+        direction="up",
+        horizon_days=14,
+        confidence=0.7,
+        statement="weekend timing test",
+    )
+    made = datetime(2026, 8, 21, 12, tzinfo=timezone.utc)
+    due = datetime(2026, 9, 4, 12, tzinfo=timezone.utc)
+    mem.conn.execute(
+        "UPDATE predictions SET ts = ?, due_ts = ? WHERE id = ?",
+        (made.timestamp(), due.timestamp(), prediction_id),
+    )
+    # Labor Day makes this a >48-hour wait, which must remain pending until
+    # Tuesday's actual session has settled.
+    journal_at = datetime(2026, 9, 4, 22, 30, tzinfo=timezone.utc)
+    mem.conn.execute(
+        "INSERT INTO journal (ts, kind, actor, payload) VALUES (?, 'daily', 'memory', ?)",
+        (
+            journal_at.timestamp(),
+            json.dumps({"awaiting_next_daily_bar_prediction_ids": [prediction_id]}),
+        ),
+    )
+
+    pending = mem.historian_dossier(
+        focus_statements=[], asof=datetime(2026, 9, 7, 19, tzinfo=timezone.utc)
+    )["scorecard"]
+    expired = mem.historian_dossier(
+        focus_statements=[], asof=datetime(2026, 9, 8, 23, 1, tzinfo=timezone.utc)
+    )["scorecard"]
+
+    assert pending["overdue_ungraded"] == 0
+    assert pending["session_pending_ungraded"] == 1
+    assert expired["overdue_ungraded"] == 1
+    assert expired["session_pending_ungraded"] == 0
 
 
 def test_scorecard_backfill_targets_group_blocked_subjects(mem: MemoryStore) -> None:

@@ -191,7 +191,12 @@ def format_funding_alert(result: dict[str, Any], *, minutes_to_cycle: int) -> st
 UNHELD_ACK_FILENAME = "unheld_ack.json"
 
 
-def check_unheld_positions(broker: Any, *, state_dir: Path | str) -> dict[str, Any]:
+def check_unheld_positions(
+    broker: Any,
+    *,
+    state_dir: Path | str,
+    require_reachable: bool = False,
+) -> dict[str, Any]:
     """Which positions in this account is nothing protecting?
 
     Two independent subsystems can sell a position the operator opened by
@@ -211,18 +216,42 @@ def check_unheld_positions(broker: Any, *, state_dir: Path | str) -> dict[str, A
     this account that neither ``holds.json`` nor an acknowledgement
     covers".
 
-    Never raises; an unreachable broker degrades to ``ok=True`` with a
-    reason, because a check that blocks startup on a network blip is a
-    check that gets removed.
+    Never raises. By default, an unreachable broker degrades to ``ok=True``
+    with a reason, because a general-purpose check that blocks startup on a
+    network blip is a check that gets removed. A startup bootstrap can pass
+    ``require_reachable=True`` instead: it receives ``ok=False`` and
+    ``reachable=False`` until positions have actually been read, so no
+    execution scheduler has to start on an unverified book.
     """
     from trading.runner.holds import load_holds
 
     state_dir = Path(state_dir)
-    out: dict[str, Any] = {"ok": True, "unheld": [], "held": [], "reason": "ok"}
+    out: dict[str, Any] = {
+        "ok": True,
+        "reachable": True,
+        "unheld": [],
+        "held": [],
+        "reason": "ok",
+    }
+    # IBKR exposes a deliberately non-recovering request for live bootstrap
+    # (``get_positions_strict``).  Use it only for the opt-in strict path:
+    # the normal pre-cycle/CLI checks retain their established self-healing
+    # ``get_positions`` behaviour, while a startup failure cannot restart
+    # Gateway behind the operator's back.  Other Broker implementations do
+    # not have to grow this optional method; their existing read remains the
+    # compatibility fallback.
+    positions_reader = getattr(broker, "get_positions_strict", None) if require_reachable else None
+    if not callable(positions_reader):
+        positions_reader = broker.get_positions
     try:
-        positions = broker.get_positions() or []
+        positions = positions_reader() or []
     except Exception as e:
-        return {**out, "reason": f"skipped: positions unavailable ({type(e).__name__})"}
+        return {
+            **out,
+            "ok": not require_reachable,
+            "reachable": False,
+            "reason": f"skipped: positions unavailable ({type(e).__name__})",
+        }
 
     symbols = {
         str(p.instrument.symbol).upper()

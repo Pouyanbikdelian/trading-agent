@@ -811,7 +811,6 @@ def _live_run(
     from trading.execution.ibkr import IbkrBroker
 
     broker = IbkrBroker()
-    broker.connect()
     cfg = _build_runner_config(
         universe=universe,
         strategies=strategy,

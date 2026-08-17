@@ -90,7 +90,65 @@ def test_an_unreachable_broker_does_not_block_startup(tmp_path) -> None:
     """A gate that fires on a network blip is a gate that gets removed."""
     result = check_unheld_positions(_Broker(exc=ConnectionError("no gateway")), state_dir=tmp_path)
     assert result["ok"]
+    assert result["reachable"] is False
     assert "skipped" in result["reason"]
+
+
+def test_strict_preflight_requires_a_real_position_read(tmp_path) -> None:
+    """The live bootstrap must not schedule execution on an unknown book."""
+    result = check_unheld_positions(
+        _Broker(exc=ConnectionError("no gateway")),
+        state_dir=tmp_path,
+        require_reachable=True,
+    )
+
+    assert result["ok"] is False
+    assert result["reachable"] is False
+    assert result["unheld"] == []
+
+
+def test_strict_preflight_prefers_the_nonrecovering_position_reader(tmp_path) -> None:
+    """IBKR bootstrap must not route its read through auto-recovery."""
+
+    class _StrictBroker:
+        def __init__(self) -> None:
+            self.strict_calls = 0
+            self.normal_calls = 0
+
+        def get_positions(self):
+            self.normal_calls += 1
+            raise AssertionError("strict bootstrap must not use the normal reader")
+
+        def get_positions_strict(self):
+            self.strict_calls += 1
+            return [_pos("VST")]
+
+    broker = _StrictBroker()
+    result = check_unheld_positions(broker, state_dir=tmp_path, require_reachable=True)
+
+    assert result["reachable"] is True
+    assert result["unheld"] == ["VST"]
+    assert broker.strict_calls == 1
+    assert broker.normal_calls == 0
+
+
+def test_default_preflight_keeps_the_legacy_position_reader(tmp_path) -> None:
+    """The nonrecovering reader is opt-in rather than a behavior change."""
+
+    class _BrokerWithStrict(_Broker):
+        def __init__(self) -> None:
+            super().__init__(_pos("VST"))
+            self.strict_calls = 0
+
+        def get_positions_strict(self):
+            self.strict_calls += 1
+            raise AssertionError("legacy preflight should not use the strict reader")
+
+    broker = _BrokerWithStrict()
+    result = check_unheld_positions(broker, state_dir=tmp_path)
+
+    assert result["unheld"] == ["VST"]
+    assert broker.strict_calls == 0
 
 
 def test_empty_account_is_fine(tmp_path) -> None:
