@@ -116,6 +116,7 @@ HELP_TEXT = (
     "*Safety*\n"
     "/halt \\[reason] — refuse new exposure; explicit close/flatten remains reduce-only\n"
     "/resume — clear halt, reset failure counter\n"
+    "/baseline \\[reset] — show or re-stamp the kill-switch high-water mark\n"
     "/reconnect — bounce the broker connection\n"
     "/gateway stop|start|status — release your IBKR session so you can trade by hand in TWS or mobile; stop also halts\n"
 )
@@ -969,6 +970,124 @@ def _execution_halt_state() -> tuple[bool, str]:
         return bool(payload.get("halted", False)), str(payload.get("reason", ""))
     except Exception:
         return True, "halt state unreadable — review only until repaired"
+
+
+def _latest_account_snapshot():
+    """The runner's newest broker snapshot, or None if unavailable."""
+    try:
+        from trading.runner.state import RunnerStore
+
+        return RunnerStore(settings.state_dir / "runner.db").latest_snapshot()
+    except Exception:
+        logger.bind(component="bot").exception("could not read the latest account snapshot")
+        return None
+
+
+def _cmd_baseline(args: list[str]) -> str:
+    """``/baseline`` — show the kill-switch reference points.
+
+    ``/baseline reset`` re-stamps them to the account as it stands now.
+
+    This exists because ``equity_high_watermark`` only ratchets upward.
+    With a tight ``MAX_DRAWDOWN_PCT`` that turns the drawdown switch into
+    a one-way trapdoor: below the threshold, every check halts, ``/resume``
+    re-halts within the minute, and the documented escape — a new equity
+    high — is unreachable while the book may only be reduced. Accepting a
+    drawdown has to be something an operator can *say*, once, on purpose.
+    """
+    from trading.risk.halt_file import (
+        BaselineResetError,
+        read_halt_state,
+        reset_equity_baseline,
+    )
+
+    state = read_halt_state(settings.state_dir)
+    snap = _latest_account_snapshot()
+    equity = float(getattr(snap, "equity", 0.0) or 0.0) if snap is not None else 0.0
+    ccy = str(getattr(snap, "base_currency", "") or "").upper() if snap is not None else ""
+
+    def _describe() -> list[str]:
+        lines = [
+            "📐 *Kill-switch baselines*",
+            f"high-water mark: `{state.equity_high_watermark:,.2f}`",
+            f"daily open: `{state.daily_equity_open:,.2f}`",
+        ]
+        if state.daily_baseline_session:
+            lines.append(
+                f"daily open captured: `{state.daily_baseline_session}` "
+                f"({state.daily_baseline_source}, {state.daily_baseline_currency})"
+            )
+        else:
+            lines.append("daily open captured: _no verified NYSE-open capture yet_")
+        if equity > 0:
+            lines.append(f"live equity: `{equity:,.2f} {ccy}`")
+            if state.equity_high_watermark > 0:
+                dd = (equity - state.equity_high_watermark) / state.equity_high_watermark
+                lines.append(f"drawdown vs peak: `{dd:+.2%}`")
+            if state.daily_equity_open > 0:
+                day = (equity - state.daily_equity_open) / state.daily_equity_open
+                lines.append(f"day P&L vs stored open: `{day:+.2%}`")
+        else:
+            lines.append("live equity: _no recent snapshot_")
+        return lines
+
+    if not args:
+        return "\n".join(
+            [
+                *_describe(),
+                "",
+                "_`/baseline reset` re-stamps both to live equity. It does NOT clear a "
+                "halt — you still `/resume` afterwards._",
+            ]
+        )
+
+    if args[0].lower() != "reset":
+        return registry.usage_for("/baseline") + " — show or re-stamp the kill-switch baselines"
+
+    if snap is None or equity <= 0 or not ccy:
+        return (
+            "❌ no usable account snapshot, so nothing was reset.\n"
+            "_The runner writes one every 60s; check `/health` and the gateway first._"
+        )
+
+    reason = " ".join(args[1:]).strip() or "operator accepted the drawdown"
+    try:
+        before, after = reset_equity_baseline(
+            settings.state_dir,
+            equity=equity,
+            currency=ccy,
+            observed_at=snap.ts,
+            reason=reason,
+            actor="telegram",
+        )
+    except BaselineResetError as e:
+        return f"❌ baseline reset refused — {e}"
+    except Exception as e:
+        logger.bind(component="bot").exception("baseline reset failed")
+        return f"❌ baseline reset failed: `{type(e).__name__}: {e}`"
+
+    lines = [
+        "📐 *BASELINE RESET*",
+        f"reason: `{reason}`",
+        f"high-water mark: `{before.equity_high_watermark:,.2f}` → `{equity:,.2f} {ccy}`",
+        f"daily open: `{before.daily_equity_open:,.2f}` → `{equity:,.2f} {ccy}`",
+        "",
+        "Recorded in `state/baseline_resets.jsonl`.",
+    ]
+    if after.halted:
+        lines.append(
+            f"⚠️ *still halted* (`{after.reason}`) — this only moves the reference "
+            "points. `/resume` to trade again; the next `/cycle` is then a normal "
+            "cycle with buys, not a reduce-only one."
+        )
+    else:
+        lines.append("_Not halted. Both switches now measure from here._")
+    if after.daily_baseline_session is None:
+        lines.append(
+            "_Note: the NYSE is closed today, so only the high-water mark could be "
+            "anchored. Cycles stay reduce-only until the next session opens._"
+        )
+    return "\n".join(lines)
 
 
 def _cmd_resume() -> str:
@@ -2923,6 +3042,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_pm(args)
     if cmd == "/resume":
         return _cmd_resume()
+    if cmd == "/baseline":
+        return _cmd_baseline(args)
     # --- cycle approval (only meaningful when REQUIRE_CYCLE_APPROVAL=true) ---
     if cmd == "/approve":
         return _cmd_approve(args)

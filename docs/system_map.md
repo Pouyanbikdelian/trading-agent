@@ -195,6 +195,28 @@ The risk manager itself **never auto-unhalts**. By design — an
 automatic recovery on a partially-understood failure is how money
 disappears.
 
+## `/baseline` — the drawdown switch's acknowledgement path
+
+`equity_high_watermark` only ratchets upward; nothing lowers it. With a
+tight `MAX_DRAWDOWN_PCT` that made the drawdown switch a **one-way
+trapdoor**: once equity is far enough under the peak, every evaluation
+halts, `/resume` re-halts on the next 60-second tick, and the only
+documented escape — a new equity high — is unreachable, because a halted
+book may only be reduced. That is a lockout, not a risk control.
+
+`/baseline` shows the reference points. `/baseline reset [reason]`
+re-stamps the high-water mark and the daily open to live equity. It is
+deliberately manual, deliberately separate from `/resume` (accepting a
+loss and restarting trading are two judgements), refuses a stale or
+wrong-currency snapshot, and appends to `state/baseline_resets.jsonl`.
+The daily baseline it writes is marked `operator_reset:<actor>` so it is
+never mistaken for an opening-bell capture.
+
+The intended sequence after a breach is therefore: look at the loss →
+`/cycle` to see what the desk would do about it (reduce-only) →
+`/baseline reset` to accept the new starting point → `/resume` → a normal
+cycle with buys.
+
 ## The strategy that's actually shipping
 
 Default config (in `.env.example`):

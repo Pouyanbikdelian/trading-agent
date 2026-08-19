@@ -211,6 +211,12 @@ REGISTRY: tuple[Spec, ...] = (
     ),
     # --- safety
     Spec(
+        "/baseline",
+        "show or re-stamp the kill-switch high-water mark",
+        usage="/baseline [reset [reason]]",
+        example="/baseline reset accepted the August drawdown",
+    ),
+    Spec(
         "/halt",
         "refuse new exposure; explicit reduce-only exits remain available",
         usage="/halt [reason]",

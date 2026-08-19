@@ -101,6 +101,28 @@ re-halted, which looked to the operator like a broken bot.
 4. **Never let a model's prose be the record of what was executed.** Cap
    the numbers first, then describe what actually happened.
 
+### The follow-on finding: the drawdown switch was a one-way trapdoor
+
+Making the risk check continuous exposed a second, older defect. The
+daily-loss baseline resets at each open, so that switch clears itself.
+`equity_high_watermark` does not — it only ever ratchets up, and nothing
+in the codebase lowered it. With `MAX_DRAWDOWN_PCT=0.02`, an account 2%
+under its peak halts on **every** evaluation, `/resume` re-halts within
+the minute, and the only escape the design offered — a new equity high —
+is unreachable, because a halted book may only be reduced.
+
+That is why `/resume` → `/cycle` kept failing. Weekly evaluation had been
+hiding it; minute-level evaluation made it a wall.
+
+Fixed by `reset_equity_baseline` / the `/baseline` command: an explicit,
+operator-typed, audited re-stamp of both reference points to live equity.
+It refuses a stale or wrong-currency snapshot, never clears the halt, and
+records `operator_reset:<actor>` as the baseline source so it can never
+be confused with an opening-bell capture. **Lesson 5: a limit with no
+acknowledgement path is not a risk control, it is a lockout — and the
+bug hid for months because the switch was only ever evaluated once a
+week.**
+
 **Operator note.** After this deploy the runner must be up during the
 NYSE open (13:30 UTC) to capture a trusted daily baseline. Restart it
 mid-session and cycles stay review/reduce-only until the next open —

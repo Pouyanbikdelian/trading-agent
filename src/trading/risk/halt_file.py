@@ -37,6 +37,7 @@ separate way to exit — and it, unlike a halt, is meant to be irreversible.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -161,3 +162,130 @@ def describe_exposure(state_dir: Path | str) -> str:
         "Positions are unchanged and still fully exposed. Guards are OFF, so "
         "*nothing* will reduce this book while halted. `/flatten` to exit."
     )
+
+
+class BaselineResetError(Exception):
+    """The operator's reset could not be proven safe, so nothing was written."""
+
+
+def reset_equity_baseline(
+    state_dir: Path | str,
+    *,
+    equity: float,
+    currency: str,
+    observed_at: datetime,
+    reason: str,
+    actor: str,
+    max_snapshot_age_s: float = 900.0,
+    now: datetime | None = None,
+) -> tuple[HaltState, HaltState]:
+    """Re-stamp the kill-switch baselines to the account as it is today.
+
+    **Why this has to exist.** ``equity_high_watermark`` only ever ratchets
+    up; nothing in the system lowers it. With a tight
+    ``MAX_DRAWDOWN_PCT`` that makes the drawdown switch a one-way
+    trapdoor: once the account is far enough below its peak, every
+    evaluation halts, ``/resume`` re-halts on the next tick, and the only
+    documented escape — a new equity high — is unreachable because a
+    halted book can only be reduced. A limit with no acknowledgement path
+    is not a risk control, it is a lockout.
+
+    So the escape is explicit, operator-typed, loud and recorded. It is
+    deliberately NOT automatic and deliberately NOT part of ``/resume``:
+    accepting a drawdown is a decision, and a decision needs a name on it.
+
+    This never clears a halt. After resetting you still have to
+    ``/resume`` — two separate acts, because "I accept this loss" and
+    "start trading again" are two separate judgements.
+
+    Refuses (raising :class:`BaselineResetError`, writing nothing) on a
+    non-positive equity, a missing currency, a currency that disagrees
+    with the stored baseline, or a snapshot too old to describe the
+    account now. Returns ``(before, after)`` so the caller can show the
+    operator exactly what changed.
+    """
+    if equity <= 0:
+        raise BaselineResetError("account equity is not positive; nothing was reset")
+    normalized_currency = str(currency or "").strip().upper()
+    if not normalized_currency:
+        raise BaselineResetError("account currency is unknown; nothing was reset")
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise BaselineResetError("account snapshot has no timezone; nothing was reset")
+
+    moment = now or datetime.now(tz=timezone.utc)
+    age_s = (moment - observed_at).total_seconds()
+    if age_s > max_snapshot_age_s:
+        raise BaselineResetError(
+            f"the newest account snapshot is {age_s / 60:.0f} min old — too stale to "
+            "re-stamp a baseline against. Check the runner and the gateway first."
+        )
+
+    # Anchor to the NYSE session the operator is actually looking at. Off
+    # a session day there is nothing to anchor to and the daily-loss switch
+    # legitimately has no reference; the high-water reset below still
+    # lands, which is the half that matters for a drawdown lockout.
+    from trading.runtime.nyse_session import current_nyse_session_label
+
+    session_label = current_nyse_session_label(observed_at)
+
+    path = halt_path(state_dir)
+    with file_lock(path):
+        before = _read_halt_state_unlocked(path)
+        stored_currency = str(before.daily_baseline_currency or "").strip().upper()
+        if stored_currency and stored_currency != normalized_currency:
+            raise BaselineResetError(
+                f"stored baseline is in {stored_currency} but the account reports "
+                f"{normalized_currency}; resolve that before resetting"
+            )
+        # The provenance fields exist to stop an *accidental* mid-session
+        # baseline — a restart at noon relabelling a loss as a new day.
+        # This is the opposite case: the operator looked at the loss and
+        # said "measure from here". So the baseline is stamped as
+        # trusted, with ``source`` recording that a human did it rather
+        # than the opening bell. Refusing to stamp it would be the safer-
+        # looking choice and the wrong one: it would leave every cycle
+        # reduce-only until the next open, which is the lockout this
+        # command exists to end.
+        after = before.replace(
+            equity_high_watermark=equity,
+            daily_equity_open=equity,
+            last_day=session_label,
+            daily_baseline_session=session_label,
+            daily_baseline_captured_at=observed_at,
+            daily_baseline_source=f"operator_reset:{actor}",
+            daily_baseline_currency=normalized_currency,
+        )
+        _write_halt_state_unlocked(path, after)
+
+    record = {
+        "ts": moment.isoformat(),
+        "actor": actor,
+        "reason": reason,
+        "currency": normalized_currency,
+        "snapshot_ts": observed_at.isoformat(),
+        "snapshot_age_s": round(age_s, 1),
+        "equity": equity,
+        "previous_high_watermark": before.equity_high_watermark,
+        "previous_daily_open": before.daily_equity_open,
+        "still_halted": after.halted,
+        "session_label": session_label.isoformat() if session_label else None,
+    }
+    try:
+        audit = Path(state_dir) / "baseline_resets.jsonl"
+        audit.parent.mkdir(parents=True, exist_ok=True)
+        with audit.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as e:
+        # The write already happened; losing the audit line must not be
+        # silent, but re-raising here would misreport the state on disk.
+        logger.bind(component="halt_file").error(f"baseline reset audit write failed: {e!r}")
+
+    logger.bind(component="halt_file").warning(
+        f"BASELINE RESET by {actor}: high-water {before.equity_high_watermark:,.2f} → "
+        f"{equity:,.2f} {normalized_currency}, daily open "
+        f"{before.daily_equity_open:,.2f} → {equity:,.2f} (reason: {reason!r}); "
+        f"halt state untouched (halted={after.halted})"
+    )
+    return before, after
