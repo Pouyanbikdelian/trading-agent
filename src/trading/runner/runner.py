@@ -1695,7 +1695,26 @@ class Runner:
                 import json as _json
 
                 book = _json.loads((settings.state_dir / "agent_pm" / "portfolio.json").read_text())
-            self.alerts.info(format_pm_digest(result, book))
+            # Hand the digest the live account so its weights arrive with
+            # an approximate CHF size attached. Without this the card is
+            # still true, it just says less — which is why the lookup is
+            # allowed to fail quietly.
+            account: dict[str, Any] | None = None
+            try:
+                from trading.runner.state import RunnerStore
+
+                snap = RunnerStore(settings.state_dir / "runner.db").latest_snapshot()
+                if snap is not None and float(getattr(snap, "equity", 0.0) or 0.0) > 0:
+                    account = {
+                        "equity": float(snap.equity),
+                        "currency": str(getattr(snap, "base_currency", "") or "USD"),
+                        "sleeve_pct": float(settings.agent_pm_sleeve_pct or 0.0),
+                    }
+            except Exception:
+                logger.bind(component="agent_pm").warning(
+                    "no account snapshot for the PM digest translation"
+                )
+            self.alerts.info(format_pm_digest(result, book, account=account))
         except Exception:
             logger.bind(component="agent_pm").exception("agent PM run failed")
 

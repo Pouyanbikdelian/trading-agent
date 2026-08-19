@@ -596,17 +596,52 @@ def test_llm_failure_is_reported_not_raised(mem: MemoryStore, tmp_path: Path) ->
 def test_digest_renders(mem: MemoryStore, tmp_path: Path) -> None:
     res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
     text = format_pm_digest(res)
-    assert "Agent PM" in text and "`SMH` 25%" in text and len(text) < 2000
+    assert "Agent PM" in text and "SMH" in text and "25.0%" in text and len(text) < 2000
 
 
-def test_digest_names_the_book_and_currency(mem: MemoryStore, tmp_path: Path) -> None:
-    """The sim posts USD into the same chat as a CHF-reporting real
-    account. An unlabelled equity figure reads as the other book."""
+def test_digest_quotes_no_paper_money(mem: MemoryStore, tmp_path: Path) -> None:
+    """The sim book is seeded at $1m; the real account holds CHF 84k.
+
+    Printing "285.5 sh · $54.2k" next to a franc balance gave every
+    figure on the card a plausible-looking size that nobody could act
+    on. The PM's output is a set of weights — the card shows those, and
+    says where the real sizes come from (2026-08-19).
+    """
     res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
+
     text = format_pm_digest(res)
-    assert "simulated" in text.lower()
-    assert "USD" in text
-    assert "not the trading account" in text
+
+    assert "$" not in text
+    assert " sh" not in text
+    assert "1,000,000" not in text and "1.0M" not in text
+    assert "not an IBKR order ticket" in text
+    assert "`/cycle`" in text  # names the authority for real sizes
+
+
+def test_digest_translates_into_the_operators_own_money_when_told(
+    mem: MemoryStore, tmp_path: Path
+) -> None:
+    """Weights alone are true but hard to act on; this is the bridge."""
+    res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
+
+    text = format_pm_digest(
+        res, account={"equity": 84_320.0, "currency": "CHF", "sleeve_pct": 0.11}
+    )
+
+    assert "In your account" in text
+    assert "CHF" in text
+    # 84,320 * 0.11 * 0.25 ~= 2,319 for the single 25% name.
+    assert "2,319" in text
+    # An estimate, and it says so: the cap, holds and FX only cut it.
+    assert "before caps and holds" in text
+
+
+def test_digest_invents_no_translation_without_a_sleeve(mem: MemoryStore, tmp_path: Path) -> None:
+    res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
+
+    text = format_pm_digest(res, account={"equity": 84_320.0, "currency": "CHF", "sleeve_pct": 0.0})
+
+    assert "In your account" not in text
 
 
 def test_digest_leads_with_what_changed(mem: MemoryStore, tmp_path: Path) -> None:
@@ -617,15 +652,21 @@ def test_digest_leads_with_what_changed(mem: MemoryStore, tmp_path: Path) -> Non
     assert "Changed:" in text and "exited" in text and "opened" in text
 
 
-def test_digest_embeds_the_book_with_units(mem: MemoryStore, tmp_path: Path) -> None:
-    """One message per event: the digest carries the resulting holdings so
-    a second share-count-only message is not needed."""
+def test_digest_shows_the_target_and_the_cash_it_implies(mem: MemoryStore, tmp_path: Path) -> None:
+    """One message per event, carrying the decision itself.
+
+    It used to embed the sim book's share counts. Those described a
+    portfolio that does not exist; the weight and the residual cash are
+    what the PM actually decided.
+    """
     res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SMH": 0.25}), prices=PRICES)
     book = json.loads((tmp_path / "agent_pm" / "portfolio.json").read_text())
+
     text = format_pm_digest(res, book)
-    assert "Book now:" in text
-    assert "sh ·" in text  # share count carries its unit
-    assert "cash" in text
+
+    assert "Target weights:" in text
+    assert "25.0%" in text
+    assert "cash" in text and "75.0%" in text
 
 
 def test_rebalance_persists_marks(mem: MemoryStore, tmp_path: Path) -> None:
@@ -706,3 +747,74 @@ def test_news_load_drops_stale(tmp_path: Path) -> None:
     assert load(tmp_path)["headlines"]
     p.write_text(json.dumps({"t": stale, "headlines": [{"title": "x"}]}))
     assert load(tmp_path) == {}
+
+
+class TestTheCardShowsOnlyThingsThatAreTrue:
+    """The sim book is internal state, not a portfolio to display.
+
+    Reported 2026-08-19: `/pm` printed "285.5 sh · $54.2k · 5.0%" for a
+    $1.08m paper book while the real account held CHF 84,320. Every
+    figure looked like a position size and none of them were one. The
+    engine is unchanged — the book still marks and scores itself in
+    dollars, because that is how its track record is computed — but the
+    operator now sees weights, and one clearly-labelled estimate in his
+    own currency.
+    """
+
+    def test_target_book_renders_weights_and_the_residual_cash(self) -> None:
+        from trading.agents.pm import format_target_book
+
+        lines = format_target_book({"GLD": 0.20, "ITA": 0.10})
+
+        assert lines == ["  `GLD  ` 20.0%", "  `ITA  ` 10.0%", "  `cash ` 70.0%"]
+
+    def test_an_empty_target_says_all_cash(self) -> None:
+        from trading.agents.pm import format_target_book
+
+        assert format_target_book({}) == ["  _all cash_"]
+
+    def test_the_translation_is_the_sleeve_share_of_real_equity(self) -> None:
+        from trading.agents.pm import format_account_translation
+
+        lines = format_account_translation(
+            {"GLD": 0.20, "ITA": 0.10},
+            equity=84_320.0,
+            currency="chf",
+            sleeve_pct=0.11,
+        )
+
+        text = "\n".join(lines)
+        assert "CHF" in text
+        # 84,320 * 0.11 * 0.30 gross ~= 2,783
+        assert "2,783" in text
+        # 84,320 * 0.11 * 0.20 ~= 1,855 for the largest name
+        assert "1,855" in text
+
+    def test_the_translation_calls_itself_an_upper_bound(self) -> None:
+        """The cap, holds, exclusions and FX can only cut these figures.
+
+        A number here that `/cycle` then contradicts is the same lie in a
+        different currency.
+        """
+        from trading.agents.pm import format_account_translation
+
+        text = "\n".join(
+            format_account_translation(
+                {"GLD": 0.20}, equity=84_320.0, currency="CHF", sleeve_pct=0.11
+            )
+        )
+
+        assert "before caps and holds" in text
+        assert "≈" in text
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"equity": 0.0, "currency": "CHF", "sleeve_pct": 0.11},
+            {"equity": 84_320.0, "currency": "CHF", "sleeve_pct": 0.0},
+        ],
+    )
+    def test_nothing_is_invented_when_the_inputs_are_missing(self, kwargs) -> None:
+        from trading.agents.pm import format_account_translation
+
+        assert format_account_translation({"GLD": 0.2}, **kwargs) == []

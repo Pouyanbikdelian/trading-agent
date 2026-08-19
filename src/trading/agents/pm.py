@@ -1198,23 +1198,97 @@ def format_holdings(book: dict[str, Any]) -> list[str]:
     return lines
 
 
-def format_pm_digest(result: dict[str, Any], book: dict[str, Any] | None = None) -> str:
-    """One message per rebalance — what changed, the resulting book, why.
+def format_target_book(weights: dict[str, float]) -> list[str]:
+    """The PM's decision, in the only unit that is actually its own.
+
+    This replaced a share-count-and-dollars table on 2026-08-19. That
+    table described a $1.08m paper portfolio seeded from
+    ``AGENT_PM_START_EQUITY`` while the real account held CHF 84k — so
+    "285.5 sh · $54.2k" was a position size for a book that does not
+    exist, printed next to real ones. The sim book is still how the PM
+    tracks and scores itself; it is no longer displayed as a portfolio.
+
+    A weight is the PM's actual output. Everything downstream — the
+    sleeve, the dollar cap, FX, the risk caps — is applied to it by the
+    cycle, and only the cycle can say what it becomes in francs.
+    """
+    if not weights:
+        return ["  _all cash_"]
+    lines = [
+        f"  `{sym:<5}` {weight:>5.1%}"
+        for sym, weight in sorted(weights.items(), key=lambda kv: -kv[1])
+    ]
+    cash = max(0.0, 1.0 - fsum(weights.values()))
+    lines.append(f"  `cash ` {cash:>5.1%}")
+    return lines
+
+
+def format_account_translation(
+    weights: dict[str, float],
+    *,
+    equity: float,
+    currency: str,
+    sleeve_pct: float,
+) -> list[str]:
+    """What the PM's weights are worth in the operator's real account.
+
+    Deliberately an UPPER bound, and labelled as one. The cycle also
+    applies ``PM_SLEEVE_CAPITAL_USD``, the per-position cap, gross and
+    sector limits, holds, exclusions and FX — every one of which can only
+    reduce a line. Printing a figure here that the cycle then contradicts
+    would just be the old lie in a new currency, so this says what it is
+    and points at the authority.
+
+    Returns an empty list when the sleeve is off or the account is
+    unknown; a translation nobody can compute must not be invented.
+    """
+    if sleeve_pct <= 0 or equity <= 0 or not weights:
+        return []
+    ccy = (currency or "USD").upper()
+    gross = fsum(weights.values())
+    lines = [
+        f"*In your account* (~{sleeve_pct:.0%} sleeve of {ccy} {equity:,.0f}, "
+        f"before caps and holds):",
+        f"  deployed ≈ {ccy} {equity * sleeve_pct * gross:,.0f}",
+    ]
+    top = sorted(weights.items(), key=lambda kv: -kv[1])[:3]
+    if top:
+        lines.append(
+            "  "
+            + " · ".join(
+                f"`{sym}` ≈{ccy} {equity * sleeve_pct * weight:,.0f}" for sym, weight in top
+            )
+        )
+    return lines
+
+
+def format_pm_digest(
+    result: dict[str, Any],
+    book: dict[str, Any] | None = None,
+    *,
+    account: dict[str, Any] | None = None,
+) -> str:
+    """One message per rebalance — what changed, the target, why.
 
     Previously the runner sent this *and* a separate book dump for the
     same event, ninety seconds apart, the first carrying the *previous*
     cycle's rationale. One event, one message, led by the delta.
+
+    ``account`` (``equity``/``currency``/``sleeve_pct``) turns the target
+    into an approximate figure in the operator's own money. Without it
+    the card shows weights alone, which is still true — it just says
+    less.
     """
     if not result.get("ok"):
         return f"🤖 Agent PM did not trade: {result.get('reason', 'unknown')}"
 
-    # Always name the book and the currency. This research simulation is
-    # quoted in USD while the real account reports in CHF. It is a source
-    # for the cycle, never an order ticket or a broker portfolio.
+    # The header no longer quotes a paper equity. The PM's sim book was
+    # seeded at $1m and the account holds CHF 84k; printing the former
+    # next to the latter made every figure on the card unreadable, and
+    # none of them were sizes anyone could act on. What the PM decides
+    # is a set of weights — so that is what this shows.
     lines = [
-        "🧪 *Agent PM — simulated research book* "
-        "(USD, not the trading account or an IBKR trade ticket)",
-        f"equity {_money(float(result['equity']))}",
+        "🧪 *Agent PM — target allocation* (research; not an IBKR order ticket)",
     ]
 
     opened, closed = result.get("opened") or [], result.get("closed") or []
@@ -1250,17 +1324,18 @@ def format_pm_digest(result: dict[str, Any], book: dict[str, Any] | None = None)
         lines.append(f"_(marked from stored closes: {', '.join(result['stale_marks'])})_")
 
     lines.append("")
-    if book is not None:
-        lines.append("*Book now:*")
-        lines.extend(format_holdings(book))
-    else:
-        lines.append(
-            "*Target book:* "
-            + (
-                ", ".join(f"`{s}` {w:.0%}" for s, w in sorted(result["weights"].items()))
-                or "all cash"
-            )
+    lines.append("*Target weights:*")
+    lines.extend(format_target_book(result.get("weights") or {}))
+    if account:
+        translation = format_account_translation(
+            result.get("weights") or {},
+            equity=float(account.get("equity") or 0.0),
+            currency=str(account.get("currency") or "USD"),
+            sleeve_pct=float(account.get("sleeve_pct") or 0.0),
         )
+        if translation:
+            lines.append("")
+            lines.extend(translation)
 
     lines.append("")
     if result.get("rationale_source") == "executed_target_facts":
@@ -1273,11 +1348,16 @@ def format_pm_digest(result: dict[str, Any], book: dict[str, Any] | None = None)
     lines.append(f"_Watching: {clip(result.get('watch', ''), 300)}_")
     if result.get("dropped"):
         lines.append(f"_(excluded from executable target: {', '.join(result['dropped'])})_")
+    # Turnover as a FRACTION of the book, not in the sim's dollars. The
+    # dollar figure was the same fiction as the share counts, and it is
+    # the ratio that says whether this was a nudge or a reshuffle.
+    equity = float(result.get("equity") or 0.0)
+    turnover = float(result.get("turnover") or 0.0)
+    if equity > 0:
+        lines.append(f"_turnover {turnover / equity:.0%} of the book_")
     lines.append(
-        f"_turnover {_money(float(result['turnover']))} · costs {_money(float(result['costs']))}_"
-    )
-    lines.append(
-        "_For the exact CHF live-account translation (sleeve, holdings, FX, risk caps and holds), "
-        "run `/cycle`; while halted it produces a non-executable review._"
+        "_Weights only — the exact CHF sizes come from `/cycle`, which applies the sleeve, "
+        "the dollar cap, FX, risk limits and your holds. While halted it produces a "
+        "non-executable review._"
     )
     return "\n".join(lines)

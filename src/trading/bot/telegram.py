@@ -1018,7 +1018,12 @@ def _cmd_pm(args: list[str]) -> str:
             "while halted that translation is review-only._"
         )
 
-    from trading.agents.pm import _marks_age_note, _money, format_holdings, performance
+    from trading.agents.pm import (
+        _marks_age_note,
+        format_account_translation,
+        format_target_book,
+        performance,
+    )
     from trading.core.text import clip as _clip
 
     pm_dir = settings.state_dir / "agent_pm"
@@ -1027,22 +1032,38 @@ def _cmd_pm(args: list[str]) -> str:
     except Exception:
         return "_no agent-PM book yet — it trades Mondays 14:30 UTC, or `/pm run` to convene now._"
     perf = performance(settings.state_dir)
-    # Name the book and the currency on every figure: this sim is USD,
-    # the real account reports CHF, and they land in the same chat.
-    lines = [
-        "🧪 *Agent PM — research simulation* (USD, not the trading account)",
-        f"equity {_money(float(perf.get('equity', 0.0)))} "
-        f"({perf.get('return_pct', 0.0):+.2f}% since inception)",
-    ]
+    # No paper equity figure. The sim book is seeded at $1m and the
+    # account holds CHF 84k; the two landed in the same chat and every
+    # number on this card read as a position size somebody could act on.
+    # The percentage return is still meaningful — it is the PM's own
+    # scorecard — so that stays, in the unit it is actually measured in.
+    lines = ["🧪 *Agent PM — target allocation* (research; not an IBKR order ticket)"]
+    since = float(perf.get("return_pct", 0.0) or 0.0)
     if "spy_return_pct" in perf:
-        alpha = perf["return_pct"] - perf["spy_return_pct"]
+        alpha = since - perf["spy_return_pct"]
         lines.append(
-            f"vs SPY {perf['spy_return_pct']:+.2f}% same window (alpha {alpha:+.2f}pp) "
-            f"· max DD {perf['max_drawdown_pct']:.1f}% · {perf['points']} marks"
+            f"{since:+.2f}% since inception · SPY {perf['spy_return_pct']:+.2f}% same window "
+            f"(alpha {alpha:+.2f}pp) · max DD {perf['max_drawdown_pct']:.1f}%"
         )
+    else:
+        lines.append(f"{since:+.2f}% since inception")
+    lines.append("_frictionless: no fills, fees, slippage or dividends_")
+
+    weights = _pm_target_weights(book)
     lines.append("")
-    lines.append(f"*Holdings*{_marks_age_note(book)}")
-    lines.extend(format_holdings(book))
+    lines.append(f"*Target weights*{_marks_age_note(book)}")
+    lines.extend(format_target_book(weights))
+
+    translation = format_account_translation(
+        weights,
+        equity=_live_equity_for_pm()[0],
+        currency=_live_equity_for_pm()[1],
+        sleeve_pct=float(getattr(settings, "agent_pm_sleeve_pct", 0.0) or 0.0),
+    )
+    if translation:
+        lines.append("")
+        lines.extend(translation)
+
     try:
         last = _json.loads((pm_dir / "last_run.json").read_text())
         lines.append("")
@@ -1051,11 +1072,49 @@ def _cmd_pm(args: list[str]) -> str:
         pass
     lines += [
         "",
-        "_This is the PM's research book, not an IBKR proposal. `/cycle` translates it "
-        "through the live CHF account, PM sleeve, cash, FX, risk caps and holds; while halted, "
-        "that result is a non-executable review._",
+        "_Weights only. `/cycle` is what turns them into CHF sizes — sleeve, dollar cap, "
+        "FX, risk limits and your holds all apply there; while halted it produces a "
+        "non-executable review._",
     ]
     return "\n".join(lines)
+
+
+def _pm_target_weights(book: dict[str, Any]) -> dict[str, float]:
+    """The sim book's holdings expressed as weights.
+
+    The book still stores share counts and marks — that is how it scores
+    itself — but those are units of a $1m paper portfolio and must not
+    reach the operator. Converting here keeps the storage honest and the
+    display honest, without migrating any state.
+    """
+    holdings = book.get("holdings") or {}
+    marks = book.get("marks") or {}
+    values = {
+        symbol: float(qty) * float(marks[symbol])
+        for symbol, qty in holdings.items()
+        if symbol in marks
+    }
+    equity = float(book.get("cash", 0.0) or 0.0) + sum(values.values())
+    if equity <= 0:
+        return {}
+    return {symbol: value / equity for symbol, value in values.items() if value > 0}
+
+
+def _live_equity_for_pm() -> tuple[float, str]:
+    """Latest account equity and currency, or ``(0.0, "")`` if unknown.
+
+    Returning zero rather than a guess matters: ``format_account_translation``
+    prints nothing without it, and a translation nobody can compute is
+    exactly the kind of confident-looking number this card was cleaned up
+    to remove.
+    """
+    snap = _latest_account_snapshot()
+    if snap is None:
+        return 0.0, ""
+    return (
+        float(getattr(snap, "equity", 0.0) or 0.0),
+        str(getattr(snap, "base_currency", "") or ""),
+    )
 
 
 def _halt_state() -> tuple[bool, str]:
