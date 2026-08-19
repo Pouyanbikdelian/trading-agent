@@ -1117,6 +1117,8 @@ def _mode_set(
     runner fires an off-cycle rebalance within ~30 seconds.
     """
     import json as _json
+    import tempfile as _tempfile
+    from contextlib import suppress as _suppress
 
     from trading.runtime.mode import Mode, write_mode
 
@@ -1130,9 +1132,27 @@ def _mode_set(
     state = write_mode(state_dir / "mode.json", target, set_by="cli", reason=reason or "")
     console.print(f"[green]mode set to[/green] [bold]{state.mode.value}[/bold]")
     if now:
-        (state_dir / "trigger_now.flag").write_text(
-            _json.dumps({"reason": f"cli mode set to {state.mode.value}", "ts": state.set_at})
+        trigger_path = state_dir / "trigger_now.flag"
+        fd, tmp_name = _tempfile.mkstemp(
+            dir=state_dir,
+            prefix=f"{trigger_path.name}.",
+            suffix=".tmp",
         )
+        try:
+            with os.fdopen(fd, "w") as stream:
+                _json.dump(
+                    {
+                        "reason": f"cli mode set to {state.mode.value}",
+                        "ts": state.set_at,
+                        "mode": "execute",
+                    },
+                    stream,
+                )
+            os.replace(tmp_name, trigger_path)
+        except Exception:
+            with _suppress(FileNotFoundError):
+                os.unlink(tmp_name)
+            raise
         console.print(
             "[yellow]off-cycle rebalance queued[/yellow] (runner picks it up within ~30s)"
         )

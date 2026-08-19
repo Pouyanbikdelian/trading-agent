@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import signal
 from collections.abc import Callable
@@ -28,7 +29,7 @@ from typing import Any
 
 from trading.core.config import settings
 from trading.core.logging import logger
-from trading.core.types import AssetClass, Instrument
+from trading.core.types import AccountSnapshot, AssetClass, Instrument
 from trading.data.base import DataSource
 from trading.data.cache import ParquetCache
 from trading.execution.base import Broker
@@ -273,6 +274,11 @@ class Runner:
         # the scheduled slot.  One async lock keeps that benign race from
         # issuing duplicate yfinance batches or racing the state artifact.
         self._market_watch_lock: asyncio.Lock | None = None
+        # Deduplicate the operational warning emitted when a live process
+        # starts/restarts after the narrow NYSE-open capture window.  The
+        # safety block remains active; only the repeated Telegram noise is
+        # suppressed until the reason changes or a trusted baseline arrives.
+        self._last_risk_monitor_reject_reason: str | None = None
 
     # -------------------------------------------------- factory
 
@@ -967,6 +973,11 @@ class Runner:
 
         self._scheduler.start()
         try:
+            # Do not spend the five-minute NYSE-open baseline window waiting
+            # for APScheduler's first 60-second interval tick after a
+            # restart.  This is read-only broker observation plus local state
+            # persistence; no cycle or order path is started here.
+            await self._refresh_account_snapshot()
             self.alerts.info(self._format_runner_started_message())
             logger.bind(component="runner").info(
                 f"scheduler started — next run: {self._scheduler.get_job('cycle').next_run_time}"
@@ -1158,13 +1169,18 @@ class Runner:
             )
         return "\n".join(lines)
 
-    async def _run_cycle_async(self) -> None:
+    async def _run_cycle_async(self, *, review_only: bool = False) -> None:
         """Run one trading cycle with a hard timeout + Telegram-friendly
         error reporting.
 
         APScheduler executes coroutine jobs natively; we run the synchronous
         cycle in a worker thread so the event loop stays responsive (the
         trigger watcher, the HMM advisor, etc. continue to fire).
+
+        ``review_only`` follows the same read/sizing path but calls the
+        Cycle's non-executable review method. It never submits orders or
+        creates an approval window; the flag is used when the bot sees an
+        active halt.
 
         If the cycle exceeds ``CYCLE_TIMEOUT_SECONDS`` — almost always
         because the IBKR gateway has a dead broker session and an API call
@@ -1197,8 +1213,9 @@ class Runner:
             self._consecutive_errors = disk_count
 
         try:
+            cycle_fn = self.cycle.run_review if review_only else self.cycle.run_cycle
             report = await asyncio.wait_for(
-                asyncio.to_thread(self.cycle.run_cycle),
+                asyncio.to_thread(cycle_fn),
                 timeout=self.CYCLE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
@@ -1237,6 +1254,11 @@ class Runner:
         elif report.status == "halted":
             logger.bind(component="runner").warning("cycle halted by risk manager")
             self.alerts.warning("⚠️ cycle halted by risk manager")
+        elif report.status == "halted_review":
+            # The cycle itself has emitted the complete review card.  Do not
+            # append the old generic warning or call this a recovery: the
+            # account is intentionally still halted and no order was sent.
+            logger.bind(component="runner").info("halted live-account review completed")
         else:
             # Success — reset the consecutive error counter (and persisted file).
             if self._consecutive_errors > 0:
@@ -1325,10 +1347,17 @@ class Runner:
         The probe never reconnects or restarts Gateway; it makes a 2FA/login
         outage visible to the ops watchdog instead of hiding it.
         """
+        liveness: dict[str, object] | None = None
         try:
             from trading.runtime.broker_liveness import record_broker_liveness
 
-            await asyncio.to_thread(record_broker_liveness, self.broker, settings.state_dir)
+            observed = await asyncio.to_thread(
+                record_broker_liveness,
+                self.broker,
+                settings.state_dir,
+            )
+            if isinstance(observed, dict):
+                liveness = observed
         except Exception:
             logger.bind(component="broker_liveness").exception("broker API liveness record failed")
 
@@ -1362,6 +1391,7 @@ class Runner:
             if per_ccy:
                 snap = snap.model_copy(update={"cash_by_currency": per_ccy})
 
+        self._monitor_live_account_risk(snap, liveness=liveness)
         self.cycle.runner_store.save_snapshot(snap)
 
         # Touch heartbeat. A successful snapshot refresh proves the trader
@@ -1380,6 +1410,99 @@ class Runner:
             logger.bind(component="runner").debug(
                 f"heartbeat touch failed: {type(e).__name__}: {e!r}"
             )
+
+    def _monitor_live_account_risk(
+        self,
+        snapshot: AccountSnapshot,
+        *,
+        liveness: dict[str, object] | None,
+        observed_at: datetime | None = None,
+    ) -> None:
+        """Continuously enforce live loss/drawdown safety from fresh snapshots.
+
+        A cycle can be weekly and a manual /cycle can arrive hours after a
+        loss threshold is crossed.  This observer runs every snapshot tick,
+        but is deliberately conservative: it never invents a daily baseline
+        after the five-minute verified NYSE-open window, and it skips a
+        cached snapshot when the authenticated IBKR probe is red.
+        """
+        if not settings.is_live_armed():
+            return
+        if liveness is None:
+            logger.bind(component="risk_monitor").warning(
+                "skipping live risk observation because authenticated broker liveness is unavailable"
+            )
+            return
+        if liveness is not None and liveness.get("ready") is not True:
+            logger.bind(component="risk_monitor").warning(
+                "skipping live risk observation while broker liveness is not ready"
+            )
+            return
+
+        risk_manager = getattr(self.cycle, "risk_manager", None)
+        if risk_manager is None:
+            logger.bind(component="risk_monitor").error(
+                "live snapshot has no risk manager; refusing to claim risk monitoring"
+            )
+            return
+
+        try:
+            from trading.runtime.nyse_session import (
+                current_nyse_session,
+                is_opening_capture_window,
+            )
+
+            observed = observed_at or datetime.now(tz=timezone.utc)
+            session = current_nyse_session(observed)
+            if session is not None and is_opening_capture_window(observed):
+                note = risk_manager.capture_session_open(
+                    snapshot,
+                    session_date=session.label,
+                    captured_at=observed,
+                    source="snapshot_refresh",
+                )
+                if note:
+                    self.alerts.critical(f"⚠️ Risk baseline repaired — {note}")
+
+            risk_manager._reload_halt_state()
+            was_halted = risk_manager.is_halted()
+            decision = risk_manager.evaluate_session_risk(
+                snapshot,
+                session_label=session.label if session is not None else None,
+            )
+        except Exception:
+            # An observer bug must never be mistaken for a healthy account;
+            # the hard execution gate will independently repeat the strict
+            # check inside Cycle.  Log loudly for ops without causing a
+            # snapshot persistence outage.
+            logger.bind(component="risk_monitor").exception("live risk observation failed")
+            return
+
+        if decision.action == "halt":
+            self._last_risk_monitor_reject_reason = None
+            if not was_halted:
+                currency = str(snapshot.base_currency or "USD").upper()
+                self.alerts.critical(
+                    "🚨 *RISK HALT — continuous account monitor*\n"
+                    f"{decision.reason}\n"
+                    f"Snapshot: {currency} {snapshot.equity:,.2f} equity.\n"
+                    "No new exposure can be submitted; verified /close or /flatten "
+                    "remains available to reduce risk."
+                )
+            return
+
+        if decision.action == "reject":
+            if decision.reason != getattr(self, "_last_risk_monitor_reject_reason", None):
+                self._last_risk_monitor_reject_reason = decision.reason
+                self.alerts.warning(
+                    "⚠️ *Live execution safety gate*\n"
+                    f"{decision.reason}.\n"
+                    "A real-account review remains available, but no executable "
+                    "cycle may run until a trusted NYSE-open baseline is captured."
+                )
+            return
+
+        self._last_risk_monitor_reject_reason = None
 
     async def _watchdog(self) -> None:
         """Daily: if we haven't completed a successful cycle in
@@ -2203,7 +2326,40 @@ class Runner:
             payload = flag_path.read_text()
             flag_path.unlink()  # consume first — re-entry safe
             logger.bind(component="runner").info(f"off-cycle trigger fired: {payload[:120]}")
-            await self._run_cycle_async()
+            # New structured triggers are fail-closed: only an explicit
+            # ``mode=execute`` may reach the order-capable cycle.  A review
+            # producer can never become executable because another process
+            # happened to read the file while it was being written.  We keep
+            # a narrow compatibility path for the old *bare, aware ISO
+            # timestamp* flags produced before modes existed.
+            review_only = True
+            try:
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    mode = str(parsed.get("mode", "")).strip().lower()
+                    if mode == "execute":
+                        review_only = False
+                    elif mode != "review":
+                        logger.bind(component="runner").warning(
+                            f"missing or unknown off-cycle mode {mode!r}; using review-only"
+                        )
+                else:
+                    logger.bind(component="runner").warning(
+                        "non-object off-cycle trigger payload; using review-only"
+                    )
+            except json.JSONDecodeError:
+                legacy = payload.strip()
+                try:
+                    legacy_ts = datetime.fromisoformat(legacy.replace("Z", "+00:00"))
+                    if legacy_ts.tzinfo is None or legacy_ts.utcoffset() is None:
+                        raise ValueError("legacy timestamp is naive")
+                except ValueError:
+                    logger.bind(component="runner").warning(
+                        "malformed off-cycle trigger; using review-only"
+                    )
+                else:
+                    review_only = False
+            await self._run_cycle_async(review_only=review_only)
         except Exception:
             logger.bind(component="runner").exception("off-cycle trigger failed")
 

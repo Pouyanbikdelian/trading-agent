@@ -36,6 +36,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from datetime import datetime, timezone
+from math import fsum, isfinite
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,9 @@ COST_BPS = 10.0  # commission + slippage on turnover, charitable but not free
 MAX_WEIGHT_PER_NAME = 0.25  # ETFs are diversified; a quarter is the ceiling
 MAX_WEIGHT_PER_STOCK = 0.10  # single names carry idiosyncratic risk — tighter
 MAX_GROSS = 1.0  # long-only, no leverage
+# A recent Sentinel alert requires cash to remain a real risk-control decision,
+# not a suggestion the model can accidentally override in prose.
+SENTINEL_MAX_GROSS = 0.70
 MAX_CLUSTER = 0.50  # max combined weight in one correlated cluster
 # The charter has asked for "maximum 3 ETF positions" since the stock-
 # preference block was written; nothing enforced it, and a book of six
@@ -220,7 +224,8 @@ PM_CHARTER = (
     "timestamp): If the "
     "sentinel fired CAUTION or ALARM in the last 24 hours, (a) cap total "
     "deployment at 70% — the 30% minimum goes to cash, not rotation; "
-    "(b) do not open new sector positions to replace trimmed ones this cycle; "
+    "this cap is enforced after you answer; (b) do not open new sector positions to replace "
+    "trimmed ones this cycle; "
     "freed weight stays in cash first.\n"
     "\n"
     "CREATIVE SCOUT RULE: agent_takes carries each specialist's own take, "
@@ -439,29 +444,90 @@ def _default_llm(system: str, prompt: str) -> dict[str, Any]:
     return complete_json(system, prompt, tier="frontier")
 
 
-def _clamp_weights(
+def _gross_weight(weights: dict[str, float]) -> float:
+    """Sum weights predictably at the same precision used for persisted targets."""
+    return fsum(weights.values())
+
+
+def _cap_gross(weights: dict[str, float], maximum: float) -> tuple[dict[str, float], bool]:
+    """Proportionally cap a long-only target without relying on dict order.
+
+    The compensating residual makes the persisted target sum to the cap under
+    ``fsum``.  That small detail matters here: a cap which is occasionally
+    70.0000000001% is not a hard cap when it reaches an operator report.
+    """
+    gross = _gross_weight(weights)
+    if gross <= maximum or not weights:
+        return dict(weights), False
+
+    scale = maximum / gross
+    capped = {symbol: weights[symbol] * scale for symbol in sorted(weights)}
+    # Use one deterministic residual bucket so accumulated float error cannot
+    # put the final persisted target above the cap.  The largest position
+    # absorbs a sub-cent-sized adjustment; ticker breaks an exact tie.
+    residual_symbol = max(capped, key=lambda symbol: (capped[symbol], symbol))
+    residual = maximum - fsum(
+        weight for symbol, weight in capped.items() if symbol != residual_symbol
+    )
+    capped[residual_symbol] = max(0.0, residual)
+    return capped, True
+
+
+def _weight_changes(before: dict[str, float], after: dict[str, float]) -> list[dict[str, Any]]:
+    """Return deterministic, JSON-safe facts for changed surviving names."""
+    return [
+        {"symbol": symbol, "before": before[symbol], "after": after[symbol]}
+        for symbol in sorted(set(before) & set(after))
+        if before[symbol] != after[symbol]
+    ]
+
+
+def _clamp_weights_with_audit(
     raw: Any, stocks: tuple[str, ...] = (), blocked: frozenset[str] = frozenset()
-) -> dict[str, float]:
-    """Hard caps: whitelist, long-only, per-name max (tighter for single
-    stocks than for ETFs), gross max. ``blocked`` symbols (operator
-    ``/hold`` pins — Yan's long-term positions) are dropped to cash like
-    any off-whitelist name: the PM may never allocate to a symbol the
-    operator has pinned, in sim today and through the bridge later."""
-    weights: dict[str, float] = {}
+) -> tuple[dict[str, float], list[dict[str, Any]]]:
+    """Apply PM hard constraints and retain facts about every weight clamp.
+
+    The PM's prose is only intent.  The returned adjustment facts let the
+    operator-facing record describe the actual target whenever a hard limit
+    changes a name which otherwise survives into the target.
+    """
+    requested: dict[str, float] = {}
     if not isinstance(raw, dict):
-        return weights
-    for sym, w in raw.items():
+        return requested, []
+    for raw_symbol, raw_weight in raw.items():
         try:
-            w = float(w)
+            weight = float(raw_weight)
         except (TypeError, ValueError):
             continue
-        sym = str(sym).upper().strip()
-        if w <= 0 or sym in blocked:
+        symbol = str(raw_symbol).upper().strip()
+        if not isfinite(weight) or weight <= 0 or symbol in blocked:
             continue
-        if sym in UNIVERSE:
-            weights[sym] = min(w, MAX_WEIGHT_PER_NAME)
-        elif sym in stocks:
-            weights[sym] = min(w, MAX_WEIGHT_PER_STOCK)
+        if symbol in UNIVERSE or symbol in stocks:
+            # Keep the existing last-key-wins behaviour for duplicate ticker
+            # spellings, then assess the cap against the proposal that will
+            # actually survive canonicalization.
+            requested[symbol] = weight
+
+    weights: dict[str, float] = {}
+    per_name_changes: list[dict[str, Any]] = []
+    for symbol, requested_weight in requested.items():
+        maximum = MAX_WEIGHT_PER_NAME if symbol in UNIVERSE else MAX_WEIGHT_PER_STOCK
+        clamped_weight = min(requested_weight, maximum)
+        weights[symbol] = clamped_weight
+        if clamped_weight != requested_weight:
+            per_name_changes.append(
+                {
+                    "symbol": symbol,
+                    "before": requested_weight,
+                    "after": clamped_weight,
+                    "maximum": maximum,
+                }
+            )
+
+    adjustments: list[dict[str, Any]] = []
+    if per_name_changes:
+        adjustments.append({"constraint": "per_name_cap", "changes": per_name_changes})
+
     # ETF-count cap: keep the heaviest MAX_ETF_POSITIONS ETF sleeves, drop
     # the rest to cash. Ties break on ticker so the outcome is deterministic
     # (a cap that depends on dict ordering is not a cap).
@@ -477,16 +543,128 @@ def _clamp_weights(
         c = _cluster_of(s)
         if c:
             by_cluster[c] = by_cluster.get(c, 0.0) + w
-    for c, total in by_cluster.items():
+    for c in sorted(by_cluster):
+        total = by_cluster[c]
         if total > MAX_CLUSTER:
+            before_cluster = {s: weights[s] for s in weights if _cluster_of(s) == c}
             f = MAX_CLUSTER / total
             for s in list(weights):
                 if _cluster_of(s) == c:
                     weights[s] = round(weights[s] * f, 4)
-    gross = sum(weights.values())
-    if gross > MAX_GROSS:
-        weights = {s: w * MAX_GROSS / gross for s, w in weights.items()}
+            changes = _weight_changes(before_cluster, {s: weights[s] for s in before_cluster})
+            if changes:
+                adjustments.append(
+                    {
+                        "constraint": "cluster_cap",
+                        "cluster": c,
+                        "maximum": MAX_CLUSTER,
+                        "changes": changes,
+                    }
+                )
+
+    before_gross_cap = dict(weights)
+    weights, gross_scaled = _cap_gross(weights, MAX_GROSS)
+    if gross_scaled:
+        changes = _weight_changes(before_gross_cap, weights)
+        if changes:
+            adjustments.append(
+                {
+                    "constraint": "gross_cap",
+                    "maximum": MAX_GROSS,
+                    "changes": changes,
+                }
+            )
+    return weights, adjustments
+
+
+def _clamp_weights(
+    raw: Any, stocks: tuple[str, ...] = (), blocked: frozenset[str] = frozenset()
+) -> dict[str, float]:
+    """Return the executable PM target after all hard constraints bind."""
+    weights, _ = _clamp_weights_with_audit(raw, stocks, blocked)
     return weights
+
+
+def _surviving_clamp_adjustments(
+    adjustments: list[dict[str, Any]], surviving_symbols: set[str]
+) -> list[dict[str, Any]]:
+    """Discard clamp facts for names later removed for priceability.
+
+    A raw allocation can be clamped and then rejected because it has no
+    price.  That is a dropped-name fact, not a surviving-weight fact; never
+    let it make the public execution narrative imply an allocation survived.
+    """
+    surviving: list[dict[str, Any]] = []
+    for adjustment in adjustments:
+        changes = [
+            change
+            for change in adjustment.get("changes", [])
+            if str(change.get("symbol")) in surviving_symbols
+        ]
+        if changes:
+            surviving.append({**adjustment, "changes": changes})
+    return surviving
+
+
+def _executed_target_summary(
+    *,
+    gross_weight: float,
+    sentinel_cap: float | None,
+    gross_before_sentinel_cap: float | None,
+    sentinel_cap_scaled: bool,
+    dropped: list[str],
+    hard_clamp_adjustments: list[dict[str, Any]],
+) -> str:
+    """Describe only the target that was actually persisted and tradable.
+
+    An LLM's rationale explains its intent, not necessarily the portfolio
+    after whitelist, price, hold and Sentinel constraints bind.  When any of
+    those constraints changes the executable target, this fact-derived text
+    is the operator-facing rationale.  The model's original text remains in
+    ``model_rationale`` for audit, but cannot claim an allocation the book
+    does not hold.
+    """
+    cash_weight = max(0.0, 1.0 - gross_weight)
+    parts = [
+        f"Target allocation: {gross_weight:.1%} deployed / {cash_weight:.1%} cash before costs."
+    ]
+    if hard_clamp_adjustments:
+        labels = {
+            "per_name_cap": "per-name cap",
+            "cluster_cap": "cluster cap",
+            "gross_cap": "gross cap",
+        }
+        facts = []
+        for adjustment in hard_clamp_adjustments:
+            label = labels.get(str(adjustment.get("constraint")), "hard cap")
+            if adjustment.get("constraint") == "cluster_cap":
+                label += f" ({adjustment.get('cluster')})"
+            if adjustment.get("constraint") == "gross_cap":
+                label += f" ({float(adjustment.get('maximum', 0.0)):.0%})"
+            changes = ", ".join(
+                f"`{change['symbol']}` {float(change['before']):.1%}→{float(change['after']):.1%}"
+                for change in adjustment["changes"]
+            )
+            facts.append(f"{label}: {changes}")
+        parts.append("Hard constraints changed surviving targets — " + "; ".join(facts) + ".")
+    if sentinel_cap is not None:
+        if sentinel_cap_scaled:
+            parts.append(
+                "Sentinel's "
+                f"{sentinel_cap:.0%} deployment cap scaled the valid proposal from "
+                f"{float(gross_before_sentinel_cap or 0.0):.1%} to {gross_weight:.1%}."
+            )
+        else:
+            parts.append(
+                f"Sentinel's {sentinel_cap:.0%} deployment cap was active; no scaling was needed."
+            )
+    if dropped:
+        parts.append(
+            "Excluded from the executable target: "
+            + ", ".join(f"`{symbol}`" for symbol in dropped)
+            + "."
+        )
+    return " ".join(parts)
 
 
 def _fetch_closes(symbols: list[str]) -> dict[str, float]:
@@ -733,7 +911,9 @@ def run_agent_pm(
         logger.bind(component="agent_pm").warning(f"PM call failed: {e}")
         return {"ok": False, "reason": f"PM call failed: {e}"}
 
-    weights = _clamp_weights(out.get("target_weights"), stocks, blocked=held)
+    weights, clamp_adjustments = _clamp_weights_with_audit(
+        out.get("target_weights"), stocks, blocked=held
+    )
     # Late pricing for newly targeted names not already marked.
     need_px = [s for s in weights if s not in px]
     if need_px and prices is None:
@@ -741,7 +921,26 @@ def run_agent_pm(
     unpriced_targets = [s for s in weights if s not in px]
     for s in unpriced_targets:
         weights.pop(s)  # no mark, no trade — that weight stays in cash
-    dropped = sorted(set(map(str, (out.get("target_weights") or {}))) - set(weights))
+    hard_clamp_adjustments = _surviving_clamp_adjustments(clamp_adjustments, set(weights))
+    raw_targets = out.get("target_weights") or {}
+    raw_symbols = (
+        {str(symbol).upper().strip() for symbol in raw_targets}
+        if isinstance(raw_targets, dict)
+        else set()
+    )
+    dropped = sorted(raw_symbols - set(weights))
+
+    # The Sentinel rule is a hard portfolio constraint, not a prompt-only
+    # instruction.  Apply it after priceability has been resolved so both
+    # ``last_run.json`` and the simulated holdings describe the same,
+    # executable target.  Scaling after unpriced symbols are removed leaves
+    # their allocation in cash rather than silently redistributing it.
+    sentinel_cap = SENTINEL_MAX_GROSS if sentinel_state.get("fired_within_24h") is True else None
+    gross_before_sentinel_cap = _gross_weight(weights)
+    sentinel_cap_scaled = False
+    if sentinel_cap is not None:
+        weights, sentinel_cap_scaled = _cap_gross(weights, sentinel_cap)
+    gross_weight = _gross_weight(weights)
 
     # --- rebalance at last close, costs on turnover
     new_holdings: dict[str, float] = {}
@@ -812,6 +1011,25 @@ def run_agent_pm(
     }
     _save(pm_dir, "portfolio.json", book)
 
+    # Keep the LLM's original prose for audit, but never use it as the
+    # operator-facing execution record when hard constraints have changed
+    # what reached the simulated book.  This prevents a message such as
+    # "capped at 70%" sitting above a persisted 77% target (or claiming a
+    # dropped symbol remains in the allocation).
+    model_rationale = str(out.get("rationale", ""))
+    constraints_changed_target = (
+        bool(hard_clamp_adjustments) or sentinel_cap is not None or bool(dropped)
+    )
+    execution_summary = _executed_target_summary(
+        gross_weight=gross_weight,
+        sentinel_cap=sentinel_cap,
+        gross_before_sentinel_cap=(gross_before_sentinel_cap if sentinel_cap is not None else None),
+        sentinel_cap_scaled=sentinel_cap_scaled,
+        dropped=dropped,
+        hard_clamp_adjustments=hard_clamp_adjustments,
+    )
+    rationale = execution_summary if constraints_changed_target else model_rationale
+
     result = {
         "ok": True,
         "ts": now_iso,
@@ -829,7 +1047,25 @@ def run_agent_pm(
         # away for good. Telegram is the constrained medium, not the
         # archive: format_pm_digest does the clipping, at the point where
         # the constraint actually exists.
-        "rationale": out.get("rationale", ""),
+        "rationale": rationale,
+        # Retain the model's full original output for an audit without
+        # allowing unverified execution claims back into Telegram's /pm
+        # display (which reads ``rationale`` from last_run.json).
+        "model_rationale": model_rationale,
+        "rationale_source": "executed_target_facts" if constraints_changed_target else "model",
+        "execution_summary": execution_summary,
+        # Exact, structured facts behind a non-model rationale.  This is
+        # persisted with the raw model rationale so an operator can audit
+        # both the original intent and the hard-constrained target.
+        "hard_clamp_adjustments": hard_clamp_adjustments,
+        "gross_weight": gross_weight,
+        "cash_weight": max(0.0, 1.0 - gross_weight),
+        "sentinel_cap_active": sentinel_cap is not None,
+        "sentinel_deployment_cap": sentinel_cap,
+        "gross_weight_before_sentinel_cap": (
+            gross_before_sentinel_cap if sentinel_cap is not None else None
+        ),
+        "sentinel_cap_scaled": sentinel_cap_scaled,
         "watch": out.get("watch", ""),
         # What actually changed, so the digest can lead with the delta
         # instead of restating the whole book.
@@ -851,7 +1087,22 @@ def run_agent_pm(
         ),
     }
     _save(pm_dir, "last_run.json", result)
-    mem.journal("agent_pm", {k: result[k] for k in ("equity", "weights", "rationale")}, actor="pm")
+    mem.journal(
+        "agent_pm",
+        {
+            k: result[k]
+            for k in (
+                "equity",
+                "weights",
+                "rationale",
+                "model_rationale",
+                "rationale_source",
+                "execution_summary",
+                "hard_clamp_adjustments",
+            )
+        },
+        actor="pm",
+    )
     return result
 
 
@@ -926,11 +1177,12 @@ def format_pm_digest(result: dict[str, Any], book: dict[str, Any] | None = None)
     if not result.get("ok"):
         return f"🤖 Agent PM did not trade: {result.get('reason', 'unknown')}"
 
-    # Always name the book and the currency. This sim is quoted in USD
-    # while the real account reports in CHF, and the two used to appear in
-    # adjacent messages with neither one labelled.
+    # Always name the book and the currency. This research simulation is
+    # quoted in USD while the real account reports in CHF. It is a source
+    # for the cycle, never an order ticket or a broker portfolio.
     lines = [
-        "🧪 *Agent PM — simulated book* (USD, not the trading account)",
+        "🧪 *Agent PM — simulated research book* "
+        "(USD, not the trading account or an IBKR trade ticket)",
         f"equity {_money(float(result['equity']))}",
     ]
 
@@ -979,16 +1231,22 @@ def format_pm_digest(result: dict[str, Any], book: dict[str, Any] | None = None)
             )
         )
 
-    lines.extend(
-        [
-            "",
-            f"*Why:* {clip(result.get('rationale', ''), 700)}",
-            f"_Watching: {clip(result.get('watch', ''), 300)}_",
-        ]
-    )
+    lines.append("")
+    if result.get("rationale_source") == "executed_target_facts":
+        # The LLM's raw narrative is retained in ``model_rationale`` for an
+        # audit, but this is the public execution message.  Facts win when
+        # a hard constraint or rejection changed the model's proposal.
+        lines.append(f"*Why (executed facts):* {clip(result.get('rationale', ''), 700)}")
+    else:
+        lines.append(f"*Why:* {clip(result.get('rationale', ''), 700)}")
+    lines.append(f"_Watching: {clip(result.get('watch', ''), 300)}_")
     if result.get("dropped"):
-        lines.append(f"_(dropped off-universe/invalid: {', '.join(result['dropped'])})_")
+        lines.append(f"_(excluded from executable target: {', '.join(result['dropped'])})_")
     lines.append(
         f"_turnover {_money(float(result['turnover']))} · costs {_money(float(result['costs']))}_"
+    )
+    lines.append(
+        "_For the exact CHF live-account translation (sleeve, holdings, FX, risk caps and holds), "
+        "run `/cycle`; while halted it produces a non-executable review._"
     )
     return "\n".join(lines)

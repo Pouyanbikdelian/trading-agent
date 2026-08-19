@@ -103,6 +103,11 @@ REGISTRY: tuple[Spec, ...] = (
         example="/approve 80",
     ),
     Spec("/proposal", "repeat the exact pending buy/sell plan"),
+    Spec(
+        "/review",
+        "show a non-executable live-account review",
+        aliases=("/plan",),
+    ),
     Spec("/candidates", "alternate ranks for the pending cycle"),
     Spec("/reject", "skip this cycle, no orders"),
     Spec(
@@ -121,7 +126,11 @@ REGISTRY: tuple[Spec, ...] = (
         aliases=("/signals",),
     ),
     # --- trigger work
-    Spec("/cycle", "force a rebalance now", aliases=("/cycle_now",)),
+    Spec(
+        "/cycle",
+        "force a rebalance; while halted, a reduce-only basket or a review",
+        aliases=("/cycle_now",),
+    ),
     Spec("/refresh", "queue a data refresh"),
     Spec("/reconnect", "bounce the broker connection"),
     Spec(
@@ -175,7 +184,7 @@ REGISTRY: tuple[Spec, ...] = (
     Spec("/unhold", "release a pinned position", usage="/unhold SYMBOL", example="/unhold NVDA"),
     Spec("/holds", "list pinned positions"),
     Spec("/k", "override the strategy top-K", usage="/k [N|clear]", example="/k 12"),
-    Spec("/pm", "simulated agent-PM book", usage="/pm [run]", example="/pm run"),
+    Spec("/pm", "PM research simulation", usage="/pm [run]", example="/pm run"),
     # --- mode
     Spec(
         "/mode",
@@ -203,7 +212,7 @@ REGISTRY: tuple[Spec, ...] = (
     # --- safety
     Spec(
         "/halt",
-        "refuse new trades; force flatten",
+        "refuse new exposure; explicit reduce-only exits remain available",
         usage="/halt [reason]",
         example="/halt bad data",
     ),

@@ -73,6 +73,7 @@ HELP_TEXT = (
     "/approve all except SYM ... — freeze those planned changes (then confirm preview)\n"
     "/approve flat — flatten instead of basket\n"
     "/proposal — repeat the exact pending buys and sells\n"
+    "/review — repeat the latest non-executable halted account review\n"
     "/candidates — alternate ranked picks for the pending cycle\n"
     "/pick 1 3 5 8 — replace basket with a new equal-weight rank selection\n"
     "/reject — skip this cycle, no orders\n\n"
@@ -80,7 +81,7 @@ HELP_TEXT = (
     "/regime — HMM bull/bear state + SPY/VIX triggers\n"
     "/signal \\[N] — top-N candidates the strategy would pick NOW (no order)\n\n"
     "*Trigger work*\n"
-    "/cycle — force a rebalance now (~2 min)\n"
+    "/cycle — force a rebalance now; while halted, a reduce-only basket or a review\n"
     "/refresh — queue a data refresh\n\n"
     "*Desk copilot* (never trades)\n"
     "/ask QUESTION — anything about past decisions or current state\n"
@@ -103,7 +104,7 @@ HELP_TEXT = (
     "/edge why — the breakdown: rank, market conditions, entry level\n"
     "/detail — full transcript of the latest committee debate\n"
     "/committee — convene the agents for a fresh debate right now\n"
-    "/pm — simulated agent-PM book · /pm run — rebalance it now\n"
+    "/pm — PM research simulation · /pm run — refresh PM research (no broker order)\n"
     "/cancel\\_order CLIENT\\_ID — cancel a pending order\n\n"
     "*Mode (rebalance posture)*\n"
     "/mode bull|neutral|defense|bear|flatten — preview\n"
@@ -113,7 +114,7 @@ HELP_TEXT = (
     "/fx 5000 CHF to USD — convert at market\n"
     "/fx-rate USD CHF — reference rate\n\n"
     "*Safety*\n"
-    "/halt \\[reason] — refuse new trades; does not close positions\n"
+    "/halt \\[reason] — refuse new exposure; explicit close/flatten remains reduce-only\n"
     "/resume — clear halt, reset failure counter\n"
     "/reconnect — bounce the broker connection\n"
     "/gateway stop|start|status — release your IBKR session so you can trade by hand in TWS or mobile; stop also halts\n"
@@ -299,6 +300,25 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+
+
+def _write_cycle_trigger(path: Path, *, reason: str, mode: str) -> None:
+    """Atomically request a specifically-scoped off-cycle action.
+
+    ``trigger_now.flag`` is shared between the Telegram process and the
+    runner. A direct ``write_text`` can expose a partially-written JSON
+    document to the runner; treating that parse failure as a legacy execute
+    request would turn a review request into an order-capable cycle. Keep
+    every new producer on the atomic JSON path and make the mode explicit.
+    """
+    _atomic_write_json(
+        path,
+        {
+            "reason": reason,
+            "ts": datetime.now(tz=timezone.utc).isoformat(),
+            "mode": mode,
+        },
+    )
 
 
 def _cmd_halt(args: list[str]) -> str:
@@ -867,7 +887,7 @@ def _cmd_committee() -> str:
 
 
 def _cmd_pm(args: list[str]) -> str:
-    """``/pm`` — simulated agent-PM book; ``/pm run`` — rebalance now."""
+    """``/pm`` — PM research simulation; ``/pm run`` refreshes research only."""
     import json as _json
 
     if args and args[0].lower() == "run":
@@ -876,7 +896,11 @@ def _cmd_pm(args: list[str]) -> str:
             flag.write_text(datetime.now(tz=timezone.utc).isoformat())
         except Exception as e:
             return f"could not request PM run: `{e}`"
-        return "🧪 Agent PM convening — rebalance lands here in ~1 minute."
+        return (
+            "🧪 Agent PM convening — research allocation lands here in ~1 minute.\n"
+            "_This does not submit to IBKR. `/cycle` translates it into the live CHF account; "
+            "while halted that translation is review-only._"
+        )
 
     from trading.agents.pm import _marks_age_note, _money, format_holdings, performance
     from trading.core.text import clip as _clip
@@ -890,7 +914,7 @@ def _cmd_pm(args: list[str]) -> str:
     # Name the book and the currency on every figure: this sim is USD,
     # the real account reports CHF, and they land in the same chat.
     lines = [
-        "🧪 *Agent PM — simulated book* (USD, not the trading account)",
+        "🧪 *Agent PM — research simulation* (USD, not the trading account)",
         f"equity {_money(float(perf.get('equity', 0.0)))} "
         f"({perf.get('return_pct', 0.0):+.2f}% since inception)",
     ]
@@ -909,6 +933,12 @@ def _cmd_pm(args: list[str]) -> str:
         lines.append(f"_Last rationale: {_clip(last.get('rationale', ''), 400)}_")
     except Exception:
         pass
+    lines += [
+        "",
+        "_This is the PM's research book, not an IBKR proposal. `/cycle` translates it "
+        "through the live CHF account, PM sleeve, cash, FX, risk caps and holds; while halted, "
+        "that result is a non-executable review._",
+    ]
     return "\n".join(lines)
 
 
@@ -922,6 +952,23 @@ def _halt_state() -> tuple[bool, str]:
         return bool(payload.get("halted", False)), str(payload.get("reason", ""))
     except Exception:
         return False, ""
+
+
+def _execution_halt_state() -> tuple[bool, str]:
+    """Read the execution state fail-closed for a new `/cycle` request.
+
+    The ordinary status helper is intentionally forgiving for display.  A
+    malformed state file must not receive an execution-shaped acknowledgement,
+    however: the runner will fail closed, so the bot requests a review too.
+    """
+    halt_path = settings.state_dir / "halt.json"
+    if not halt_path.exists():
+        return False, ""
+    try:
+        payload = json.loads(halt_path.read_text())
+        return bool(payload.get("halted", False)), str(payload.get("reason", ""))
+    except Exception:
+        return True, "halt state unreadable — review only until repaired"
 
 
 def _cmd_resume() -> str:
@@ -948,6 +995,13 @@ def _cmd_resume() -> str:
     # old four-key overwrite reset both kill switches on every resume,
     # so a drawdown spanning a halt could never trip the drawdown cap.
     set_halted(settings.state_dir, halted=False)
+    # A halted review contains a point-in-time account plan, never a deferred
+    # order. Once execution is re-armed it must not be displayed as current;
+    # the operator needs a brand-new cycle/review with fresh prices.
+    try:
+        (settings.state_dir / _HALTED_REVIEW_FILE).unlink(missing_ok=True)
+    except Exception:
+        logger.bind(component="bot").exception("could not clear stale halted review")
 
     # Reset the consecutive-error counter. Without this, an operator who
     # auto-halted at N failures and /resume'd would re-halt on the first
@@ -1009,6 +1063,11 @@ def _cmd_status() -> str:
                 "Reply: `/approve` · `/approve 80` · `/approve only SYM` · "
                 "`/approve all except SYM` · `/approve flat` · `/reject`"
             )
+    elif (review := _read_cycle_review()) is not None:
+        review_id = str(review.get("id") or "")[:8]
+        lines.append(
+            f"\n🧪 *Review `{review_id}` is non-executable* — `/review` or `/proposal` repeats it."
+        )
     elif getattr(settings, "require_cycle_approval", False):
         lines.append(
             "\n_cycle approval required for every cycle (REQUIRE\\_CYCLE\\_APPROVAL=true)._"
@@ -1257,10 +1316,12 @@ def _cmd_confirm() -> str:
     clear_pending(pending_path)
 
     # Drop the trigger-now flag — the runner picks this up and runs a
-    # cycle immediately instead of waiting for the cron.
-    trigger_path.parent.mkdir(parents=True, exist_ok=True)
-    trigger_path.write_text(
-        json.dumps({"reason": f"mode change to {state.mode.value}", "ts": state.set_at})
+    # cycle immediately instead of waiting for the cron. This is an
+    # execution-capable request, so it must be an atomic, explicit mode.
+    _write_cycle_trigger(
+        trigger_path,
+        reason=f"mode change to {state.mode.value}",
+        mode="execute",
     )
     logger.bind(mode=state.mode.value).info("telegram confirmed mode change")
     return (
@@ -1831,19 +1892,41 @@ def _cmd_health() -> str:
 
 
 def _cmd_cycle_now() -> str:
-    r"""``/cycle`` — force one off-cycle execution immediately."""
+    r"""``/cycle`` — execute normally, or review-only when risk is halted."""
     sd = settings.state_dir
     trigger_path = sd / "trigger_now.flag"
     sd.mkdir(parents=True, exist_ok=True)
-    trigger_path.write_text(
-        json.dumps(
-            {
-                "reason": "telegram /cycle",
-                "ts": datetime.now(tz=timezone.utc).isoformat(),
-            }
+    halted, reason = _execution_halt_state()
+    # Always request the execute-capable path. The runner is the process
+    # that can see the live book, so it decides what a halt means here: a
+    # reduce-only basket you can approve, or a read-only card when nothing
+    # in the plan lowers exposure. Deciding that in the bot would mean
+    # guessing from a state file.
+    _write_cycle_trigger(trigger_path, reason="telegram /cycle", mode="execute")
+    if halted:
+        return (
+            "🛑 *HALTED* — building the live CHF basket in ~4 minutes.\n"
+            f"Reason: `{reason}`\n"
+            "_Anything that would add exposure is stripped out. If what remains can only "
+            "lower risk, you get a reduce-only basket to `/approve` or `/reject`; otherwise "
+            "it lands as a read-only review._"
         )
+    return "🔄 cycle triggered — basket preview + approval in ~4 minutes."
+
+
+def _cmd_review() -> str:
+    """Request or repeat a deliberately non-executable account review."""
+    sd = settings.state_dir
+    review = _read_cycle_review()
+    if review is not None:
+        return _format_cycle_review(review)
+    trigger_path = sd / "trigger_now.flag"
+    sd.mkdir(parents=True, exist_ok=True)
+    _write_cycle_trigger(trigger_path, reason="telegram /review", mode="review")
+    return (
+        "🧪 Preparing a live-account review only. "
+        "_It cannot create approval or submit orders, even if the account is not halted._"
     )
-    return "🔄 cycle triggered — basket preview + orders in ~4 minutes."
 
 
 def _cmd_refresh() -> str:
@@ -2102,6 +2185,7 @@ def _cmd_regime() -> str:
 
 _APPROVAL_PENDING_FILE = "cycle_approval_pending.json"
 _APPROVAL_DECISION_FILE = "cycle_approval_decision.json"
+_HALTED_REVIEW_FILE = "cycle_halted_review.json"
 _APPROVAL_SYMBOL_RE = re.compile(r"[A-Z][A-Z0-9.-]{0,7}")
 
 
@@ -2113,6 +2197,82 @@ def _read_cycle_pending() -> dict[str, Any] | None:
         return json.loads(path.read_text())
     except Exception:
         return None
+
+
+def _read_cycle_review() -> dict[str, Any] | None:
+    """Read the runner-authored, display-only review artifact.
+
+    It deliberately uses a different file from approval state.  Keeping that
+    distinction at the reader boundary means `/approve` cannot accidentally
+    turn a review card into a deferred order.
+    """
+    path = settings.state_dir / _HALTED_REVIEW_FILE
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or payload.get("kind") != "halted_review":
+        return None
+    # A card written while halted becomes stale the moment `/resume` clears
+    # execution. Hiding it is safer than presenting an old CHF plan as a
+    # current proposal; a new `/cycle` will create fresh state if needed.
+    if payload.get("halted") and not _execution_halt_state()[0]:
+        return None
+    return payload
+
+
+def _format_cycle_review(review: dict[str, Any]) -> str:
+    """Render the exact runner-authored review without rebuilding orders."""
+    from trading.runner.approval_view import format_trade_review
+
+    account = review.get("account") if isinstance(review.get("account"), dict) else {}
+    ccy = str(account.get("base_currency") or "USD").upper()
+    equity = float(account.get("equity") or 0.0)
+    positions = int(account.get("position_count") or 0)
+    reason = str(review.get("halt_reason") or "execution is unavailable")
+    title = (
+        "🛑 *HALTED — LIVE-ACCOUNT REVIEW ONLY*"
+        if review.get("halted", False)
+        else "🧪 *LIVE-ACCOUNT REVIEW ONLY*"
+    )
+    lines = [
+        title,
+        f"Review `{str(review.get('id') or '')[:8]}` · reason: `{reason}`",
+        f"Built: `{review.get('built_at') or 'unknown'!s}`",
+        f"Live snapshot: {ccy} {equity:,.0f} equity · {positions} current position(s).",
+    ]
+    plan = review.get("plan") if isinstance(review.get("plan"), dict) else {}
+    rows = plan.get("orders") if isinstance(plan.get("orders"), list) else []
+    if rows and all("notional_base" in row for row in rows if isinstance(row, dict)):
+        lines += ["", format_trade_review(review, heading=title)]
+    elif rows:
+        lines += ["", "*Hypothetical reduce-only changes*"]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"  `{str(row.get('symbol') or '?').upper()}` "
+                f"{str(row.get('side') or '').lower()} {float(row.get('quantity') or 0):g}"
+            )
+    else:
+        adjustments = review.get("risk_adjustments")
+        detail = str(adjustments[0]) if isinstance(adjustments, list) and adjustments else ""
+        lines += ["", "*No hypothetical position changes passed the current sizing gates.*"]
+        if detail:
+            lines.append(f"Risk result: {detail}")
+    held = review.get("held_symbols")
+    if isinstance(held, list) and held:
+        lines.append("Holds preserved: `" + ", ".join(map(str, held)) + "`.")
+    lines += ["", "*0 orders submitted. This review cannot be approved, queued or executed.*"]
+    if review.get("halted", False):
+        lines.append(
+            "After `/resume`, run a brand-new `/cycle` for fresh quotes, a fresh account and a normal approval."
+        )
+    else:
+        lines.append("Run a brand-new `/cycle` when you want a normal approval.")
+    return "\n".join(lines)
 
 
 def _write_cycle_decision(action: str, **extra: Any) -> bool:
@@ -2144,6 +2304,11 @@ def _no_pending_cycle_reply(cmd: str) -> str:
     whether the runner is even alive — so report the state we can see.
     """
     lines = [f"nothing awaiting approval, so `{cmd}` has no cycle to act on."]
+    if _read_cycle_review() is not None:
+        lines.append(
+            "The latest cycle is a halted review only — use `/review` or `/proposal` to read it. "
+            "It cannot be approved; `/resume` then a brand-new `/cycle` is required for execution."
+        )
 
     age = _heartbeat_age()
     if age is None:
@@ -2172,6 +2337,9 @@ def _cmd_proposal() -> str:
     """
     pending = _read_cycle_pending()
     if pending is None:
+        review = _read_cycle_review()
+        if review is not None:
+            return _format_cycle_review(review)
         return _no_pending_cycle_reply("/proposal")
     from trading.runner.approval_view import format_trade_review
 
@@ -2309,6 +2477,22 @@ def _cmd_approve(args: list[str]) -> str:
     pending = _read_cycle_pending()
     if pending is None:
         return _no_pending_cycle_reply("/approve")
+
+    halted, reason = _execution_halt_state()
+    # One exception to the halt block, and only one: a window the RUNNER
+    # published as reduce-only. That flag is written by the process that
+    # verified every order against the live book, and the same check is
+    # repeated against a fresh snapshot before anything is submitted. A
+    # basket that can only shrink the account is exactly what an operator
+    # needs during a loss halt.
+    defensive = bool(pending.get("defensive_reduce_only"))
+    if halted and not defensive:
+        return (
+            "🛑 execution is currently halted, so this approval was not written.\n"
+            f"Reason: `{reason}`\n"
+            "_A halted review cannot be approved or deferred. After the risk state is clear, `/resume` "
+            "then run a brand-new `/cycle` for fresh quotes and approval._"
+        )
 
     short_id = str(pending.get("id", ""))[:8]
     phase = str(pending.get("phase") or "initial").lower()
@@ -2746,6 +2930,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_reject()
     if cmd == "/proposal":
         return _cmd_proposal()
+    if cmd in ("/review", "/plan"):
+        return _cmd_review()
     if cmd == "/candidates":
         # During an approval window, candidates means alternatives to the
         # exact plan in front of the operator. Outside one it retains the

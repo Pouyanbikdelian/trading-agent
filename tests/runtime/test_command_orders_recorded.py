@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from trading.core.types import (
     AssetClass,
     Instrument,
@@ -29,6 +31,7 @@ from trading.core.types import (
     TimeInForce,
 )
 from trading.execution.store import OrderStore
+from trading.risk import RiskLimits, RiskManager
 from trading.runtime.command_processor import _recording, _RecordingBroker
 
 TS = datetime(2026, 8, 11, 14, 14, 43, tzinfo=timezone.utc)
@@ -107,6 +110,22 @@ class TestTheOrderReachesTheLedger:
 
         assert len(inner.submitted) == 1
 
+    def test_halt_gate_wraps_the_actual_submit_not_just_command_start(self, tmp_path) -> None:
+        """A halt that lands after command dispatch still blocks the broker call."""
+        inner = _Broker()
+        manager = RiskManager(RiskLimits(), halt_state_path=tmp_path / "halt.json")
+        manager.halt("continuous monitor")
+        rec = _RecordingBroker(
+            inner,
+            OrderStore(tmp_path / "orders.db"),
+            risk_manager=manager,
+        )
+
+        with pytest.raises(RuntimeError, match="halt engaged"):
+            rec.submit_order(_order())
+
+        assert inner.submitted == []
+
 
 class TestItIsATransparentProxy:
     def test_other_broker_calls_pass_through(self, tmp_path) -> None:
@@ -138,9 +157,14 @@ def test_the_processor_uses_the_recording_broker() -> None:
     """A proxy nothing routes through records nothing."""
     src = Path("src/trading/runtime/command_processor.py").read_text()
 
-    assert "used = _recording(broker, state_dir) if needs_lock else broker" in src
+    # The proxy is deliberately created inside the execution lock now: the
+    # halt state is re-read there before choosing ordinary vs reduce-only
+    # command execution.  Both order paths must still use the same ledger
+    # wrapper; only non-order recovery commands use the raw broker.
+    assert "used = _recording(" in src
+    assert "risk_manager=risk_manager" in src
     assert "result = handler(cmd, used)" in src
-    assert "result = handler(cmd, broker)" not in src
+    assert "result = _execute_halted_reduce_only(cmd, used)" in src
 
 
 def test_every_order_submitting_command_is_covered() -> None:
@@ -150,5 +174,5 @@ def test_every_order_submitting_command_is_covered() -> None:
 
     assert "needs_lock = cmd.type in _ORDER_SUBMITTING_COMMANDS" in src
     i_flag = src.index("needs_lock = cmd.type in _ORDER_SUBMITTING_COMMANDS")
-    i_use = src.index("used = _recording(broker, state_dir)")
+    i_use = src.index("used = _recording(")
     assert i_flag < i_use

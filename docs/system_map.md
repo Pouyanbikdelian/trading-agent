@@ -138,9 +138,35 @@ When APScheduler fires (e.g. every Friday at market close):
    └─────────────────┘ └─────────────────┘ └─────────────────┘
 ```
 
+Since 2026-08-18 the auto-trigger is **continuous**: the runner's
+60-second account snapshot evaluates the daily-loss and drawdown limits
+on every tick, not just inside a cycle. Before that, a limit crossed on a
+Tuesday afternoon waited for the Friday cron.
+
 Once `halt.json` says halted, the next cycle:
-1. Refuses any new orders
-2. Stays halted until you explicitly `/resume` or `trading resume`
+1. Refuses any order that would **add or rotate** exposure
+2. Still builds the real CHF basket, and if part of it provably *reduces*
+   exposure, offers that reduce-only subset for approval
+   (`ALLOW_DEFENSIVE_CYCLE_WHEN_HALTED`, default true)
+3. Stays halted until you explicitly `/resume` or `trading resume` —
+   a defensive reduction never clears the halt
+
+## Halting is asymmetric
+
+A halt blocks risk going **up**. It must never block risk coming **down**
+— on 2026-08-18 it did, and two trailing-stop exits were refused while
+the book sat fully exposed for four hours.
+
+`trading/risk/reduce_only.py` holds the single proof of "this order
+lowers exposure": there must be a live position of the opposite sign, the
+side must be that position's exit side, no working broker order may point
+the other way, and the quantity is clamped to the remaining headroom so
+nothing can cross flat. Three callers share it — `/close`, `/flatten`,
+and the cycle's defensive basket — so there is exactly one definition of
+safe, and a fresh broker snapshot re-proves it immediately before submit.
+
+What a halt still will not do is close anything by itself. Use `/close`
+or `/flatten`, or approve the defensive basket.
 
 **A halt does NOT close positions.** Step 2 above used to read "If
 `flatten_on_next_cycle: true`, force-closes existing positions" — that
@@ -149,10 +175,21 @@ happened while `/halt` replied "Next cycle will force-flatten positions".
 Removed 2026-08-07; halting is reversible and liquidating is not, so one
 word should not market-sell a book. Use `/flatten` to exit.
 
-Note what that means: halting stops trading, it does not reduce
-exposure. Neither do the daily-loss and drawdown kill switches — they
-halt too. The position guards are the only thing that exits on its own,
-and they are off by default.
+Note what that means: halting stops *new* trading, it does not reduce
+exposure on its own. Neither do the daily-loss and drawdown kill
+switches — they halt too. The position guards are the only thing that
+exits automatically, and they are off by default; everything else that
+lowers risk needs you to type `/close`, `/flatten`, or `/approve` on a
+defensive basket.
+
+**The daily baseline now has provenance.** `RiskManager` only accepts a
+daily-loss baseline captured inside a five-minute window at the real NYSE
+open (`runtime/nyse_session.py` reads the exchange calendar, so holidays
+and early closes are handled). A baseline from the wrong session,
+currency or time of day is refused, and cycles stay review/reduce-only
+until the next open rather than measuring against a figure nobody can
+vouch for. Practical consequence: **the runner has to be up at 13:30 UTC**
+for that day to be executable.
 
 The risk manager itself **never auto-unhalts**. By design — an
 automatic recovery on a partially-understood failure is how money

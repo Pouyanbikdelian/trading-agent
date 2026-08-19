@@ -107,6 +107,15 @@ class HaltState(BaseModel):
     equity_high_watermark: float = 0.0
     daily_equity_open: float = 0.0
     last_day: date | None = None
+    # A daily-loss baseline is execution-safe only when it was captured at
+    # the opening of the actual NYSE session.  ``last_day`` remains for
+    # backwards-compatible historical state, while these fields let the live
+    # monitor reject a stale/mid-session/foreign-currency baseline rather
+    # than silently treating it as today's open.
+    daily_baseline_session: date | None = None
+    daily_baseline_captured_at: datetime | None = None
+    daily_baseline_source: str | None = None
+    daily_baseline_currency: str | None = None
 
     def replace(self, **fields: Any) -> HaltState:
         return self.model_copy(update=fields)

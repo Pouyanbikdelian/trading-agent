@@ -15,15 +15,31 @@ we operate at.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from trading.core.exec_lock import ExecutionBusyError, execution_lock
 from trading.core.logging import logger
-from trading.core.types import AssetClass, Instrument, Order, OrderType, Side, TimeInForce
+from trading.core.types import (
+    AssetClass,
+    Instrument,
+    Order,
+    OrderType,
+    Position,
+    Side,
+    TimeInForce,
+)
 from trading.execution.base import Broker
 from trading.risk.manager import RiskManager
+from trading.risk.reduce_only import (
+    QUANTITY_EPSILON,
+    BrokerInstrumentIdentity,
+    normalized_broker_instrument_identity,
+    open_order_side,
+    validated_quantity,
+)
 from trading.runner.alerts import TelegramAlerts
 from trading.runtime.commands import (
     Command,
@@ -33,11 +49,15 @@ from trading.runtime.commands import (
     pending_commands,
 )
 
-# Commands that submit orders to the broker. These MUST be gated by the
-# risk manager's halt state — otherwise an operator who has typed /halt
-# can still trade via /buy, /sell, /close, /flatten, /fx. Audit (May 2026)
-# flagged this as a critical bypass. Non-order commands (cancel, refresh,
-# reconnect) are still allowed during halt — they're recovery actions.
+# Commands that submit orders to the broker. These are all serialised and
+# audited, but a halt has a deliberately narrower policy: it blocks anything
+# that could add or rotate exposure.  Only the two explicit *exit* commands
+# may continue, and only through the fresh, reduce-only path below.
+#
+# This distinction matters during a loss-limit halt. Refusing a BUY/SELL/FX
+# command is the point of the kill switch; refusing the trailing stop or a
+# human's /close leaves the account exposed precisely when they need to get
+# out.  Audit (2026-08-18) found that the old all-or-nothing gate did both.
 _ORDER_SUBMITTING_COMMANDS = {
     CommandType.BUY,
     CommandType.SELL,
@@ -45,6 +65,22 @@ _ORDER_SUBMITTING_COMMANDS = {
     CommandType.FLATTEN,
     CommandType.FX_CONVERT,
 }
+
+# These command types are eligible for the halted reduce-only path.  This is
+# intentionally type-based, not an "all" alias on SELL: an operator's
+# discretionary /sell remains blocked while halted, even if its quantity
+# happens to equal the current holding.
+_HALTED_REDUCE_ONLY_COMMANDS = {CommandType.CLOSE, CommandType.FLATTEN}
+
+# The quantity tolerance, contract-identity normalisation and side/quantity
+# validators live in ``trading.risk.reduce_only`` so this module and the
+# cycle's defensive rebalance prove "this order reduces exposure" the same
+# way. Two independent definitions of that proof is one too many.
+_QUANTITY_EPSILON = QUANTITY_EPSILON
+_BrokerInstrumentIdentity = BrokerInstrumentIdentity
+_open_order_side = open_order_side
+_validated_quantity = validated_quantity
+_normalized_broker_instrument_identity = normalized_broker_instrument_identity
 
 # Order-submitting commands expire. A /flatten typed while the runner was
 # down must NOT fire when the runner comes back hours or days later — the
@@ -73,6 +109,292 @@ def _age_seconds(cmd: Command) -> float | None:
     return (datetime.now(tz=timezone.utc) - ts).total_seconds()
 
 
+def _reload_and_is_halted(risk_manager: RiskManager | None) -> bool:
+    """Read the cross-process halt state and return its current value.
+
+    Telegram writes ``halt.json`` from a different container.  The initial
+    read lets ordinary blocked commands fail quickly; the caller repeats it
+    *inside* ``execution_lock`` before any order is built, closing the race
+    where a cycle halts while a command is waiting for the lock.
+    """
+    if risk_manager is None:
+        return False
+    try:
+        risk_manager._reload_halt_state()
+    except Exception:
+        logger.bind(component="command_processor").exception(
+            "halt state reload failed; falling back to in-memory state"
+        )
+    return risk_manager.is_halted()
+
+
+def _halt_reason(risk_manager: RiskManager) -> str:
+    return getattr(risk_manager._state, "reason", "") or "halted"
+
+
+def _reject_halted_command(
+    cmd: Command,
+    state_dir: Path,
+    alerts: TelegramAlerts,
+    risk_manager: RiskManager,
+) -> None:
+    """Record and explain a halt refusal without ever touching the broker."""
+    reason = _halt_reason(risk_manager)
+    msg = (
+        f"refused — risk manager halted: {reason}. "
+        "Only verified /close or /flatten exits are available."
+    )
+    logger.bind(component="command_processor").warning(
+        f"halt gate blocked {cmd.type.value} command {cmd.id}"
+    )
+    mark_executed(cmd, state_dir, status="error", result=msg)
+    alerts.error(f"🛑 `{_short_id(cmd.id)}` {cmd.type.value} {msg}")
+
+
+def _fresh_positions_for_halted_exit(broker: Broker) -> list[Position]:
+    """Return a position snapshot suitable for a live reduce-only exit.
+
+    The IBKR adapter exposes ``get_positions_strict`` specifically for a
+    request/response snapshot rather than its subscription cache.  Prefer it
+    when available.  Other Broker implementations retain the Protocol's
+    ``get_positions`` surface, but any read failure is fatal: an exit cannot
+    be proven reduce-only from a stale or absent position view.
+    """
+    strict = getattr(broker, "get_positions_strict", None)
+    try:
+        raw = strict() if callable(strict) else broker.get_positions()
+    except Exception as e:
+        raise RuntimeError(
+            "cannot verify fresh broker positions for halted reduce-only exit; no order sent"
+        ) from e
+    if raw is None:
+        raise RuntimeError(
+            "broker returned no position snapshot for halted reduce-only exit; no order sent"
+        )
+    return list(raw)
+
+
+def _fresh_open_orders_for_halted_exit(broker: Broker) -> list[Order]:
+    """Return working orders, failing closed when they cannot be checked.
+
+    A position alone is insufficient: a queued opposite-side order can make
+    a nominal close flip the account after the current order fills.  The
+    normal manual path degrades when this read is unavailable; the halted
+    exit path must not, because this is its sole safety proof.
+    """
+    try:
+        raw = broker.get_open_orders()
+    except Exception as e:
+        raise RuntimeError(
+            "cannot verify broker working orders for halted reduce-only exit; no order sent"
+        ) from e
+    if raw is None:
+        raise RuntimeError(
+            "broker returned no working-order snapshot for halted reduce-only exit; no order sent"
+        )
+    return list(raw)
+
+
+def _halted_reduce_only_plan(
+    position: Position,
+    open_orders: list[Order],
+) -> tuple[Side, float, float]:
+    """Determine the one order that can take ``position`` exactly to zero.
+
+    This is intentionally stricter than the normal manual sell clamp.  A
+    halted exit is allowed only after the live position and *all* same-
+    instrument working orders agree that the order will reduce, never flip or
+    increase, exposure.  An existing order in the exposure-increasing
+    direction makes that proof impossible, so the command fails closed.
+
+    Returns ``(side, quantity_to_submit, already_working_exit_quantity)``.
+    A zero quantity means existing verified exit orders already cover the
+    position and nothing new should be submitted.
+    """
+    settled = _validated_quantity(position.quantity, label="position")
+    if abs(settled) <= _QUANTITY_EPSILON:
+        raise ValueError(f"no open position in {position.instrument.symbol}")
+
+    exit_side = Side.SELL if settled > 0 else Side.BUY
+    increasing_side = Side.BUY if settled > 0 else Side.SELL
+    working_exit = 0.0
+    position_identity = _normalized_broker_instrument_identity(position.instrument)
+
+    for order in open_orders:
+        if _normalized_broker_instrument_identity(order.instrument) != position_identity:
+            continue
+        quantity = _validated_quantity(order.quantity, label="working order")
+        if quantity <= _QUANTITY_EPSILON:
+            continue
+        side = _open_order_side(order)
+        if side == increasing_side:
+            raise ValueError(
+                f"{position.instrument.symbol}: working {side.value.upper()} order would "
+                "increase exposure; cancel it before a halted close"
+            )
+        if side != exit_side:
+            # Defensive for future enum expansion: never guess that an
+            # unfamiliar order direction is harmless.
+            raise ValueError(
+                f"{position.instrument.symbol}: cannot verify working order direction; "
+                "no order sent"
+            )
+        working_exit += quantity
+
+    held = abs(settled)
+    if working_exit > held + _QUANTITY_EPSILON:
+        raise ValueError(
+            f"{position.instrument.symbol}: working {exit_side.value.upper()} quantity "
+            f"{working_exit:g} exceeds live position {held:g}; refusing an exit that could flip"
+        )
+    remaining = max(0.0, held - working_exit)
+    if remaining <= _QUANTITY_EPSILON:
+        remaining = 0.0
+    return exit_side, remaining, working_exit
+
+
+def _halted_close_order(
+    cmd: Command,
+    broker: Broker,
+) -> dict[str, Any]:
+    """Submit a fresh, full, reduce-only close while a halt is active."""
+    sym = str(cmd.args["symbol"]).upper()
+    positions = _fresh_positions_for_halted_exit(broker)
+    matches = [
+        p
+        for p in positions
+        if str(p.instrument.symbol).upper() == sym
+        and abs(_validated_quantity(p.quantity, label="position")) > _QUANTITY_EPSILON
+    ]
+    if not matches:
+        raise ValueError(f"no open position in {sym}")
+    if len(matches) != 1:
+        instruments = ", ".join(p.instrument.key for p in matches)
+        raise ValueError(
+            f"multiple live positions match {sym} ({instruments}); use /flatten or resolve "
+            "the broker positions first"
+        )
+
+    position = matches[0]
+    side, quantity, already_working = _halted_reduce_only_plan(
+        position,
+        _fresh_open_orders_for_halted_exit(broker),
+    )
+    if quantity == 0.0:
+        return {
+            "symbol": position.instrument.symbol,
+            "qty": 0.0,
+            "side": side.value.upper(),
+            "type": OrderType.MARKET.value,
+            "already_working": already_working,
+            "halted_reduce_only": True,
+            "submitted": False,
+        }
+
+    order = Order(
+        client_order_id=f"halted-close-{_short_id(cmd.id)}",
+        instrument=position.instrument,
+        side=side,
+        quantity=quantity,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        created_at=datetime.now(tz=timezone.utc),
+    )
+    broker.submit_order(order)
+    return {
+        "symbol": position.instrument.symbol,
+        "qty": quantity,
+        "side": side.value.upper(),
+        "type": order.order_type.value,
+        "client_order_id": order.client_order_id,
+        "working_exit_qty": already_working,
+        "halted_reduce_only": True,
+        "submitted": True,
+    }
+
+
+def _halted_flatten_orders(cmd: Command, broker: Broker) -> dict[str, Any]:
+    """Flatten only positions whose live broker state proves it is safe.
+
+    The entire verification pass happens before the first submit.  In
+    particular, an orphaned working order on a flat symbol could reopen the
+    book after a supposedly successful flatten, so it rejects the command
+    rather than reporting a misleading partial success.
+    """
+    positions = [
+        p
+        for p in _fresh_positions_for_halted_exit(broker)
+        if abs(_validated_quantity(p.quantity, label="position")) > _QUANTITY_EPSILON
+    ]
+    open_orders = _fresh_open_orders_for_halted_exit(broker)
+
+    seen_identities: set[_BrokerInstrumentIdentity] = set()
+    for position in positions:
+        identity = _normalized_broker_instrument_identity(position.instrument)
+        if identity in seen_identities:
+            raise ValueError(
+                f"duplicate or ambiguous live position for {position.instrument.key}; "
+                "no halted flatten sent"
+            )
+        seen_identities.add(identity)
+
+    # Every working order must belong to a currently-held instrument.  An
+    # order on a flat name would create new exposure after this command, and
+    # we cannot call a flatten verified while it remains live.
+    for order in open_orders:
+        quantity = _validated_quantity(order.quantity, label="working order")
+        if quantity <= _QUANTITY_EPSILON:
+            continue
+        _open_order_side(order)
+        if _normalized_broker_instrument_identity(order.instrument) not in seen_identities:
+            raise ValueError(
+                f"working order for {order.instrument.symbol} has no live position and could "
+                "create exposure; cancel it before a halted flatten"
+            )
+
+    plans = [(position, *_halted_reduce_only_plan(position, open_orders)) for position in positions]
+
+    closed: list[str] = []
+    skipped: list[str] = []
+    submitted: list[Order] = []
+    for idx, (position, side, quantity, already_working) in enumerate(plans):
+        if quantity == 0.0:
+            skipped.append(
+                f"{position.instrument.symbol} (already covered by {already_working:g} "
+                f"working {side.value.upper()})"
+            )
+            continue
+        order = Order(
+            client_order_id=f"halted-flatten-{_short_id(cmd.id)}-{idx}",
+            instrument=position.instrument,
+            side=side,
+            quantity=quantity,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            created_at=datetime.now(tz=timezone.utc),
+        )
+        broker.submit_order(order)
+        submitted.append(order)
+        closed.append(position.instrument.symbol)
+
+    return {
+        "closed": closed,
+        "skipped": skipped,
+        "n_closed": len(closed),
+        "client_order_ids": [order.client_order_id for order in submitted],
+        "halted_reduce_only": True,
+    }
+
+
+def _execute_halted_reduce_only(cmd: Command, broker: Broker) -> dict[str, Any]:
+    """Route the two explicitly permitted halted commands to safe handlers."""
+    if cmd.type == CommandType.CLOSE:
+        return _halted_close_order(cmd, broker)
+    if cmd.type == CommandType.FLATTEN:
+        return _halted_flatten_orders(cmd, broker)
+    raise AssertionError(f"{cmd.type.value} is not a halted reduce-only command")
+
+
 class _RecordingBroker:
     """Broker proxy that writes every submitted order to the ledger.
 
@@ -96,30 +418,85 @@ class _RecordingBroker:
     row with no fill, which reconciliation simply never closes.
     """
 
-    def __init__(self, inner: Any, store: Any) -> None:
+    def __init__(
+        self,
+        inner: Any,
+        store: Any,
+        *,
+        risk_manager: RiskManager | None = None,
+        allow_when_halted: bool = False,
+    ) -> None:
         self._inner = inner
         self._store = store
+        self._risk_manager = risk_manager
+        self._allow_when_halted = allow_when_halted
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
     def submit_order(self, order: Any) -> Any:
-        try:
-            self._store.save_order(order)
-        except Exception as e:  # never block a trade on bookkeeping
-            logger.bind(component="command_processor").exception(
-                f"could not record {getattr(order, 'client_order_id', '?')} to the ledger: {e}"
-            )
+        if self._risk_manager is None:
+            return self._record_and_submit(order)
+        with self._risk_manager.submission_gate(
+            allow_when_halted=self._allow_when_halted
+        ) as permitted:
+            if not permitted:
+                raise RuntimeError("halt engaged before broker submission; no order sent")
+            return self._record_and_submit(order)
+
+    def convert_currency(self, *args: Any, **kwargs: Any) -> Any:
+        """Gate an FX conversion like any other exposure-increasing action."""
+        converter = getattr(self._inner, "convert_currency", None)
+        if not callable(converter):
+            raise RuntimeError("this broker doesn't support FX conversion")
+        if self._risk_manager is None:
+            return converter(*args, **kwargs)
+        with self._risk_manager.submission_gate(
+            allow_when_halted=self._allow_when_halted
+        ) as permitted:
+            if not permitted:
+                raise RuntimeError("halt engaged before FX conversion; no conversion sent")
+            return converter(*args, **kwargs)
+
+    def _record_and_submit(self, order: Any) -> Any:
+        if self._store is not None:
+            try:
+                self._store.save_order(order)
+            except Exception as e:  # never block a trade on bookkeeping
+                logger.bind(component="command_processor").exception(
+                    f"could not record {getattr(order, 'client_order_id', '?')} to the ledger: {e}"
+                )
         return self._inner.submit_order(order)
 
 
-def _recording(broker: Broker, state_dir: Path) -> Any:
+def _recording(
+    broker: Broker,
+    state_dir: Path,
+    *,
+    risk_manager: RiskManager | None = None,
+    allow_when_halted: bool = False,
+) -> Any:
     try:
         from trading.execution.store import OrderStore
 
-        return _RecordingBroker(broker, OrderStore(Path(state_dir) / "orders.db"))
+        return _RecordingBroker(
+            broker,
+            OrderStore(Path(state_dir) / "orders.db"),
+            risk_manager=risk_manager,
+            allow_when_halted=allow_when_halted,
+        )
     except Exception as e:
         logger.bind(component="command_processor").exception(f"ledger unavailable: {e}")
+        # A bookkeeping outage is not permission to bypass the hard halt
+        # gate. Keep the safety proxy even when the ledger itself cannot be
+        # constructed; it simply records no row for this command.
+        if risk_manager is not None:
+            return _RecordingBroker(
+                broker,
+                None,
+                risk_manager=risk_manager,
+                allow_when_halted=allow_when_halted,
+            )
         return broker
 
 
@@ -188,33 +565,18 @@ def _execute_one(
             alerts.error(f"⌛ `{_short_id(cmd.id)}` {cmd.type.value} {msg}")
             return
 
-    # Halt gate: refuse to submit orders while the risk manager is halted.
-    # Operator must /resume before manual trading resumes.
-    #
-    # Reload halt.json before the check — the Telegram bot writes that
-    # file from a separate process, so the risk manager's in-memory
-    # state can be stale. Without this reload, a /resume from Telegram
-    # wouldn't unblock manual orders until the next cycle ran (the same
-    # bug that hit evaluate_intraday, fixed in commit a914db2).
-    if risk_manager is not None:
-        try:
-            risk_manager._reload_halt_state()
-        except Exception:
-            logger.bind(component="command_processor").exception(
-                "halt state reload failed; falling back to in-memory state"
-            )
+    # Fast halt gate.  CLOSE and FLATTEN are deliberately exempt here, but
+    # they do not get a normal order path: after acquiring the execution lock
+    # we re-read the halt file and verify a fresh broker position + all open
+    # orders before allowing a strictly reduce-only exit.  Every other order
+    # type remains blocked while halted.
     if (
         risk_manager is not None
-        and risk_manager.is_halted()
+        and _reload_and_is_halted(risk_manager)
         and cmd.type in _ORDER_SUBMITTING_COMMANDS
+        and cmd.type not in _HALTED_REDUCE_ONLY_COMMANDS
     ):
-        reason = getattr(risk_manager._state, "reason", "") or "halted"
-        msg = f"refused — risk manager halted: {reason}. /resume first."
-        logger.bind(component="command_processor").warning(
-            f"halt gate blocked {cmd.type.value} command {cmd.id}"
-        )
-        mark_executed(cmd, state_dir, status="error", result=msg)
-        alerts.error(f"🛑 `{_short_id(cmd.id)}` {cmd.type.value} {msg}")
+        _reject_halted_command(cmd, state_dir, alerts, risk_manager)
         return
 
     # Execution gate: one mutex across every path that can reach the
@@ -232,14 +594,36 @@ def _execute_one(
     # because "try again" is only useful if you know what to wait for.
     needs_lock = cmd.type in _ORDER_SUBMITTING_COMMANDS
     try:
-        # Order-submitting commands go through the recording proxy so the
-        # operator's own trades reach the ledger like the cycle's do.
-        used = _recording(broker, state_dir) if needs_lock else broker
         if needs_lock:
             with execution_lock(state_dir, holder=f"command:{cmd.type.value}"):
-                result = handler(cmd, used)
+                # Check once more *inside* the lock.  A cycle can halt the
+                # book while this command is queued behind another submit;
+                # a pre-lock check alone would let a stale BUY race through.
+                halted_now = _reload_and_is_halted(risk_manager)
+                if (
+                    halted_now
+                    and risk_manager is not None
+                    and cmd.type not in _HALTED_REDUCE_ONLY_COMMANDS
+                ):
+                    _reject_halted_command(cmd, state_dir, alerts, risk_manager)
+                    return
+
+                # Order-submitting commands go through the recording proxy
+                # so the operator's own trades reach the ledger like the
+                # cycle's do.  The halted exit path uses the same proxy,
+                # execution lock and command audit as ordinary commands.
+                used = _recording(
+                    broker,
+                    state_dir,
+                    risk_manager=risk_manager,
+                    allow_when_halted=halted_now,
+                )
+                if halted_now:
+                    result = _execute_halted_reduce_only(cmd, used)
+                else:
+                    result = handler(cmd, used)
         else:
-            result = handler(cmd, used)
+            result = handler(cmd, broker)
         mark_executed(cmd, state_dir, status="ok", result=result)
         alerts.info(_format_success(cmd, result))
     except ExecutionBusyError as e:
@@ -446,11 +830,11 @@ def _h_fx_convert(cmd: Command, broker: Broker) -> dict[str, Any]:
     from_ccy = str(cmd.args["from_ccy"]).upper()
     to_ccy = str(cmd.args["to_ccy"]).upper()
     amount = float(cmd.args["amount"])
-    if not hasattr(broker, "convert_currency"):
+    converter = getattr(broker, "convert_currency", None)
+    if not callable(converter):
         raise RuntimeError("this broker doesn't support FX conversion")
-    return broker.convert_currency(  # type: ignore[attr-defined]
-        from_ccy=from_ccy, to_ccy=to_ccy, from_amount=amount
-    )
+    typed_converter = cast(Callable[..., dict[str, Any]], converter)
+    return typed_converter(from_ccy=from_ccy, to_ccy=to_ccy, from_amount=amount)
 
 
 #: Dropped by /refresh, picked up by the runner. Same pattern as
@@ -560,6 +944,11 @@ def _format_success(cmd: Command, result: dict[str, Any] | str | None) -> str:
             f"({result['type']}) submitted"  # type: ignore[index]
         )
     if cmd.type == CommandType.CLOSE:
+        if isinstance(result, dict) and result.get("submitted") is False:
+            return (
+                f"✅ `{cmd_id}` Close {result['symbol']}: already covered by "
+                f"{result['already_working']:g} working {result['side']} order(s); no duplicate sent"
+            )
         return f"✅ `{cmd_id}` Close {result['symbol']} ({result['qty']:g} shares) submitted"  # type: ignore[index]
     if cmd.type == CommandType.FLATTEN:
         n = result["n_closed"]  # type: ignore[index]
@@ -577,9 +966,10 @@ def _format_success(cmd: Command, result: dict[str, Any] | str | None) -> str:
             f"→ {result['to_ccy']} (market) submitted"  # type: ignore[index]
         )
     if cmd.type == CommandType.RECONNECT_BROKER:
-        via = result.get("via") if isinstance(result, dict) else None  # type: ignore[union-attr]
+        reconnect_result = result if isinstance(result, dict) else {}
+        via = reconnect_result.get("via")
         if via == "gateway_restart":
-            note = result.get("note", "")  # type: ignore[union-attr]
+            note = reconnect_result.get("note", "")
             return f"🔄 `{cmd_id}` Gateway port was down — restart issued.\n{note}"
         return f"✅ `{cmd_id}` Broker reconnected"
     return f"✅ `{cmd_id}` {cmd.type.value} executed"

@@ -1,13 +1,16 @@
-"""Tests for the command processor's safety gates.
+"""Tests for the command processor's halt and reduce-only safety gates.
 
-The focus here is the halt-gate: order-submitting commands (BUY, SELL,
-CLOSE, FLATTEN, FX_CONVERT) MUST be refused while the risk manager is
-halted. Otherwise, an operator who types /halt and then /buy still trades.
+A halt must stop exposure increases, but it must not turn the account into a
+prison: an explicitly requested, broker-verified close remains available for
+the operator and the position guards.  The exit path is intentionally much
+narrower than an ordinary SELL and fails closed if its safety proof is absent.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -16,7 +19,10 @@ from trading.core.types import (
     AssetClass,
     Instrument,
     Order,
+    OrderType,
     Position,
+    Side,
+    TimeInForce,
 )
 from trading.risk import RiskLimits, RiskManager
 from trading.runner.alerts import TelegramAlerts
@@ -30,6 +36,10 @@ class _FakeBroker:
     def __init__(self) -> None:
         self.submitted: list[Order] = []
         self.positions: list[Position] = []
+        self.strict_positions: list[Position] | None = None
+        self.open_orders: list[Order] = []
+        self.open_orders_error: Exception | None = None
+        self.strict_position_reads = 0
         self.connected = True
 
     def submit_order(self, order: Order) -> None:
@@ -37,6 +47,15 @@ class _FakeBroker:
 
     def get_positions(self) -> list[Position]:
         return list(self.positions)
+
+    def get_positions_strict(self) -> list[Position]:
+        self.strict_position_reads += 1
+        return list(self.positions if self.strict_positions is None else self.strict_positions)
+
+    def get_open_orders(self) -> list[Order]:
+        if self.open_orders_error is not None:
+            raise self.open_orders_error
+        return list(self.open_orders)
 
 
 class _RecordingAlerts(TelegramAlerts):
@@ -79,6 +98,53 @@ def risk_manager(tmp_path: Path) -> RiskManager:
     )
 
 
+def _position(symbol: str, quantity: float) -> Position:
+    return Position(
+        instrument=Instrument(symbol=symbol, asset_class=AssetClass.EQUITY),
+        quantity=quantity,
+        avg_price=100.0,
+    )
+
+
+def _working_order(symbol: str, side: Side, quantity: float) -> Order:
+    return Order(
+        client_order_id=f"working-{symbol}-{side.value}-{quantity}",
+        instrument=Instrument(symbol=symbol, asset_class=AssetClass.EQUITY),
+        side=side,
+        quantity=quantity,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        created_at=datetime.now(tz=timezone.utc),
+    )
+
+
+def _stock_instrument(
+    symbol: str,
+    *,
+    asset_class: AssetClass,
+    exchange: str,
+    currency: str = "USD",
+) -> Instrument:
+    return Instrument(
+        symbol=symbol,
+        asset_class=asset_class,
+        exchange=exchange,
+        currency=currency,
+    )
+
+
+def _working_order_for_instrument(instrument: Instrument, side: Side, quantity: float) -> Order:
+    return Order(
+        client_order_id=f"working-{instrument.symbol}-{side.value}-{quantity}",
+        instrument=instrument,
+        side=side,
+        quantity=quantity,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        created_at=datetime.now(tz=timezone.utc),
+    )
+
+
 def test_halt_gate_blocks_buy_when_halted(state_dir, risk_manager) -> None:
     broker = _FakeBroker()
     alerts = _RecordingAlerts()
@@ -97,16 +163,16 @@ def test_halt_gate_blocks_buy_when_halted(state_dir, risk_manager) -> None:
     assert "halted" in error_messages[0].lower()
 
 
-def test_halt_gate_blocks_all_order_command_types(state_dir, risk_manager) -> None:
-    """BUY, SELL, CLOSE, FLATTEN, FX_CONVERT must all be refused while halted."""
+def test_halt_gate_blocks_exposure_increasing_order_types(state_dir, risk_manager) -> None:
+    """BUY, discretionary SELL, and FX remain unavailable while halted."""
     broker = _FakeBroker()
     alerts = _RecordingAlerts()
     risk_manager.halt("safety test")
 
     submit(Command.new(CommandType.BUY, args={"symbol": "AAPL", "qty": 1}), state_dir)
-    submit(Command.new(CommandType.SELL, args={"symbol": "AAPL", "qty": 1}), state_dir)
-    submit(Command.new(CommandType.CLOSE, args={"symbol": "AAPL"}), state_dir)
-    submit(Command.new(CommandType.FLATTEN), state_dir)
+    # A SELL remains blocked even if the spelling looks like a full exit.
+    # Only the explicit CLOSE command can enter the strictly verified path.
+    submit(Command.new(CommandType.SELL, args={"symbol": "AAPL", "qty": "all"}), state_dir)
     submit(
         Command.new(
             CommandType.FX_CONVERT,
@@ -117,7 +183,262 @@ def test_halt_gate_blocks_all_order_command_types(state_dir, risk_manager) -> No
 
     process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
     assert broker.submitted == []
-    assert len([m for level, m in alerts.messages if level == "error"]) == 5
+    assert len([m for level, m in alerts.messages if level == "error"]) == 3
+
+
+def test_halted_close_uses_fresh_position_and_is_reduce_only(state_dir, risk_manager) -> None:
+    """A halted /close must size from a fresh broker snapshot, not cache state."""
+    broker = _FakeBroker()
+    broker.positions = [_position("AAPL", 1)]  # stale-looking fallback view
+    broker.strict_positions = [_position("AAPL", 10)]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.CLOSE, args={"symbol": "AAPL"}), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert broker.strict_position_reads == 1
+    assert len(broker.submitted) == 1
+    order = broker.submitted[0]
+    assert order.instrument.symbol == "AAPL"
+    assert order.side == Side.SELL
+    assert order.quantity == 10
+    assert order.client_order_id.startswith("halted-close-")
+    assert any("Close AAPL" in msg for level, msg in alerts.messages if level == "info")
+
+
+def test_halted_guard_close_uses_the_same_reduce_only_path(state_dir, risk_manager) -> None:
+    """Trailing-stop commands are CLOSE commands and stay available in a halt."""
+    broker = _FakeBroker()
+    broker.positions = [_position("GEV", 9)]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(
+        Command.new(
+            CommandType.CLOSE,
+            args={"symbol": "GEV"},
+            requested_by="guard:trailing_stop",
+        ),
+        state_dir,
+    )
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert [(o.instrument.symbol, o.side, o.quantity) for o in broker.submitted] == [
+        ("GEV", Side.SELL, 9)
+    ]
+
+
+def test_halted_close_buys_only_the_actual_short_to_cover(state_dir, risk_manager) -> None:
+    """The reduce-only proof works in both directions, including legacy shorts."""
+    broker = _FakeBroker()
+    broker.positions = [_position("TSLA", -3)]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.CLOSE, args={"symbol": "TSLA"}), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert [(o.instrument.symbol, o.side, o.quantity) for o in broker.submitted] == [
+        ("TSLA", Side.BUY, 3)
+    ]
+
+
+def test_halted_close_nets_verified_working_exit_without_flipping(state_dir, risk_manager) -> None:
+    """Only the uncovered live amount is allowed after a working exit."""
+    broker = _FakeBroker()
+    broker.positions = [_position("AAPL", 10)]
+    broker.open_orders = [_working_order("AAPL", Side.SELL, 4)]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.CLOSE, args={"symbol": "AAPL"}), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert [(o.side, o.quantity) for o in broker.submitted] == [(Side.SELL, 6)]
+
+
+def test_halted_close_recognises_equivalent_etf_and_equity_contract_metadata(
+    state_dir, risk_manager
+) -> None:
+    """IBKR venue/class metadata must not hide an existing same-stock exit."""
+    broker = _FakeBroker()
+    broker.positions = [
+        Position(
+            instrument=_stock_instrument("GLD", asset_class=AssetClass.ETF, exchange="ARCA"),
+            quantity=10,
+            avg_price=100.0,
+        )
+    ]
+    broker.open_orders = [
+        _working_order_for_instrument(
+            _stock_instrument("GLD", asset_class=AssetClass.EQUITY, exchange="SMART"),
+            Side.SELL,
+            10,
+        )
+    ]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.CLOSE, args={"symbol": "GLD"}), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert broker.submitted == []
+    assert not [msg for level, msg in alerts.messages if level == "error"]
+    assert any("already covered" in msg for level, msg in alerts.messages if level == "info")
+
+
+def test_halted_close_rejects_a_conflicting_working_order(state_dir, risk_manager) -> None:
+    """A working BUY means a new SELL cannot be proven reduce-only."""
+    broker = _FakeBroker()
+    broker.positions = [_position("AAPL", 10)]
+    broker.open_orders = [_working_order("AAPL", Side.BUY, 1)]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.CLOSE, args={"symbol": "AAPL"}), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert broker.submitted == []
+    errors = [msg for level, msg in alerts.messages if level == "error"]
+    assert len(errors) == 1
+    assert "increase exposure" in errors[0]
+
+
+def test_halted_close_fails_closed_when_working_orders_cannot_be_verified(
+    state_dir, risk_manager
+) -> None:
+    """No exit order is safe when an existing opposing order is unknowable."""
+    broker = _FakeBroker()
+    broker.positions = [_position("AAPL", 10)]
+    broker.open_orders_error = ConnectionError("gateway unavailable")
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.CLOSE, args={"symbol": "AAPL"}), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert broker.submitted == []
+    errors = [msg for level, msg in alerts.messages if level == "error"]
+    assert len(errors) == 1
+    assert "cannot verify broker working orders" in errors[0]
+
+
+def test_halted_flatten_reduces_long_and_short_positions(state_dir, risk_manager) -> None:
+    """A verified flatten routes each actual position toward zero, never through it."""
+    broker = _FakeBroker()
+    broker.positions = [_position("AAPL", 10), _position("TSLA", -3)]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.FLATTEN), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert {(o.instrument.symbol, o.side, o.quantity) for o in broker.submitted} == {
+        ("AAPL", Side.SELL, 10),
+        ("TSLA", Side.BUY, 3),
+    }
+    assert len({o.client_order_id for o in broker.submitted}) == 2
+
+
+def test_halted_flatten_normalises_equivalent_etf_and_equity_contract_metadata(
+    state_dir, risk_manager
+) -> None:
+    """Flatten must recognise an ARCA ETF exit reported as SMART/EQUITY."""
+    broker = _FakeBroker()
+    broker.positions = [
+        Position(
+            instrument=_stock_instrument("GLD", asset_class=AssetClass.ETF, exchange="ARCA"),
+            quantity=10,
+            avg_price=100.0,
+        )
+    ]
+    broker.open_orders = [
+        _working_order_for_instrument(
+            _stock_instrument("GLD", asset_class=AssetClass.EQUITY, exchange="SMART"),
+            Side.SELL,
+            10,
+        )
+    ]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.FLATTEN), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert broker.submitted == []
+    assert not [msg for level, msg in alerts.messages if level == "error"]
+    assert any("already covered" in msg for level, msg in alerts.messages if level == "info")
+
+
+def test_halted_flatten_does_not_conflate_same_symbol_with_different_currency(
+    state_dir, risk_manager
+) -> None:
+    """Currency remains part of the identity, so a separate listing cannot be hidden."""
+    broker = _FakeBroker()
+    broker.positions = [
+        Position(
+            instrument=_stock_instrument("GLD", asset_class=AssetClass.ETF, exchange="ARCA"),
+            quantity=10,
+            avg_price=100.0,
+        )
+    ]
+    broker.open_orders = [
+        _working_order_for_instrument(
+            _stock_instrument(
+                "GLD", asset_class=AssetClass.EQUITY, exchange="SMART", currency="CHF"
+            ),
+            Side.SELL,
+            10,
+        )
+    ]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.FLATTEN), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert broker.submitted == []
+    errors = [msg for level, msg in alerts.messages if level == "error"]
+    assert len(errors) == 1
+    assert "could create exposure" in errors[0]
+
+
+def test_halted_flatten_rejects_orphan_or_conflicting_working_orders(
+    state_dir, risk_manager
+) -> None:
+    """No partial flatten may claim safety while a queued order can reopen risk."""
+    broker = _FakeBroker()
+    broker.positions = [_position("AAPL", 10)]
+    broker.open_orders = [_working_order("MSFT", Side.BUY, 1)]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+
+    submit(Command.new(CommandType.FLATTEN), state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert broker.submitted == []
+    errors = [msg for level, msg in alerts.messages if level == "error"]
+    assert len(errors) == 1
+    assert "could create exposure" in errors[0]
+
+
+def test_halted_close_still_obeys_the_order_ttl(state_dir, risk_manager) -> None:
+    """The emergency exit exception never resurrects an old /close."""
+    broker = _FakeBroker()
+    broker.positions = [_position("AAPL", 10)]
+    alerts = _RecordingAlerts()
+    risk_manager.halt("daily loss")
+    stale = replace(
+        Command.new(CommandType.CLOSE, args={"symbol": "AAPL"}),
+        requested_at=(datetime.now(tz=timezone.utc) - timedelta(minutes=16)).isoformat(),
+    )
+
+    submit(stale, state_dir)
+    process_pending(broker, state_dir, alerts, risk_manager=risk_manager)
+
+    assert broker.submitted == []
+    assert any("expired" in msg for level, msg in alerts.messages if level == "error")
 
 
 def test_halt_gate_allows_non_order_commands_when_halted(state_dir, risk_manager) -> None:

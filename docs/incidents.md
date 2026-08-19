@@ -14,6 +14,100 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-08-18 — A loss halt became an information blackout
+
+**TL;DR:** The account dropped through the −0.60% daily-loss limit at
+14:54 UTC. Nothing halted until the operator manually ran `/cycle` at
+19:28 UTC — four and a half hours later — because **risk was only ever
+evaluated inside a cycle**. Worse, once halted, the command gate refused
+two automatic trailing-stop exits (`GEV`, `OUST`) along with `/close` and
+`/flatten`: the kill switch that fired to protect the book had also
+removed every way of reducing it. `/resume` → `/cycle` correctly
+re-halted, which looked to the operator like a broken bot.
+
+### Symptoms
+
+- Live equity CHF 86,087.26 against a stored baseline of CHF 86,989.82
+  (−1.04%); the halt when it finally landed read −1.09%.
+- `/resume` reported success, then the next `/cycle` halted again after a
+  two-minute price refresh — twice, with no explanation of why.
+- Two guard-triggered closes rejected with "risk manager halted".
+- `/pm run` returned a `$1.09M` book in USD next to a CHF account with
+  ~CHF 86k in it, and its prose claimed a 70% cap above a 77% target.
+
+### Wrong theories
+
+1. **"The order queue is stuck."** It was not: `/cycle` ran, evaluated
+   risk, and correctly declined. Zero orders is not the same as zero work.
+2. **"The gateway outage blocked it."** There was a brief outage, but it
+   resolved before either cycle.
+3. **"`/resume` didn't clear the halt."** It did. `/resume` deliberately
+   preserves the daily-loss baseline, so the next cycle re-measured the
+   same breach and re-halted. Working as designed, explained nowhere.
+
+### Actual root causes
+
+1. **Risk was cycle-scoped.** The 60-second snapshot refresh persisted
+   equity but never asked the risk manager anything. With a weekly cron
+   the blind spot is up to a week wide. The 2% drawdown threshold was
+   crossed around 15:00 UTC with the same non-result.
+2. **The halt gate was all-or-nothing.** `_ORDER_SUBMITTING_COMMANDS` was
+   refused wholesale, so exposure-reducing commands died with the
+   exposure-increasing ones.
+3. **The daily baseline had no provenance.** It was stamped by whichever
+   process observed the account first — the same class of bug as
+   2026-08-07, one layer up.
+4. **The PM's prose was treated as its decision.** Hard caps were applied
+   after the model spoke, and nothing reconciled the two.
+
+### Fix
+
+- `Runner._monitor_live_account_risk` evaluates every 60-second snapshot
+  and halts atomically the moment a limit breaks.
+- `HaltState` carries `daily_baseline_session/captured_at/source/currency`.
+  `RiskManager.capture_session_open` will only stamp a baseline inside a
+  five-minute window at the **real NYSE open** (`runtime/nyse_session.py`),
+  and `evaluate_session_risk` refuses to execute against any baseline it
+  cannot prove came from there.
+- `trading/risk/reduce_only.py` is the single proof that an order lowers
+  exposure. `/close` and `/flatten` use it to stay available during a
+  halt; the cycle uses it for the defensive path below.
+- **Defensive cycles.** A `/cycle` run while halted builds the real
+  CHF basket, strips it to the reduce-only subset, and asks for approval.
+  Buys can never survive the filter, approval is mandatory regardless of
+  `REQUIRE_CYCLE_APPROVAL`, and the proof is repeated against a fresh
+  broker snapshot after the approval wait. Off switch:
+  `ALLOW_DEFENSIVE_CYCLE_WHEN_HALTED=false`.
+- `/review` renders a strictly non-executable card from a separate state
+  file, so an approval can never be built from it.
+- The PM's hard constraints now bind before its rationale is published;
+  when they change the target, the operator-facing "why" is generated
+  from the executed facts and the model's original text is retained as
+  `model_rationale` for audit.
+
+### Lessons
+
+1. **A check that runs only on the execution path is not monitoring.**
+   It answers "may I trade right now", which is a different question from
+   "is this account in trouble", and only the second one has a deadline.
+2. **A kill switch that blocks exits is not a kill switch.** Halting must
+   be asymmetric: refuse anything that adds risk, permit anything that
+   provably removes it. "Block everything" felt conservative and left the
+   book fully exposed for four hours.
+3. **Refusing is only half the job; the other half is saying what would
+   change the answer.** `/resume` reporting success and `/cycle` promising
+   "orders in ~4 minutes" while neither could trade is what turned a
+   correct risk decision into a lost evening.
+4. **Never let a model's prose be the record of what was executed.** Cap
+   the numbers first, then describe what actually happened.
+
+**Operator note.** After this deploy the runner must be up during the
+NYSE open (13:30 UTC) to capture a trusted daily baseline. Restart it
+mid-session and cycles stay review/reduce-only until the next open —
+by design, and announced in Telegram.
+
+---
+
 ## 2026-08-07 — First live session lasted seven minutes
 
 **TL;DR:** Went live on IBKR account U15995232 at ~14:44 UTC, PM-only

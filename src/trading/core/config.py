@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     # alongside live trading.
     require_cycle_approval: bool = Field(default=False, alias="REQUIRE_CYCLE_APPROVAL")
 
+    # A halt stops new exposure. It does not have to stop the desk from
+    # reducing exposure. When true (the default), a `/cycle` run while the
+    # risk manager is halted still builds the real basket, filters it down
+    # to the orders that provably lower an existing position, and asks for
+    # approval. Approval is mandatory on this path regardless of
+    # REQUIRE_CYCLE_APPROVAL, and buys can never survive the filter. Set
+    # false to go back to a hard information blackout while halted.
+    allow_defensive_cycle_when_halted: bool = Field(
+        default=True, alias="ALLOW_DEFENSIVE_CYCLE_WHEN_HALTED"
+    )
+
     # ---- Agent PM execution bridge ----
     # Fraction of the account the Agent PM directs. The mechanical
     # strategy is scaled by (1 - this), so the two books sum to one

@@ -31,9 +31,13 @@ CLAUDE.md hard rules honored:
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import datetime, timezone
+import os
+import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from datetime import date, datetime, timezone
 from pathlib import Path
+from threading import RLock
 
 from trading.core.logging import logger
 from trading.core.types import (
@@ -65,6 +69,11 @@ class RiskManager:
     ) -> None:
         self.limits = limits
         self._halt_path = Path(halt_state_path) if halt_state_path else None
+        # Snapshot refresh and an off-cycle/manual cycle can inspect the same
+        # manager concurrently.  Serialise each read-modify-write transition
+        # in-process; the file lock below additionally coordinates Telegram
+        # and CLI writers in the other container.
+        self._state_lock = RLock()
         self._state = self._load_state()
         #: Set when start_of_day repairs an implausible baseline; drained
         #: by take_baseline_note() so the runner alerts once.
@@ -91,7 +100,7 @@ class RiskManager:
 
         try:
             with file_lock(self._halt_path):
-                return HaltState.model_validate_json(self._halt_path.read_text())
+                return self._read_state_unlocked()
         except Exception as e:
             logger.bind(component="risk").error(
                 f"halt.json could not be parsed ({type(e).__name__}: {e!r}); "
@@ -104,7 +113,13 @@ class RiskManager:
                 halted_at=datetime.now(timezone.utc),
             )
 
-    def _save_state(self) -> None:
+    def _read_state_unlocked(self) -> HaltState:
+        """Parse the state while the caller already owns the file lock."""
+        if not (self._halt_path and self._halt_path.exists()):
+            return HaltState()
+        return HaltState.model_validate_json(self._halt_path.read_text())
+
+    def _save_state(self, *, halt_intent: bool | None = None) -> None:
         if self._halt_path is None:
             return
         # File lock + atomic rename: both the bot and the manager are
@@ -114,34 +129,73 @@ class RiskManager:
 
         self._halt_path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(self._halt_path):
-            self._halt_path.write_text(self._state.model_dump_json(indent=2))
+            # A Telegram /halt can land after our preceding reload but before
+            # this save.  A fresh halt always wins over a stale in-memory
+            # unhalted state; otherwise a harmless HWM update could undo the
+            # operator's emergency stop.  The manager is the sole writer of
+            # baseline/HWM fields, so retain its current counters.
+            try:
+                disk = self._read_state_unlocked()
+            except Exception as e:
+                logger.bind(component="risk").error(
+                    f"halt.json could not be parsed during save ({type(e).__name__}: {e!r}); "
+                    "FAILING CLOSED"
+                )
+                disk = HaltState(
+                    halted=True,
+                    reason=f"halt.json corrupt: {type(e).__name__}",
+                    halted_at=datetime.now(timezone.utc),
+                )
+            if halt_intent is None and disk.halted and not self._state.halted:
+                self._state = self._state.replace(
+                    halted=True,
+                    reason=disk.reason,
+                    halted_at=disk.halted_at,
+                )
+            fd, tmp_name = tempfile.mkstemp(
+                dir=self._halt_path.parent,
+                prefix=f"{self._halt_path.name}.",
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w") as stream:
+                    stream.write(self._state.model_dump_json(indent=2))
+                os.replace(tmp_name, self._halt_path)
+            except Exception:
+                with suppress(FileNotFoundError):
+                    os.unlink(tmp_name)
+                raise
 
     # ------------------------------------------------------ halt control
 
     @property
     def state(self) -> HaltState:
-        return self._state
+        with self._state_lock:
+            return self._state
 
     def is_halted(self) -> bool:
-        return self._state.halted
+        with self._state_lock:
+            return self._state.halted
 
     def halt(self, reason: str) -> None:
-        self._state = self._state.replace(
-            halted=True,
-            reason=reason,
-            halted_at=datetime.now(timezone.utc),
-        )
-        self._save_state()
+        with self._state_lock:
+            self._state = self._state.replace(
+                halted=True,
+                reason=reason,
+                halted_at=datetime.now(timezone.utc),
+            )
+            self._save_state(halt_intent=True)
         logger.bind(component="risk").warning(f"HALTED — {reason}")
 
     def unhalt(self) -> None:
         """Operator-only command. Phase 8's runner will gate this behind a
         manual confirmation; the risk manager itself never auto-unhalts."""
-        if not self._state.halted:
-            return
-        prev = self._state.reason
-        self._state = self._state.replace(halted=False, reason="", halted_at=None)
-        self._save_state()
+        with self._state_lock:
+            if not self._state.halted:
+                return
+            prev = self._state.reason
+            self._state = self._state.replace(halted=False, reason="", halted_at=None)
+            self._save_state(halt_intent=False)
         logger.bind(component="risk").warning(f"UNHALTED (was: {prev})")
 
     def _reload_halt_state(self) -> None:
@@ -155,20 +209,57 @@ class RiskManager:
         keeps the bot's /halt and /resume effective without losing
         live counters.
         """
-        if self._halt_path is None:
-            return
-        try:
-            disk = self._load_state()
-        except Exception as e:
-            logger.bind(component="risk").warning(
-                f"_reload_halt_state failed; keeping in-memory state: {e!r}"
+        with self._state_lock:
+            if self._halt_path is None:
+                return
+            try:
+                disk = self._load_state()
+            except Exception as e:
+                logger.bind(component="risk").warning(
+                    f"_reload_halt_state failed; keeping in-memory state: {e!r}"
+                )
+                return
+            self._state = self._state.replace(
+                halted=disk.halted,
+                reason=disk.reason,
+                halted_at=disk.halted_at,
             )
-            return
-        self._state = self._state.replace(
-            halted=disk.halted,
-            reason=disk.reason,
-            halted_at=disk.halted_at,
-        )
+
+    @contextmanager
+    def submission_gate(self, *, allow_when_halted: bool = False) -> Iterator[bool]:
+        """Hold the halt-state transaction through one broker submission.
+
+        The cycle holds its broader execution lock for the batch.  This
+        narrower gate additionally serialises each individual submit with
+        Telegram/CLI ``/halt`` writes: after a halt is requested, at most the
+        one submission already inside this gate may finish, and every later
+        order in the batch is stopped.  Holding the file lock for a single
+        broker call is intentional; holding it for the whole batch would
+        delay an emergency halt behind unrelated orders.
+        """
+        with self._state_lock:
+            if self._halt_path is None:
+                yield not self._state.halted or allow_when_halted
+                return
+            from trading.core.file_lock import file_lock
+
+            with file_lock(self._halt_path):
+                try:
+                    disk = self._read_state_unlocked()
+                except Exception as e:
+                    self._state = self._state.replace(
+                        halted=True,
+                        reason=f"halt.json corrupt: {type(e).__name__}",
+                        halted_at=datetime.now(timezone.utc),
+                    )
+                    yield False
+                    return
+                self._state = self._state.replace(
+                    halted=disk.halted,
+                    reason=disk.reason,
+                    halted_at=disk.halted_at,
+                )
+                yield not self._state.halted or allow_when_halted
 
     def baseline_divergence(self, equity: float) -> float | None:
         """|equity − stored daily open| as a fraction of the stored open.
@@ -183,79 +274,290 @@ class RiskManager:
         return abs(equity - base) / base
 
     def start_of_day(self, account: AccountSnapshot) -> str | None:
-        """Stamp today's opening equity.
+        """Legacy wall-clock baseline helper.
 
-        Idempotent within a day — with one exception. Idempotency is what
-        turned a one-hour configuration slip into a halt on 2026-08-07: a
-        paper cycle stamped the day, so when the live session opened an
-        hour later ``last_day`` already equalled today and the baseline
-        was never re-taken. The kill switch then measured a live account
-        against a paper one.
-
-        So the date is no longer the only thing that decides. If the
-        stored baseline is implausibly far from actual equity, it is
-        re-stamped whatever the date says, and BOTH figures go: the
-        high-water mark matters as much as the daily open, because at
-        ``max_drawdown_pct=0.02`` an 87k account against a 1.07M
-        high-water mark re-halts the instant the daily figure is cleared.
-
-        Returns a human-readable note when it re-stamped an implausible
-        baseline, else None. Callers should surface it — a baseline
-        silently repaired is a baseline nobody investigates.
+        Kept for backwards-compatible research/unit-test callers. Live
+        execution must use ``capture_session_open`` plus
+        ``evaluate_session_risk``: a wall-clock first observation is not a
+        trustworthy market-open baseline after a restart.
         """
-        today = account.ts.date()
-        divergence = self.baseline_divergence(account.equity)
-        implausible = (
-            divergence is not None and divergence > self.limits.baseline_sanity_divergence_pct
-        )
-
-        if self._state.last_day == today and not implausible:
-            return None
-
-        if implausible:
-            stale_open = self._state.daily_equity_open
-            stale_hwm = self._state.equity_high_watermark
-            note = (
-                f"baseline re-stamped: stored daily open {stale_open:,.0f} is "
-                f"{divergence:.0%} from actual equity {account.equity:,.0f} — "
-                f"beyond the {self.limits.baseline_sanity_divergence_pct:.0%} "
-                "sanity limit, so it describes a different account, currency or "
-                f"funding level rather than a loss. High-water mark {stale_hwm:,.0f} "
-                "reset with it."
+        with self._state_lock:
+            today = account.ts.date()
+            divergence = self.baseline_divergence(account.equity)
+            implausible = (
+                divergence is not None and divergence > self.limits.baseline_sanity_divergence_pct
             )
-            # Reset, do not max(): a high-water mark carried over from a
-            # baseline we have just declared bogus is equally bogus, and
-            # keeping it would halt on drawdown one bar later.
+
+            if self._state.last_day == today and not implausible:
+                return None
+
+            if implausible:
+                stale_open = self._state.daily_equity_open
+                stale_hwm = self._state.equity_high_watermark
+                note = (
+                    f"baseline re-stamped: stored daily open {stale_open:,.0f} is "
+                    f"{divergence:.0%} from actual equity {account.equity:,.0f} — "
+                    f"beyond the {self.limits.baseline_sanity_divergence_pct:.0%} "
+                    "sanity limit, so it describes a different account, currency or "
+                    f"funding level rather than a loss. High-water mark {stale_hwm:,.0f} "
+                    "reset with it."
+                )
+                # Reset, do not max(): a high-water mark carried over from a
+                # baseline we have just declared bogus is equally bogus, and
+                # keeping it would halt on drawdown one bar later.
+                self._state = self._state.replace(
+                    last_day=today,
+                    daily_equity_open=account.equity,
+                    equity_high_watermark=account.equity,
+                    daily_baseline_session=None,
+                    daily_baseline_captured_at=None,
+                    daily_baseline_source=None,
+                    daily_baseline_currency=None,
+                )
+                self._save_state()
+                logger.bind(component="risk").warning(note)
+                self._last_baseline_note = note
+                return note
+
+            new_hwm = max(self._state.equity_high_watermark, account.equity)
             self._state = self._state.replace(
                 last_day=today,
                 daily_equity_open=account.equity,
-                equity_high_watermark=account.equity,
+                equity_high_watermark=new_hwm,
+                # This is explicitly *not* trusted by the live session
+                # monitor.  It preserves legacy tests/research semantics
+                # without making a noon restart look like an opening print.
+                daily_baseline_session=None,
+                daily_baseline_captured_at=None,
+                daily_baseline_source=None,
+                daily_baseline_currency=None,
             )
             self._save_state()
-            logger.bind(component="risk").warning(note)
-            self._last_baseline_note = note
-            return note
-
-        new_hwm = max(self._state.equity_high_watermark, account.equity)
-        self._state = self._state.replace(
-            last_day=today,
-            daily_equity_open=account.equity,
-            equity_high_watermark=new_hwm,
-        )
-        self._save_state()
-        return None
+            return None
 
     def take_baseline_note(self) -> str | None:
         """Pop the last baseline-repair note, if any. Read-once so the
         runner alerts on the repair rather than on every cycle after it."""
-        note = getattr(self, "_last_baseline_note", None)
-        self._last_baseline_note = None
-        return note
+        with self._state_lock:
+            note = getattr(self, "_last_baseline_note", None)
+            self._last_baseline_note = None
+            return note
+
+    # ------------------------------------------------ session-aware intraday
+
+    def capture_session_open(
+        self,
+        account: AccountSnapshot,
+        *,
+        session_date: date,
+        captured_at: datetime,
+        source: str = "session_open",
+    ) -> str | None:
+        """Record a daily baseline only during the real NYSE opening window.
+
+        The runner calls this from its 60-second snapshot job.  It validates
+        both the exchange calendar date and the short opening window itself,
+        so an accidental noon/restart caller cannot relabel a loss as a new
+        day.  Recording a new baseline never clears an existing halt.
+        """
+        from trading.runtime.nyse_session import (
+            current_nyse_session_label,
+            is_opening_capture_window,
+        )
+
+        try:
+            actual_session = current_nyse_session_label(captured_at)
+            is_open = is_opening_capture_window(captured_at)
+        except ValueError as e:
+            logger.bind(component="risk").warning(
+                f"refusing daily baseline capture with invalid timestamp: {e}"
+            )
+            return None
+        if actual_session != session_date or not is_open:
+            logger.bind(component="risk").warning(
+                "refusing daily baseline outside the verified NYSE opening window"
+            )
+            return None
+        if account.equity <= 0:
+            logger.bind(component="risk").warning(
+                "refusing daily baseline from non-positive account equity"
+            )
+            return None
+
+        currency = str(account.base_currency or "").upper()
+        if not currency:
+            logger.bind(component="risk").warning(
+                "refusing daily baseline with missing account currency"
+            )
+            return None
+
+        with self._state_lock:
+            self._reload_halt_state()
+            same_trusted_session = (
+                self._state.daily_baseline_session == session_date
+                and self._state.daily_baseline_captured_at is not None
+                and self._state.daily_baseline_source is not None
+                and self._state.daily_baseline_currency == currency
+                and self._state.daily_equity_open > 0
+            )
+            if same_trusted_session:
+                return None
+
+            divergence = self.baseline_divergence(account.equity)
+            reset_hwm = self._state.daily_baseline_currency not in {None, currency} or (
+                divergence is not None and divergence > self.limits.baseline_sanity_divergence_pct
+            )
+            new_hwm = (
+                account.equity
+                if reset_hwm
+                else max(self._state.equity_high_watermark, account.equity)
+            )
+            self._state = self._state.replace(
+                last_day=session_date,
+                daily_equity_open=account.equity,
+                equity_high_watermark=new_hwm,
+                daily_baseline_session=session_date,
+                daily_baseline_captured_at=captured_at,
+                daily_baseline_source=source,
+                daily_baseline_currency=currency,
+            )
+            self._save_state()
+            if not reset_hwm:
+                return None
+            note = (
+                "session baseline re-stamped with high-water reset: prior state "
+                "described a different account, currency or funding level"
+            )
+            self._last_baseline_note = note
+            logger.bind(component="risk").warning(note)
+            return note
+
+    def _trusted_daily_baseline_reason(
+        self,
+        *,
+        session_label: date | None,
+        base_currency: str,
+    ) -> str | None:
+        """Explain why the current state cannot support a daily-loss check."""
+        if session_label is None:
+            return "NYSE session unavailable; daily-loss baseline is not authorised"
+        if self._state.daily_baseline_session != session_label:
+            return "daily-loss baseline unavailable for the current NYSE session"
+        if (
+            self._state.daily_baseline_captured_at is None
+            or not self._state.daily_baseline_source
+            or self._state.daily_equity_open <= 0
+        ):
+            return "daily-loss baseline lacks verified NYSE-open provenance"
+        stored_currency = str(self._state.daily_baseline_currency or "").upper()
+        if stored_currency != base_currency:
+            return (
+                "daily-loss baseline currency does not match the live account "
+                f"({stored_currency or 'missing'} vs {base_currency})"
+            )
+        return None
+
+    def evaluate_session_risk(
+        self,
+        account: AccountSnapshot,
+        *,
+        session_label: date | None,
+        require_daily_baseline: bool = True,
+    ) -> RiskDecision:
+        """Evaluate live risk without ever inventing a new daily baseline.
+
+        This is the only intraday evaluator used by live runner paths.  A
+        missing, legacy, wrong-session, or wrong-currency baseline blocks new
+        exposure with ``reject`` rather than persisting a misleading halt.
+        A genuine loss/drawdown still persists a hard halt immediately.
+        """
+        base_currency = str(account.base_currency or "").upper()
+        if account.equity <= 0 or not base_currency:
+            return RiskDecision(
+                action="reject",
+                reason="live account snapshot is not usable for risk evaluation",
+            )
+
+        with self._state_lock:
+            self._reload_halt_state()
+            if self._state.halted:
+                return RiskDecision(action="halt", reason=f"already halted: {self._state.reason}")
+
+            baseline_reason = self._trusted_daily_baseline_reason(
+                session_label=session_label,
+                base_currency=base_currency,
+            )
+            has_trusted_provenance = (
+                self._state.daily_baseline_captured_at is not None
+                and bool(self._state.daily_baseline_source)
+                and bool(self._state.daily_baseline_currency)
+            )
+            # ``baseline_reason`` is non-None on both branches below (a
+            # currency mismatch or missing provenance always produces one),
+            # but default it explicitly rather than trust that reasoning at
+            # a safety boundary: RiskDecision.reason is a required str.
+            untrusted_reason = baseline_reason or "daily-loss baseline is not authorised"
+            if (
+                self._state.daily_baseline_currency
+                and self._state.daily_baseline_currency.upper() != base_currency
+            ):
+                return RiskDecision(action="reject", reason=untrusted_reason)
+
+            # A pre-provenance state may contain a paper-account high-water
+            # mark. Do not compare it to a live snapshot and manufacture a
+            # false drawdown halt; wait for the next verified session open.
+            # Once the account/currency provenance is sound, keep checking
+            # drawdown even if today's daily-open capture was missed.
+            if not has_trusted_provenance:
+                return RiskDecision(action="reject", reason=untrusted_reason)
+
+            if account.equity > self._state.equity_high_watermark:
+                self._state = self._state.replace(equity_high_watermark=account.equity)
+                self._save_state()
+                if self._state.halted:
+                    return RiskDecision(
+                        action="halt", reason=f"already halted: {self._state.reason}"
+                    )
+
+            if baseline_reason is None:
+                day_pnl = (
+                    account.equity - self._state.daily_equity_open
+                ) / self._state.daily_equity_open
+                if day_pnl <= -self.limits.max_daily_loss_pct:
+                    self.halt(
+                        f"daily loss {day_pnl:.2%} breaches limit "
+                        f"-{self.limits.max_daily_loss_pct:.2%}"
+                    )
+                    return RiskDecision(action="halt", reason=self._state.reason)
+
+            if self._state.equity_high_watermark > 0:
+                drawdown = (
+                    account.equity - self._state.equity_high_watermark
+                ) / self._state.equity_high_watermark
+                if drawdown <= -self.limits.max_drawdown_pct:
+                    self.halt(
+                        f"drawdown {drawdown:.2%} breaches limit "
+                        f"-{self.limits.max_drawdown_pct:.2%}"
+                    )
+                    return RiskDecision(action="halt", reason=self._state.reason)
+
+            if baseline_reason is not None and require_daily_baseline:
+                return RiskDecision(action="reject", reason=baseline_reason)
+            return RiskDecision(action="allow", reason="session risk checks passed")
 
     # ------------------------------------------------------ intraday
 
     def evaluate_intraday(self, account: AccountSnapshot) -> RiskDecision:
-        """Post-bar safety check. Returns ``halt`` if a kill switch fires."""
+        """Legacy wall-clock intraday check retained for non-live callers.
+
+        Live runner paths use ``evaluate_session_risk`` so a restart cannot
+        define an opening balance at an arbitrary time of day.
+        """
+        with self._state_lock:
+            return self._evaluate_intraday_legacy(account)
+
+    def _evaluate_intraday_legacy(self, account: AccountSnapshot) -> RiskDecision:
+        """Original research/paper behaviour, called under ``_state_lock``."""
         # Re-read halt.json before checking. The Telegram bot (a separate
         # process) writes this file from /halt and /resume; without a
         # reload here, the trader process would only see halt changes on
@@ -318,6 +620,69 @@ class RiskManager:
         fx_rates: dict[str, float] | None = None,
         pending_orders: list[Order] | None = None,
     ) -> tuple[list[Order], list[RiskDecision]]:
+        """Convert a target signal into executable orders through the hard gate.
+
+        This is deliberately the only normal execution-facing sizing entry
+        point.  A persisted halt always wins here, even if a caller has an
+        otherwise valid signal.
+        """
+        if self._state.halted:
+            return [], [RiskDecision(action="halt", reason=f"halted: {self._state.reason}")]
+        return self._plan_signal_to_orders(
+            signal,
+            account=account,
+            last_prices=last_prices,
+            instruments=instruments,
+            sector_map=sector_map,
+            order_id_factory=order_id_factory,
+            fx_rates=fx_rates,
+            pending_orders=pending_orders,
+        )
+
+    def preview_signal_to_orders(
+        self,
+        signal: Signal,
+        *,
+        account: AccountSnapshot,
+        last_prices: dict[str, float],
+        instruments: dict[str, Instrument],
+        sector_map: dict[str, str] | None = None,
+        order_id_factory: Callable[[], str] = new_client_order_id,
+        fx_rates: dict[str, float] | None = None,
+        pending_orders: list[Order] | None = None,
+    ) -> tuple[list[Order], list[RiskDecision]]:
+        """Build a non-executable, risk-sized review plan while halted.
+
+        This method exists solely for ``Cycle``'s explicit review-only path.
+        It applies the identical static sizing, concentration, long-only,
+        pending-order and no-margin protections as ``signal_to_orders`` but
+        does not read, clear, or weaken the persistent execution halt.  The
+        orders it returns are ephemeral display objects: callers must never
+        pass them to a broker or an approval queue.
+        """
+        return self._plan_signal_to_orders(
+            signal,
+            account=account,
+            last_prices=last_prices,
+            instruments=instruments,
+            sector_map=sector_map,
+            order_id_factory=order_id_factory,
+            fx_rates=fx_rates,
+            pending_orders=pending_orders,
+        )
+
+    def _plan_signal_to_orders(
+        self,
+        signal: Signal,
+        *,
+        account: AccountSnapshot,
+        last_prices: dict[str, float],
+        instruments: dict[str, Instrument],
+        sector_map: dict[str, str] | None = None,
+        order_id_factory: Callable[[], str] = new_client_order_id,
+        fx_rates: dict[str, float] | None = None,
+        pending_orders: list[Order] | None = None,
+    ) -> tuple[list[Order], list[RiskDecision]]:
         """Convert a Signal's target weights into Orders, applying limits.
 
         Parameters are keyed by ``instrument.key`` (e.g. ``"equity:AAPL"``)
@@ -341,8 +706,6 @@ class RiskManager:
         open and the paper book went short two names.
         """
         decisions: list[RiskDecision] = []
-        if self._state.halted:
-            return [], [RiskDecision(action="halt", reason=f"halted: {self._state.reason}")]
         if account.equity <= 0:
             return [], [RiskDecision(action="reject", reason="non-positive equity")]
 

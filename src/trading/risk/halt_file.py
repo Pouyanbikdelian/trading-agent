@@ -56,14 +56,8 @@ def halt_path(state_dir: Path | str) -> Path:
     return Path(state_dir) / FILENAME
 
 
-def read_halt_state(state_dir: Path | str) -> HaltState:
-    """Load the persisted state, defaulting on anything unreadable.
-
-    Unlike ``RiskManager._load_state`` this does NOT fail closed — it is
-    used by writers that are about to overwrite the file anyway, and by
-    read-only callers who want a best-effort view.
-    """
-    path = halt_path(state_dir)
+def _read_halt_state_unlocked(path: Path) -> HaltState:
+    """Best-effort parse while the caller owns ``file_lock(path)``."""
     if not path.exists():
         return HaltState()
     try:
@@ -75,20 +69,37 @@ def read_halt_state(state_dir: Path | str) -> HaltState:
         return HaltState()
 
 
+def _write_halt_state_unlocked(path: Path, state: HaltState) -> None:
+    """Atomically publish a full state while the caller owns its file lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(state.model_dump_json(indent=2))
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def read_halt_state(state_dir: Path | str) -> HaltState:
+    """Load the persisted state, defaulting on anything unreadable.
+
+    Unlike ``RiskManager._load_state`` this does NOT fail closed — it is
+    used by writers that are about to overwrite the file anyway, and by
+    read-only callers who want a best-effort view.
+    """
+    path = halt_path(state_dir)
+    with file_lock(path):
+        return _read_halt_state_unlocked(path)
+
+
 def write_halt_state(state_dir: Path | str, state: HaltState) -> Path:
     """Atomically persist a full ``HaltState``, under the cross-process lock."""
     path = halt_path(state_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
     with file_lock(path):
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(state.model_dump_json(indent=2))
-            os.replace(tmp, path)
-        except Exception:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        _write_halt_state_unlocked(path, state)
     return path
 
 
@@ -106,14 +117,20 @@ def set_halted(
     ``datetime.now()``, which on a UTC-scheduled system in a non-UTC
     container is a timestamp nobody can interpret later.
     """
-    current = read_halt_state(state_dir)
-    if halted and halted_at is None:
-        halted_at = datetime.now(tz=timezone.utc)
-    if not halted:
-        halted_at = None
-        reason = ""
-    new = current.replace(halted=halted, reason=reason, halted_at=halted_at)
-    write_halt_state(state_dir, new)
+    path = halt_path(state_dir)
+    with file_lock(path):
+        # This is one transaction, not a read followed by a separately
+        # locked write.  The 60-second risk monitor concurrently updates
+        # the high-water mark, and an operator /halt or /resume must never
+        # clobber those counters (or be clobbered by them).
+        current = _read_halt_state_unlocked(path)
+        if halted and halted_at is None:
+            halted_at = datetime.now(tz=timezone.utc)
+        if not halted:
+            halted_at = None
+            reason = ""
+        new = current.replace(halted=halted, reason=reason, halted_at=halted_at)
+        _write_halt_state_unlocked(path, new)
     logger.bind(component="halt_file").warning(
         f"halt.json: halted={halted} reason={reason!r} "
         f"(baselines preserved: open={new.daily_equity_open:,.0f} "

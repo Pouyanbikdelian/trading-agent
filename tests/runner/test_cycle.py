@@ -9,6 +9,7 @@ persisted, halt behavior.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -208,28 +209,106 @@ def test_cycle_writes_heartbeat(tiny_universe_yaml, primed_cache, tmp_state) -> 
     assert hb_path.exists()
 
 
-def test_cycle_records_halt_when_risk_manager_halted(
+def test_cycle_turns_active_halt_into_non_executable_live_account_review(
     tiny_universe_yaml,
     primed_cache,
     tmp_state,
+    monkeypatch,
 ) -> None:
+    """A halted `/cycle` still shows a fresh plan but cannot touch execution state."""
+    from trading.core import config as config_module
+
+    monkeypatch.setattr(
+        config_module,
+        "settings",
+        config_module.settings.model_copy(
+            update={"state_dir": tmp_state, "require_cycle_approval": True}
+        ),
+    )
     cfg = RunnerConfig(
         universe=tiny_universe_yaml,
-        strategies=["donchian"],
+        strategies=["risk_parity"],
+        strategy_params={"risk_parity": {"vol_lookback": 30, "rebalance": 1}},
         auto_refresh=False,
         history_bars=200,
     )
-    cycle, _, alerts = _make_cycle(
+    cycle, broker, alerts = _make_cycle(
         cfg,
         primed_cache,
         tmp_state,
         halted_reason="manual test halt",
     )
+
+    submissions: list[object] = []
+    order_writes: list[object] = []
+
+    monkeypatch.setattr(broker, "submit_order", lambda order: submissions.append(order))
+    monkeypatch.setattr(
+        cycle.order_store, "save_order", lambda order, **_kw: order_writes.append(order)
+    )
+    monkeypatch.setattr(
+        cycle,
+        "_request_cycle_approval",
+        lambda *_args, **_kwargs: pytest.fail("a halted review must not open approval"),
+    )
+
     report = cycle.run_cycle()
-    assert report.status == "halted"
+
+    assert report.status == "halted_review"
     assert report.orders_submitted == 0
-    # Critical alert fires on halt.
+    assert submissions == []
+    assert order_writes == []
+    assert cycle.order_store.load_orders() == []
+    assert not (tmp_state / cycle.APPROVAL_PENDING_FILE).exists()
+    assert not (tmp_state / cycle.APPROVAL_DECISION_FILE).exists()
+    artifact = json.loads((tmp_state / cycle.HALTED_REVIEW_FILE).read_text())
+    assert artifact["kind"] == "halted_review"
+    assert artifact["will_never_auto_execute"] is True
+    assert artifact["account"]["base_currency"] == "USD"
+    # The normal risk breach remains visible; it is not treated as recovery.
     assert any(level == "critical" for level, _ in alerts.sent)
+
+
+def test_live_cycle_with_no_trusted_open_baseline_is_review_only(
+    tiny_universe_yaml,
+    primed_cache,
+    tmp_state,
+    monkeypatch,
+) -> None:
+    """A noon/restart live cycle must not invent a daily open and trade."""
+    from trading.core import config as config_module
+
+    monkeypatch.setattr(
+        config_module,
+        "settings",
+        config_module.settings.model_copy(
+            update={
+                "state_dir": tmp_state,
+                "trading_env": "live",
+                "allow_live_trading": True,
+                "require_cycle_approval": True,
+            }
+        ),
+    )
+    cfg = RunnerConfig(
+        universe=tiny_universe_yaml,
+        strategies=["risk_parity"],
+        strategy_params={"risk_parity": {"vol_lookback": 30, "rebalance": 1}},
+        auto_refresh=False,
+        history_bars=200,
+    )
+    cycle, broker, _alerts = _make_cycle(cfg, primed_cache, tmp_state)
+    submissions: list[object] = []
+    monkeypatch.setattr(broker, "submit_order", lambda order: submissions.append(order))
+
+    report = cycle.run_cycle()
+
+    assert report.status == "halted_review"
+    assert report.orders_submitted == 0
+    assert submissions == []
+    assert not cycle.risk_manager.is_halted()
+    review = json.loads((tmp_state / cycle.HALTED_REVIEW_FILE).read_text())
+    assert "baseline" in review["halt_reason"].lower() or "session" in review["halt_reason"].lower()
 
 
 def test_cycle_error_is_caught(tiny_universe_yaml, primed_cache, tmp_state) -> None:

@@ -44,6 +44,8 @@ class _Cycle:
 
     from trading.runner.cycle import Cycle as _Real
 
+    _PM_TARGET_KEYS_METADATA = _Real._PM_TARGET_KEYS_METADATA
+
     _merge_pm_signal = _Real._merge_pm_signal
     _add_pm_targets = _Real._add_pm_targets
     _mode_scale = _Real._mode_scale

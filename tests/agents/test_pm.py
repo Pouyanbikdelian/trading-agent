@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from math import fsum
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +15,11 @@ from trading.agents.pm import (
     OPERATOR_ACCOUNT_KEYS,
     PM_CHARTER,
     PROMPT_BUDGET,
+    SENTINEL_MAX_GROSS,
     START_EQUITY,
     UNIVERSE,
     _budgeted_prompt,
+    _cap_gross,
     _clamp_weights,
     _relabel_operator_account,
     format_pm_digest,
@@ -54,6 +57,11 @@ def test_clamp_enforces_whitelist_cap_and_gross() -> None:
     assert len(w) <= MAX_ETF_POSITIONS  # ETF-count cap, see TestAntiFixation
     assert sum(w.values()) <= 1.0 + 1e-9  # gross cap
     assert all(s in UNIVERSE for s in w)
+
+
+def test_clamp_rejects_non_finite_weights() -> None:
+    w = _clamp_weights({"SMH": float("nan"), "XLE": float("inf"), "SPY": 0.2})
+    assert w == {"SPY": 0.2}
 
 
 def test_clamp_drops_operator_held_symbols() -> None:
@@ -134,6 +142,214 @@ def test_holding_with_no_mark_anywhere_still_skips_run(mem: MemoryStore, tmp_pat
     res = run_agent_pm({}, mem, tmp_path, llm=_pm_llm({"SPY": 0.5}), prices={"SPY": 500.0})
     assert res["ok"] is False
     assert "SMH" in res["reason"]
+
+
+class TestSentinelTargetIntegrity:
+    def _fire_sentinel(self, state_dir: Path) -> None:
+        (state_dir / "sentinel.json").write_text(
+            json.dumps(
+                {
+                    "last_alert_ts": datetime.now(tz=timezone.utc).isoformat(),
+                    "triggers": ["SMH -4.0%"],
+                }
+            )
+        )
+
+    def test_recent_sentinel_caps_the_persisted_target_deterministically(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        """The prompt's 70% sentence is not the control; last_run is."""
+        self._fire_sentinel(tmp_path)
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            return {
+                "target_weights": {"XLE": 0.25, "SPY": 0.25, "SMH": 0.25},
+                "rationale": "I run roughly 82% while claiming the 70% cap binds.",
+                "watch": "w",
+            }
+
+        result = run_agent_pm({}, mem, tmp_path, llm=llm, prices=PRICES)
+        persisted = json.loads((tmp_path / "agent_pm" / "last_run.json").read_text())
+
+        assert result["sentinel_cap_active"] is True
+        assert result["sentinel_deployment_cap"] == SENTINEL_MAX_GROSS
+        assert result["sentinel_cap_scaled"] is True
+        assert result["gross_weight_before_sentinel_cap"] == pytest.approx(0.75)
+        assert fsum(result["weights"].values()) == pytest.approx(SENTINEL_MAX_GROSS)
+        assert fsum(persisted["weights"].values()) == pytest.approx(SENTINEL_MAX_GROSS)
+        # Input order cannot decide the serialized hard-capped target.
+        assert persisted["weights"] == result["weights"]
+
+    def test_gross_cap_is_independent_of_model_key_order(self) -> None:
+        first, first_scaled = _cap_gross({"XLE": 0.25, "SPY": 0.25, "SMH": 0.25}, 0.70)
+        second, second_scaled = _cap_gross({"SMH": 0.25, "XLE": 0.25, "SPY": 0.25}, 0.70)
+
+        assert first_scaled and second_scaled
+        assert first == second
+        assert list(first) == ["SMH", "SPY", "XLE"]
+        assert fsum(first.values()) == pytest.approx(SENTINEL_MAX_GROSS)
+
+    def test_constraint_adjusted_digest_never_repeats_a_conflicting_model_claim(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        """The public rationale must describe the executable target, not intent."""
+        self._fire_sentinel(tmp_path)
+        raw_rationale = "I run roughly 82% while claiming the 70% cap binds."
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            return {
+                "target_weights": {"XLE": 0.25, "SPY": 0.25, "SMH": 0.25, "CCJ": 0.1},
+                "rationale": raw_rationale,
+                "watch": "w",
+            }
+
+        result = run_agent_pm({}, mem, tmp_path, llm=llm, prices=PRICES)
+        text = format_pm_digest(result)
+        persisted = json.loads((tmp_path / "agent_pm" / "last_run.json").read_text())
+
+        assert result["dropped"] == ["CCJ"]
+        assert result["rationale_source"] == "executed_target_facts"
+        assert result["model_rationale"] == raw_rationale
+        assert "70% deployment cap" in result["rationale"]
+        assert "CCJ" in result["rationale"]
+        assert "82%" not in result["rationale"]
+        assert raw_rationale not in text
+        assert "Why (executed facts)" in text
+        assert "excluded from executable target: CCJ" in text
+        # /pm reads this field directly, so the persisted value must be the
+        # same safe execution record as the rebalance digest.
+        assert persisted["rationale"] == result["rationale"]
+        assert persisted["model_rationale"] == raw_rationale
+        journal = next(row for row in mem.journal_tail(5) if row["kind"] == "agent_pm")
+        assert journal["payload"]["rationale"] == result["rationale"]
+        assert journal["payload"]["model_rationale"] == raw_rationale
+
+    def test_rejected_target_uses_facts_even_without_an_active_sentinel(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        raw_rationale = "I bought CCJ, although it is not in the executable target."
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            return {
+                "target_weights": {"SMH": 0.2, "CCJ": 0.1},
+                "rationale": raw_rationale,
+                "watch": "w",
+            }
+
+        result = run_agent_pm({}, mem, tmp_path, llm=llm, prices=PRICES)
+
+        assert result["sentinel_cap_active"] is False
+        assert result["dropped"] == ["CCJ"]
+        assert result["rationale_source"] == "executed_target_facts"
+        assert "CCJ" in result["rationale"]
+        assert raw_rationale not in format_pm_digest(result)
+
+
+class TestHardClampRationaleIntegrity:
+    """A surviving constrained target must never inherit model-only prose."""
+
+    def test_per_name_cap_switches_public_rationale_to_execution_facts(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        raw_rationale = "I am deploying 90% into SMH as the core position."
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            return {
+                "target_weights": {"SMH": 0.90, "XLE": 0.20},
+                "rationale": raw_rationale,
+                "watch": "w",
+            }
+
+        result = run_agent_pm({}, mem, tmp_path, llm=llm, prices=PRICES)
+        persisted = json.loads((tmp_path / "agent_pm" / "last_run.json").read_text())
+
+        assert result["dropped"] == []
+        assert result["rationale_source"] == "executed_target_facts"
+        assert result["model_rationale"] == raw_rationale
+        adjustment = result["hard_clamp_adjustments"][0]
+        assert adjustment["constraint"] == "per_name_cap"
+        assert adjustment["changes"] == [
+            {"symbol": "SMH", "before": 0.90, "after": 0.25, "maximum": 0.25}
+        ]
+        assert "per-name cap: `SMH` 90.0%→25.0%" in result["rationale"]
+        assert raw_rationale not in format_pm_digest(result)
+        assert persisted["rationale"] == result["rationale"]
+        assert persisted["model_rationale"] == raw_rationale
+
+    def test_cluster_cap_switches_public_rationale_to_execution_facts(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        raw_rationale = "I keep 75% in the tech complex because the breakout is confirmed."
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            return {
+                "target_weights": {"SMH": 0.25, "XLK": 0.25, "QQQ": 0.25},
+                "rationale": raw_rationale,
+                "watch": "w",
+            }
+
+        result = run_agent_pm(
+            {},
+            mem,
+            tmp_path,
+            llm=llm,
+            prices={**PRICES, "XLK": 100.0, "QQQ": 100.0},
+        )
+
+        assert result["dropped"] == []
+        assert result["rationale_source"] == "executed_target_facts"
+        adjustment = result["hard_clamp_adjustments"][0]
+        assert adjustment["constraint"] == "cluster_cap"
+        assert adjustment["cluster"] == "tech_complex"
+        assert {change["symbol"] for change in adjustment["changes"]} == {"SMH", "XLK", "QQQ"}
+        assert "cluster cap (tech_complex)" in result["rationale"]
+        assert raw_rationale not in format_pm_digest(result)
+
+    def test_gross_cap_switches_public_rationale_to_execution_facts(
+        self, mem: MemoryStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        targets = {f"STK{i:02d}": 0.10 for i in range(11)}
+        raw_rationale = "I am fully 110% deployed across eleven independent names."
+        monkeypatch.setattr("trading.agents.pm._stock_universe", lambda: tuple(targets))
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            return {"target_weights": targets, "rationale": raw_rationale, "watch": "w"}
+
+        result = run_agent_pm(
+            {},
+            mem,
+            tmp_path,
+            llm=llm,
+            prices={**PRICES, **{symbol: 100.0 for symbol in targets}},
+        )
+
+        assert result["dropped"] == []
+        assert result["rationale_source"] == "executed_target_facts"
+        adjustment = result["hard_clamp_adjustments"][0]
+        assert adjustment["constraint"] == "gross_cap"
+        assert adjustment["maximum"] == 1.0
+        assert len(adjustment["changes"]) == len(targets)
+        assert "gross cap (100%)" in result["rationale"]
+        assert raw_rationale not in format_pm_digest(result)
+
+    def test_clamp_facts_do_not_describe_a_target_later_dropped_for_price(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        raw_rationale = "SMH gets 90%, but it has no executable price."
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            return {
+                "target_weights": {"SMH": 0.90, "XLE": 0.20},
+                "rationale": raw_rationale,
+                "watch": "w",
+            }
+
+        result = run_agent_pm({}, mem, tmp_path, llm=llm, prices={"XLE": 50.0})
+
+        assert result["dropped"] == ["SMH"]
+        assert result["hard_clamp_adjustments"] == []
+        assert "per-name cap" not in result["rationale"]
+        assert "SMH" in result["rationale"]  # disclosed accurately as excluded instead
 
 
 class TestAntiFixation:

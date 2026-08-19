@@ -28,7 +28,11 @@ Hard-coded design choices (and why)
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -58,7 +62,14 @@ from trading.runner.state import RunnerStore
 from trading.selection.overlay import vol_target
 from trading.strategies.base import get_strategy
 
-CycleStatus = Literal["ok", "no_orders", "halted", "error", "skipped_locked"]
+CycleStatus = Literal[
+    "ok",
+    "no_orders",
+    "halted",
+    "halted_review",
+    "error",
+    "skipped_locked",
+]
 
 # Substrings that mean "we could not reach the broker" rather than "the
 # broker said no". Matched on the exception text because ib-async raises
@@ -127,6 +138,18 @@ class Cycle:
     """All-in-one bound cycle. Construct once at startup; call ``run_cycle()``
     every bar."""
 
+    #: A display-only state artifact. It is intentionally distinct from
+    #: ``cycle_approval_pending.json`` so no bot command can ever mistake a
+    #: halted review for executable approval state.
+    HALTED_REVIEW_FILE: ClassVar[str] = "cycle_halted_review.json"
+
+    #: A private ``Signal.metadata`` carrier for the PM decision whose
+    #: lifecycle may advance after a clean broker acknowledgement.  It is
+    #: deliberately data on the signal rather than mutable Cycle instance
+    #: state: planning cycles can overlap before they contend on the shared
+    #: execution lock, and one cycle must never persist another's PM view.
+    _PM_TARGET_KEYS_METADATA: ClassVar[str] = "_pm_target_keys_to_persist"
+
     def __init__(
         self,
         config: RunnerConfig,
@@ -163,12 +186,35 @@ class Cycle:
     # ------------------------------------------------------- public API
 
     def run_cycle(self) -> CycleReport:
-        """Execute one full cycle. Never raises; failures become ``error``
-        reports."""
+        """Execute one normal, potentially executable cycle.
+
+        If the intraday gate is active or trips during planning, this remains
+        a strictly non-executable review and returns ``halted_review``.  That
+        lets an operator inspect the current risk-sized account proposal
+        without making a halt an information blackout.
+        """
+        return self._run_public_cycle(force_review=False)
+
+    def run_review(self) -> CycleReport:
+        """Build a deliberately non-executable live-account review.
+
+        This is used by `/cycle` while a halt is already active and by the
+        explicit review command.  It never creates an approval window or
+        enters a broker submission path, even if the halt is later cleared.
+        """
+        return self._run_public_cycle(force_review=True)
+
+    def _run_public_cycle(self, *, force_review: bool) -> CycleReport:
+        """Shared lifecycle persistence for executable and review cycles."""
         ts_start = self._clock()
         self._cycle_count += 1
+        if not force_review:
+            # A prior halted card is never an executable proposal. Remove it
+            # before building a normal cycle so `/review` cannot keep showing
+            # obsolete prices/account state after `/resume`.
+            self._clear_halted_review()
         try:
-            report = self._run_inner(ts_start)
+            report = self._run_inner(ts_start, force_review=force_review)
         except Exception as e:
             logger.bind(component="cycle").exception("cycle failed")
             self.alerts.critical(f"cycle failed: {e!r}")
@@ -271,6 +317,47 @@ class Cycle:
         """Playbook said this regime = stay flat. Generate closing orders for
         every open position, submit, and skip strategy generation entirely."""
         account = self._fetch_account(ts_start)
+        # A playbook is automatic policy, not an explicit operator exit.
+        # It must satisfy the same live session-baseline gate as a normal
+        # cycle; otherwise a noon restart could bypass the protective review
+        # mode merely by selecting a ``force_flatten`` regime.
+        from trading.core.config import settings as _settings
+
+        if _settings.is_live_armed():
+            from trading.runtime.nyse_session import current_nyse_session_label
+
+            session_risk = self.risk_manager.evaluate_session_risk(
+                account,
+                session_label=current_nyse_session_label(account.ts),
+            )
+            if session_risk.action != "allow":
+                return self._run_force_flatten_review(
+                    ts_start,
+                    account=account,
+                    reason=session_risk.reason,
+                )
+        # A playbook is automated policy, not an operator's explicit
+        # reduce-only command.  It must obey the same hard halt as every
+        # other automatic submission path.
+        self.risk_manager._reload_halt_state()
+        if self.risk_manager.is_halted():
+            self.alerts.warning(
+                "🛑 HALTED — playbook force-flatten was not submitted. "
+                "Use the explicit reduce-only close/flatten command if you want to lower exposure."
+            )
+            return CycleReport(
+                ts=ts_start,
+                status="halted",
+                orders_submitted=0,
+                fills_received=0,
+                decisions=[
+                    RiskDecision(
+                        action="halt",
+                        reason=f"halted: {self.risk_manager.state.reason}",
+                    )
+                ],
+                duration_ms=self._elapsed_ms(ts_start),
+            )
         positions = list(account.positions.values())
         orders = self.risk_manager.force_flatten_orders(
             positions,
@@ -285,19 +372,48 @@ class Cycle:
         # mid-submit we would rather wait for it than fail to flatten.
         # It still refuses to wait forever — a wedged holder must not
         # trap the one command that reduces risk.
+        halted_during_submit = False
         with execution_lock(self._state_dir(), holder="force_flatten", timeout=120.0):
+            # The initial check above is not sufficient: waiting for the
+            # shared execution lock can take up to two minutes, during which
+            # the operator may halt the system.  Never let the playbook's
+            # automatic path cross that newly-set boundary.
+            with self.risk_manager.submission_gate() as permitted:
+                if permitted:
+                    permitted = not self.risk_manager.is_halted()
+            if not permitted:
+                self.alerts.warning(
+                    "🛑 HALTED — force-flatten stood down at the final submit gate."
+                )
+                return CycleReport(
+                    ts=ts_start,
+                    status="halted",
+                    orders_submitted=0,
+                    fills_received=0,
+                    decisions=[
+                        RiskDecision(
+                            action="halt",
+                            reason=f"halted: {self.risk_manager.state.reason}",
+                        )
+                    ],
+                    duration_ms=self._elapsed_ms(ts_start),
+                )
             for order in orders:
-                try:
-                    self.order_store.save_order(order)
-                    self.broker.submit_order(order)
-                    self.order_store.update_status(order.client_order_id, OrderStatus.SUBMITTED)
-                    orders_submitted += 1
-                except Exception as e:
-                    logger.bind(component="cycle").exception(
-                        f"force-flatten submit failed for {order.client_order_id}"
-                    )
-                    self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
-                    self.alerts.error(f"force-flatten submit failed: {e!r}")
+                with self.risk_manager.submission_gate() as permitted:
+                    if not permitted:
+                        halted_during_submit = True
+                        break
+                    try:
+                        self.order_store.save_order(order)
+                        self.broker.submit_order(order)
+                        self.order_store.update_status(order.client_order_id, OrderStatus.SUBMITTED)
+                        orders_submitted += 1
+                    except Exception as e:
+                        logger.bind(component="cycle").exception(
+                            f"force-flatten submit failed for {order.client_order_id}"
+                        )
+                        self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
+                        self.alerts.error(f"force-flatten submit failed: {e!r}")
 
             fills = self.broker.get_fills(since=self._reconcile_from(ts_start))
             for fill in fills:
@@ -315,18 +431,89 @@ class Cycle:
 
         return CycleReport(
             ts=ts_start,
-            status="ok" if orders_submitted > 0 else "no_orders",
+            status="halted"
+            if halted_during_submit
+            else "ok"
+            if orders_submitted > 0
+            else "no_orders",
             orders_submitted=orders_submitted,
             fills_received=len(fills),
             decisions=[],
             duration_ms=self._elapsed_ms(ts_start),
         )
 
-    def _run_inner(self, ts_start: datetime) -> CycleReport:
+    def _run_force_flatten_review(
+        self,
+        ts_start: datetime,
+        *,
+        account: Any | None = None,
+        reason: str | None = None,
+    ) -> CycleReport:
+        """Describe a playbook flatten without calling any broker mutation.
+
+        This is intentionally compact because the normal live-account review
+        has fresh price/risk sizing.  A force-flatten playbook is dormant in
+        production, but it must never become a backdoor around review mode.
+        """
+        account = account or self._fetch_account(ts_start)
+        orders = self.risk_manager.force_flatten_orders(
+            list(account.positions.values()),
+            ts=ts_start,
+            working_orders=self._working_orders(),
+            order_id_factory=lambda: f"review-flatten-{uuid.uuid4().hex[:12]}",
+        )
+        reason = reason or "playbook requested force flatten; review mode forbids submission"
+        payload = {
+            "schema_version": 1,
+            "id": uuid.uuid4().hex[:12],
+            "kind": "halted_review",
+            "built_at": self._clock().isoformat(),
+            "halted": self.risk_manager.is_halted(),
+            "halt_reason": reason,
+            "account_snapshot_ts": getattr(account, "ts", ts_start).isoformat(),
+            "account": {
+                "base_currency": getattr(account, "base_currency", "USD"),
+                "equity": float(getattr(account, "equity", 0.0) or 0.0),
+                "position_count": len(getattr(account, "positions", {}) or {}),
+            },
+            "plan": {
+                "base_currency": getattr(account, "base_currency", "USD"),
+                "order_count": len(orders),
+                "prices_available": False,
+                "orders": [
+                    {
+                        "symbol": order.instrument.symbol,
+                        "side": order.side.value.upper(),
+                        "quantity": float(order.quantity),
+                    }
+                    for order in orders
+                ],
+            },
+            "will_never_auto_execute": True,
+        }
+        self._write_halted_review(payload)
+        self.alerts.warning(
+            "🛑 *HALTED — FORCE-FLATTEN REVIEW ONLY*\n"
+            f"{len(orders)} position close(s) identified, but zero orders were submitted.\n"
+            "_This review cannot be approved or queued. Use explicit reduce-only controls "
+            "if you choose to lower exposure while halted._"
+        )
+        return CycleReport(
+            ts=ts_start,
+            status="halted_review",
+            orders_submitted=0,
+            fills_received=0,
+            decisions=[RiskDecision(action="halt", reason=reason)],
+            duration_ms=self._elapsed_ms(ts_start),
+        )
+
+    def _run_inner(self, ts_start: datetime, *, force_review: bool = False) -> CycleReport:
         # 0. Apply the regime playbook if one is configured. The playbook can
         # swap the universe, strategies, vol target, and per-strategy params.
         # `force_flatten: true` short-circuits to a flatten-everything cycle.
         cfg, force_flatten = self._effective_config(ts_start)
+        if force_flatten and force_review:
+            return self._run_force_flatten_review(ts_start)
         if force_flatten:
             return self._run_force_flatten(ts_start)
 
@@ -378,29 +565,62 @@ class Cycle:
             f"positions={len(getattr(account, 'positions', {}) or {})}"
         )
 
-        # 4. Intraday kill switches (daily-loss, drawdown).
-        intraday = self.risk_manager.evaluate_intraday(account)
+        # 4. Intraday kill switches (daily-loss, drawdown).  A request that
+        # was explicitly marked review-only must not mutate the baseline or
+        # execution state — it only observes the current halt.  A normal
+        # cycle still evaluates risk exactly as before; when that trips, we
+        # carry on as a non-executable review rather than hiding the current
+        # proposal behind an early return.
+        if force_review:
+            self.risk_manager._reload_halt_state()
+            if self.risk_manager.is_halted():
+                intraday = RiskDecision(
+                    action="halt", reason=f"already halted: {self.risk_manager.state.reason}"
+                )
+            else:
+                intraday = RiskDecision(action="allow", reason="operator requested review-only")
+            review_only = True
+        else:
+            # A live account may execute only against a baseline captured at
+            # the actual NYSE open.  Research/paper keeps the legacy path so
+            # its historical fixtures and simulations do not acquire a live
+            # exchange-session dependency.  A missing trusted live baseline
+            # becomes a review, never a noon re-baseline or order path.
+            from trading.core.config import settings as _settings
+
+            if _settings.is_live_armed():
+                from trading.runtime.nyse_session import current_nyse_session_label
+
+                intraday = self.risk_manager.evaluate_session_risk(
+                    account,
+                    session_label=current_nyse_session_label(account.ts),
+                )
+            else:
+                intraday = self.risk_manager.evaluate_intraday(account)
+            review_only = intraday.action in {"halt", "reject"}
         # A repaired baseline is not an error, but it IS the loudest thing
         # that happened this cycle: it means the figure the kill switches
         # were about to measure against belonged to another account. The
         # alternative — repairing it silently — is how the 2026-08-07
         # baseline poisoning would have gone unnoticed on a day when it
         # did not happen to trip a limit.
-        try:
-            note = self.risk_manager.take_baseline_note()
-            if note:
-                self.alerts.critical(f"⚠️ Risk baseline repaired — {note}")
-        except Exception:
-            logger.bind(component="cycle").exception("baseline note alert failed")
+        if not force_review:
+            try:
+                note = self.risk_manager.take_baseline_note()
+                if note:
+                    self.alerts.critical(f"⚠️ Risk baseline repaired — {note}")
+            except Exception:
+                logger.bind(component="cycle").exception("baseline note alert failed")
         if intraday.action == "halt":
-            self.alerts.critical(f"HALT: {intraday.reason}")
-            return CycleReport(
-                ts=ts_start,
-                status="halted",
-                orders_submitted=0,
-                fills_received=0,
-                decisions=[intraday],
-                duration_ms=self._elapsed_ms(ts_start),
+            if not force_review:
+                self.alerts.critical(f"HALT: {intraday.reason}")
+            logger.bind(component="cycle").warning(
+                "risk halt active: building non-executable live-account review"
+            )
+        elif review_only:
+            logger.bind(component="cycle").warning(
+                f"execution safety gate rejected cycle: {intraday.reason}; "
+                "building non-executable live-account review"
             )
 
         # 5. Generate strategy weights and combine.
@@ -441,7 +661,8 @@ class Cycle:
         # the approval prompt and discarded minutes later. Recording the
         # names below the cut is the only way to ever answer whether the
         # ranking step adds anything — see docs/LEARNING_ARCHITECTURE.md.
-        self._record_shadow_ladder(prices, signal, last_prices, cfg=cfg)
+        if not review_only:
+            self._record_shadow_ladder(prices, signal, last_prices, cfg=cfg)
 
         # 7c. Agent PM bridge. Deliberately AFTER the shadow ladder, so the
         # counterfactual keeps measuring the mechanical strategy's ranking
@@ -498,7 +719,20 @@ class Cycle:
             f"risk manager: signal has {len(signal.target_weights)} target weights"
             + (f", fx_rates={fx_rates}" if fx_rates else "")
         )
-        orders, decisions = self.risk_manager.signal_to_orders(
+        review_id = uuid.uuid4().hex[:12] if review_only else None
+        preview_sequence = 0
+
+        def _preview_order_id() -> str:
+            nonlocal preview_sequence
+            preview_sequence += 1
+            return f"review-{review_id}-{preview_sequence}"
+
+        size_signal = (
+            self.risk_manager.preview_signal_to_orders
+            if review_only
+            else self.risk_manager.signal_to_orders
+        )
+        orders, decisions = size_signal(
             signal,
             account=account,
             last_prices=last_prices,
@@ -506,7 +740,13 @@ class Cycle:
             sector_map=sector_map,
             fx_rates=fx_rates,
             pending_orders=pending_orders,
-            **({"order_id_factory": self._order_id_factory} if self._order_id_factory else {}),
+            **(
+                {"order_id_factory": _preview_order_id}
+                if review_only
+                else (
+                    {"order_id_factory": self._order_id_factory} if self._order_id_factory else {}
+                )
+            ),
         )
 
         # 8a-bis. Operator holds (/hold SYM): pinned positions are frozen —
@@ -535,6 +775,56 @@ class Cycle:
         # broker will issue the actual rejection if margin doesn't permit
         # — this is a heads-up so the operator can intervene with /fx.
         self._preflight_buying_power(orders, account, last_prices)
+
+        if review_only:
+            # A halt has to stop the book growing. It does not have to stop
+            # the desk from *shrinking* it — that was the complaint on
+            # 2026-08-18, when a loss halt turned every command into an
+            # information blackout and the only defensive action left was
+            # trading by hand in IBKR.
+            #
+            # So before falling back to the read-only card, ask whether any
+            # part of this plan provably reduces exposure. Sells against a
+            # live long, buy-backs against a live short, sized to the
+            # remaining headroom and never past flat. Buys are dropped, and
+            # the operator still has to approve what is left.
+            defensive = None
+            defensive_reason: str | None = None
+            if not force_review:
+                # `/review` is an explicit contract: it never executes, even
+                # if the risk state clears while it is being built. So the
+                # reduce-only question is only asked on the `/cycle` path.
+                defensive, defensive_reason = self._plan_defensive_reduction(
+                    orders, account=account
+                )
+            if defensive is not None and defensive.has_orders:
+                return self._run_defensive_cycle(
+                    ts_start=ts_start,
+                    intraday=intraday,
+                    decisions=decisions,
+                    orders=defensive.kept,
+                    dropped=defensive.dropped,
+                    clamped=defensive.clamped,
+                    account=account,
+                    prices=prices,
+                    last_prices=last_prices,
+                    fx_rates=fx_rates,
+                    signal=signal,
+                    held_symbols=held_syms,
+                )
+            return self._publish_halted_review(
+                ts_start=ts_start,
+                review_id=review_id or "review",
+                intraday=intraday,
+                decisions=decisions,
+                orders=orders,
+                account=account,
+                last_prices=last_prices,
+                fx_rates=fx_rates,
+                signal=signal,
+                held_symbols=held_syms,
+                defensive_note=defensive_reason,
+            )
 
         # 8c. Basket preview — Telegram the planned orders *before* they
         # go to the broker so the operator can see what will trade.
@@ -787,7 +1077,34 @@ class Cycle:
         #    submit plus reconcile, seconds, not the whole cycle.
         try:
             with execution_lock(self._state_dir(), holder="cycle"):
-                orders_submitted, fills = self._submit_and_reconcile(orders, prices, ts_start)
+                # The outer last-instant check can be stale while this cycle
+                # waits for another execution path. Recheck under the lock;
+                # the lower-level routine repeats an atomic halt check before
+                # every individual broker submission.
+                with self.risk_manager.submission_gate() as permitted:
+                    if not permitted:
+                        self.alerts.critical(
+                            "⛔ submit gate: halt engaged while waiting for the execution lock "
+                            f"— dropping {len(orders)} planned order(s), submitting nothing."
+                        )
+                        return CycleReport(
+                            ts=ts_start,
+                            status="halted",
+                            orders_submitted=0,
+                            fills_received=0,
+                            decisions=decisions,
+                            duration_ms=self._elapsed_ms(ts_start),
+                        )
+                (
+                    orders_submitted,
+                    fills,
+                    halted_during_submit,
+                    submission_failed,
+                ) = self._submit_and_reconcile(
+                    orders,
+                    prices,
+                    ts_start,
+                )
         except ExecutionBusyError as e:
             # Skipping a cycle is recoverable; double-submitting is not.
             logger.bind(component="cycle").warning(f"cycle skipped: {e}")
@@ -804,6 +1121,26 @@ class Cycle:
                 duration_ms=self._elapsed_ms(ts_start),
             )
 
+        if halted_during_submit:
+            self.alerts.critical(
+                "⛔ halt engaged during order batch — stopped remaining planned orders. "
+                f"{orders_submitted} order(s) had already been submitted."
+            )
+            return CycleReport(
+                ts=ts_start,
+                status="halted",
+                orders_submitted=orders_submitted,
+                fills_received=len(fills),
+                decisions=decisions,
+                duration_ms=self._elapsed_ms(ts_start),
+            )
+
+        self._persist_pm_targets_after_successful_submission(
+            signal,
+            orders_submitted=orders_submitted,
+            submission_failed=submission_failed,
+        )
+
         # 10b. Telegram a fill summary so the operator doesn't have to
         # poll /positions. Aggregated to keep noise low even when 8
         # names fill at once. Silent if no fills this cycle.
@@ -813,47 +1150,69 @@ class Cycle:
         return self._finish_cycle(ts_start, decisions, orders_submitted, fills)
 
     def _submit_and_reconcile(
-        self, orders: list[Any], prices: pd.DataFrame, ts_start: datetime
-    ) -> tuple[int, list[Any]]:
+        self,
+        orders: list[Any],
+        prices: pd.DataFrame,
+        ts_start: datetime,
+        *,
+        allow_when_halted: bool = False,
+    ) -> tuple[int, list[Any], bool, bool]:
         """Everything that mutates broker state. Runs under the execution
         lock — keep it short, and keep anything slow (price refresh, LLM
-        calls, snapshots) outside it."""
+        calls, snapshots) outside it.
+
+        ``allow_when_halted`` is used **only** by the defensive reduce-only
+        cycle, whose orders have been independently proven to lower exposure
+        against a fresh broker snapshot. Every other caller leaves it False,
+        so a halt landing mid-batch still stops the remaining orders."""
         orders_submitted = 0
+        halted_during_submit = False
+        submission_failed = False
         for order in orders:
-            try:
-                self.order_store.save_order(order)
-                self.broker.submit_order(order)
-                self.order_store.update_status(order.client_order_id, OrderStatus.SUBMITTED)
-                orders_submitted += 1
-            except Exception as e:
-                # Surface broker rejections explicitly in Telegram so the
-                # operator sees the reason — not just a generic stack.
-                err_str = f"{type(e).__name__}: {e}"[:400]
-                logger.bind(component="cycle").exception(
-                    f"submit failed for {order.client_order_id}"
-                )
-                self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
-                # A CONNECTIVITY failure is a different event from a
-                # rejected order and needs a different reaction. "Order
-                # rejected: insufficient margin" is information; "cannot
-                # reach the broker" means the whole batch is dead and a
-                # human has to do something — usually approve a 2FA
-                # prompt. Escalate it so it does not scroll past looking
-                # like one more per-name rejection.
-                if _looks_like_disconnect(e):
-                    self.alerts.critical(
-                        "🔴 *Broker unreachable while submitting orders*\n"
-                        f"`{err_str}`\n"
-                        f"Failed on {order.instrument.symbol}; the rest of this "
-                        "batch will fail too.\n"
-                        "_Most likely an IBKR Mobile 2FA prompt after a gateway "
-                        "restart. Approve it, then `/cycle` to retry._"
+            # ``submission_gate`` shares the halt-state transaction with
+            # Telegram/CLI /halt. A hard stop therefore takes effect between
+            # orders in this batch, rather than only after all submissions.
+            with self.risk_manager.submission_gate(
+                allow_when_halted=allow_when_halted
+            ) as permitted:
+                if not permitted:
+                    halted_during_submit = True
+                    break
+                try:
+                    self.order_store.save_order(order)
+                    self.broker.submit_order(order)
+                    self.order_store.update_status(order.client_order_id, OrderStatus.SUBMITTED)
+                    orders_submitted += 1
+                except Exception as e:
+                    submission_failed = True
+                    # Surface broker rejections explicitly in Telegram so the
+                    # operator sees the reason — not just a generic stack.
+                    err_str = f"{type(e).__name__}: {e}"[:400]
+                    logger.bind(component="cycle").exception(
+                        f"submit failed for {order.client_order_id}"
                     )
-                else:
-                    self.alerts.error(
-                        f"❌ order rejected: {order.side.value} {order.quantity:g} "
-                        f"{order.instrument.symbol} — {err_str}"
-                    )
+                    self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
+                    # A CONNECTIVITY failure is a different event from a
+                    # rejected order and needs a different reaction. "Order
+                    # rejected: insufficient margin" is information; "cannot
+                    # reach the broker" means the whole batch is dead and a
+                    # human has to do something — usually approve a 2FA
+                    # prompt. Escalate it so it does not scroll past looking
+                    # like one more per-name rejection.
+                    if _looks_like_disconnect(e):
+                        self.alerts.critical(
+                            "🔴 *Broker unreachable while submitting orders*\n"
+                            f"`{err_str}`\n"
+                            f"Failed on {order.instrument.symbol}; the rest of this "
+                            "batch will fail too.\n"
+                            "_Most likely an IBKR Mobile 2FA prompt after a gateway "
+                            "restart. Approve it, then `/cycle` to retry._"
+                        )
+                    else:
+                        self.alerts.error(
+                            f"❌ order rejected: {order.side.value} {order.quantity:g} "
+                            f"{order.instrument.symbol} — {err_str}"
+                        )
 
         # 9b. Drive the broker's internal clock so paper-trade fills
         # materialize in the same cycle they were submitted in. No-op for
@@ -887,7 +1246,7 @@ class Cycle:
             except Exception:
                 logger.bind(component="cycle").exception("save_fill failed")
         self._warn_on_stale_open_orders(ts_start)
-        return orders_submitted, fills
+        return orders_submitted, fills, halted_during_submit, submission_failed
 
     def _finish_cycle(
         self,
@@ -922,6 +1281,410 @@ class Cycle:
             decisions=decisions,
             duration_ms=self._elapsed_ms(ts_start),
         )
+
+    def _publish_halted_review(
+        self,
+        *,
+        ts_start: datetime,
+        review_id: str,
+        intraday: RiskDecision,
+        decisions: list[RiskDecision],
+        orders: list[Any],
+        account: Any,
+        last_prices: dict[str, float],
+        fx_rates: dict[str, float],
+        signal: Signal,
+        held_symbols: set[str],
+        defensive_note: str | None = None,
+    ) -> CycleReport:
+        """Persist and announce a real-account plan that cannot execute.
+
+        The PM's research book is deliberately *not* reused as this screen.
+        ``build_plan`` works from the current broker account, live FX and the
+        same risk-sized order deltas an ordinary cycle would use.  The sole
+        difference is that this branch has no approval, execution lock,
+        OrderStore write, broker submit/tick/fill call, shadow write or PM
+        target-state write.
+        """
+        from trading.runner.approval_view import build_plan, format_trade_review
+
+        plan = build_plan(orders, account, last_prices, fx_rates=fx_rates)
+        metadata = dict(signal.metadata or {})
+        base_currency = str(getattr(account, "base_currency", "USD") or "USD").upper()
+        equity = float(getattr(account, "equity", 0.0) or 0.0)
+        actual_halt = self.risk_manager.is_halted()
+        adjustment_reasons = [
+            decision.reason for decision in decisions if decision.action != "allow"
+        ]
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "id": review_id,
+            "kind": "halted_review",
+            "built_at": self._clock().isoformat(),
+            "halted": actual_halt,
+            "halt_reason": intraday.reason,
+            "account_snapshot_ts": getattr(account, "ts", ts_start).isoformat(),
+            "account": {
+                "base_currency": base_currency,
+                "equity": round(equity, 2),
+                "cash": round(float(getattr(account, "cash", 0.0) or 0.0), 2),
+                "position_count": len(getattr(account, "positions", {}) or {}),
+            },
+            "plan": plan,
+            "risk_adjustments": adjustment_reasons,
+            "held_symbols": sorted(held_symbols),
+            "combined_target_weights": {
+                key: float(weight) for key, weight in signal.target_weights.items()
+            },
+            "pm": {
+                "decided_at": metadata.get("pm_decided_at", ""),
+                "sleeve_pct": metadata.get("pm_sleeve_pct", ""),
+                "strategy_sleeve_pct": metadata.get("strategy_sleeve_pct", ""),
+                "dropped": metadata.get("pm_dropped", ""),
+            },
+            "will_never_auto_execute": True,
+        }
+        try:
+            self._write_halted_review(payload)
+        except Exception:
+            logger.bind(component="cycle").exception("could not persist halted review")
+
+        title = (
+            "🛑 *HALTED — LIVE-ACCOUNT REVIEW ONLY*"
+            if actual_halt
+            else "🧪 *LIVE-ACCOUNT REVIEW ONLY*"
+        )
+        headline = [
+            title,
+            f"Reason: `{intraday.reason}`",
+            (
+                f"Live account snapshot: {base_currency} {equity:,.0f} equity · "
+                f"{len(getattr(account, 'positions', {}) or {})} current position(s)."
+            ),
+        ]
+        if orders:
+            rendered = format_trade_review(payload, heading=title)
+        else:
+            rejections = [reason for reason in adjustment_reasons if reason]
+            rendered = "\n".join(
+                [
+                    "*No hypothetical position changes passed the current sizing gates.*",
+                    *(
+                        [f"Risk result: {rejections[0]}"]
+                        if rejections
+                        else ["The current account already matches the computed target."]
+                    ),
+                ]
+            )
+        notes: list[str] = []
+        if held_symbols:
+            notes.append("Holds preserved: `" + ", ".join(sorted(held_symbols)) + "`.")
+        pm_decided_at = str(metadata.get("pm_decided_at") or "")
+        if pm_decided_at:
+            notes.append(
+                "PM research was translated through the live account, sleeve, cash, FX, "
+                "risk caps and holds (PM decision: " + pm_decided_at + ")."
+            )
+        if defensive_note:
+            notes.append(
+                "No part of this plan could be proven to reduce exposure — "
+                f"{defensive_note}. Nothing here is approvable."
+            )
+        notes.append(
+            "*0 orders submitted. This review cannot be approved, queued or executed. "
+            "After `/resume`, run a brand-new `/cycle` for a fresh executable approval.*"
+        )
+        self.alerts.warning("\n\n".join(["\n".join(headline), rendered, "\n".join(notes)]))
+
+        return CycleReport(
+            ts=ts_start,
+            status="halted_review",
+            orders_submitted=0,
+            fills_received=0,
+            decisions=[intraday, *decisions],
+            duration_ms=self._elapsed_ms(ts_start),
+        )
+
+    # -------------------------------------------- defensive (reduce-only)
+
+    def _plan_defensive_reduction(
+        self,
+        orders: list[Any],
+        *,
+        account: Any,
+    ) -> tuple[Any | None, str]:
+        """Extract the provably-reducing subset of a blocked plan.
+
+        Returns ``(filter_result, reason)``.  ``filter_result`` is ``None``
+        when the defensive path is switched off or the account view cannot
+        be trusted; ``reason`` always explains what the operator is seeing,
+        because "nothing happened" is the message that gets ignored.
+        """
+        from trading.core.config import settings as _settings
+
+        if not bool(getattr(_settings, "allow_defensive_cycle_when_halted", True)):
+            return (
+                None,
+                "the defensive reduce-only path is disabled (ALLOW_DEFENSIVE_CYCLE_WHEN_HALTED=false)",
+            )
+        if not orders:
+            return None, "the risk-sized plan contained no orders at all"
+
+        positions = list((getattr(account, "positions", {}) or {}).values())
+        if not positions:
+            return None, "the account holds no positions to reduce"
+        try:
+            working = self._working_orders()
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "could not read working orders; refusing a defensive reduction"
+            )
+            return (
+                None,
+                "the broker's working orders could not be read, so no exit could be proven safe",
+            )
+
+        from dataclasses import replace
+
+        from trading.execution.ibkr import new_client_order_id
+        from trading.risk.reduce_only import filter_reduce_only
+
+        try:
+            result = filter_reduce_only(list(orders), positions, list(working or []))
+        except Exception:
+            logger.bind(component="cycle").exception("reduce-only filter failed")
+            return None, "the reduce-only check itself failed"
+        if not result.has_orders:
+            return result, "every planned order would have opened or increased a position"
+
+        # The orders arrived from ``preview_signal_to_orders`` and carry
+        # display-only ``review-…`` client order ids. These are about to
+        # reach the broker and the ledger, so re-stamp them with real ones;
+        # a fill labelled "review" is a reconciliation problem later and a
+        # lie in the audit trail now.
+        factory = getattr(self, "_order_id_factory", None) or (lambda: new_client_order_id("dfns"))
+        result = replace(
+            result,
+            kept=[o.model_copy(update={"client_order_id": factory()}) for o in result.kept],
+        )
+        return result, "reduce-only subset available"
+
+    def _run_defensive_cycle(
+        self,
+        *,
+        ts_start: datetime,
+        intraday: RiskDecision,
+        decisions: list[RiskDecision],
+        orders: list[Any],
+        dropped: list[tuple[str, str]],
+        clamped: list[tuple[str, float, float]],
+        account: Any,
+        prices: pd.DataFrame,
+        last_prices: dict[str, float],
+        fx_rates: dict[str, float],
+        signal: Signal,
+        held_symbols: set[str],
+    ) -> CycleReport:
+        """Approve-and-submit a strictly exposure-reducing basket while halted.
+
+        Three properties make this safe to run inside a kill switch:
+
+        1. every order was verified against the live book to reduce, never
+           open or flip, a position (``trading.risk.reduce_only``);
+        2. approval is *mandatory* here regardless of
+           ``REQUIRE_CYCLE_APPROVAL`` — a halted system never trades without
+           a human saying so;
+        3. the verification is repeated against a **fresh** broker snapshot
+           under the execution lock, after the approval wait, because the
+           position it was built from can be minutes old by then.
+
+        Anything that fails re-verification is dropped, not resized upward.
+        """
+        base_currency = str(getattr(account, "base_currency", "USD") or "USD").upper()
+        equity = float(getattr(account, "equity", 0.0) or 0.0)
+
+        detail: list[str] = []
+        if clamped:
+            detail.append(
+                "Trimmed to the remaining headroom: "
+                + ", ".join(f"`{sym}` {want:g}→{got:g}" for sym, want, got in clamped)
+                + "."
+            )
+        if dropped:
+            shown = "; ".join(f"`{sym}` — {why}" for sym, why in dropped[:6])
+            more = f" (+{len(dropped) - 6} more)" if len(dropped) > 6 else ""
+            detail.append(f"Excluded as exposure-increasing: {shown}{more}.")
+        if held_symbols:
+            detail.append("Holds preserved: `" + ", ".join(sorted(held_symbols)) + "`.")
+
+        self.alerts.warning(
+            "\n".join(
+                [
+                    "🛡 *DEFENSIVE CYCLE — REDUCE-ONLY* (execution is halted)",
+                    f"Reason: `{intraday.reason}`",
+                    f"Live account: {base_currency} {equity:,.0f} equity · "
+                    f"{len(getattr(account, 'positions', {}) or {})} position(s).",
+                    "",
+                    f"{len(orders)} order(s) that can only *lower* exposure are proposed below. "
+                    "Buys, rotations and new names were removed. Approval is required — "
+                    "nothing is sent unless you approve it.",
+                ]
+                + (["", *detail] if detail else [])
+            )
+        )
+
+        approved = self._request_cycle_approval(
+            orders,
+            account,
+            last_prices,
+            fx_rates=fx_rates,
+            defensive=True,
+        )
+        if not approved:
+            return CycleReport(
+                ts=ts_start,
+                status="no_orders",
+                orders_submitted=0,
+                fills_received=0,
+                decisions=[intraday, *decisions],
+                duration_ms=self._elapsed_ms(ts_start),
+            )
+
+        if self._elapsed_ms(ts_start) > 290_000:
+            self.alerts.critical(
+                "⛔ defensive cycle exceeded its timeout before submission — "
+                f"dropping {len(approved)} order(s) (zombie-cycle guard)."
+            )
+            return CycleReport(
+                ts=ts_start,
+                status="error",
+                orders_submitted=0,
+                fills_received=0,
+                decisions=[intraday, *decisions],
+                error="zombie-cycle guard: defensive planning outlived the cycle timeout",
+                duration_ms=self._elapsed_ms(ts_start),
+            )
+
+        try:
+            with execution_lock(self._state_dir(), holder="cycle:defensive"):
+                final = self._reverify_reduce_only(approved)
+                if not final:
+                    self.alerts.warning(
+                        "⛔ defensive cycle stood down — the live book changed while you were "
+                        "reviewing, so no order could still be proven reduce-only. "
+                        "Nothing was submitted."
+                    )
+                    return CycleReport(
+                        ts=ts_start,
+                        status="no_orders",
+                        orders_submitted=0,
+                        fills_received=0,
+                        decisions=[intraday, *decisions],
+                        duration_ms=self._elapsed_ms(ts_start),
+                    )
+                (
+                    orders_submitted,
+                    fills,
+                    _halted_during_submit,
+                    _submission_failed,
+                ) = self._submit_and_reconcile(
+                    final,
+                    prices,
+                    ts_start,
+                    allow_when_halted=True,
+                )
+        except ExecutionBusyError as e:
+            logger.bind(component="cycle").warning(f"defensive cycle skipped: {e}")
+            self.alerts.warning(f"⏳ defensive cycle skipped — {e}")
+            return CycleReport(
+                ts=ts_start,
+                status="skipped_locked",
+                orders_submitted=0,
+                fills_received=0,
+                decisions=[intraday, *decisions],
+                duration_ms=self._elapsed_ms(ts_start),
+            )
+
+        # A defensive cycle deliberately does NOT advance the PM's exit
+        # history: it traded a filtered subset, not the PM's target book,
+        # and next cycle must still see the PM's real previous targets.
+        self.alerts.info(
+            f"🛡 Defensive reduce-only cycle complete — {orders_submitted} order(s) submitted, "
+            f"{len(fills)} fill(s). The account remains halted; no new exposure was added."
+        )
+        if fills:
+            try:
+                self._announce_fills(fills)
+            except Exception:
+                logger.bind(component="cycle").exception("fill summary failed")
+
+        return CycleReport(
+            ts=ts_start,
+            status="ok" if orders_submitted > 0 else "no_orders",
+            orders_submitted=orders_submitted,
+            fills_received=len(fills),
+            decisions=[intraday, *decisions],
+            duration_ms=self._elapsed_ms(ts_start),
+        )
+
+    def _reverify_reduce_only(self, orders: list[Any]) -> list[Any]:
+        """Re-prove every approved order against a fresh broker snapshot.
+
+        The approval window can be minutes long, and a trailing-stop guard
+        or a manual `/close` may have exited part of the book meanwhile.
+        Submitting the stale quantity would then cross flat and open a
+        short — precisely the outcome the halt exists to prevent.
+        """
+        from trading.risk.reduce_only import filter_reduce_only
+
+        try:
+            account = self._fetch_account(self._clock())
+            positions = list((getattr(account, "positions", {}) or {}).values())
+            working = list(self._working_orders() or [])
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "could not refresh the broker view before a defensive submit"
+            )
+            self.alerts.critical(
+                "⛔ could not re-read the live book before submitting the defensive basket — "
+                "nothing was sent."
+            )
+            return []
+        result = filter_reduce_only(list(orders), positions, working)
+        if result.dropped:
+            names = ", ".join(f"`{sym}`" for sym, _ in result.dropped)
+            self.alerts.warning(
+                f"⚠️ dropped at the final reduce-only re-check (the book moved): {names}."
+            )
+        if result.clamped:
+            trims = ", ".join(f"`{sym}` {want:g}→{got:g}" for sym, want, got in result.clamped)
+            self.alerts.warning(f"⚠️ resized down at the final reduce-only re-check: {trims}.")
+        return result.kept
+
+    def _write_halted_review(self, payload: dict[str, Any]) -> None:
+        """Atomically publish the display-only review artifact.
+
+        The bot is a concurrent reader in another container.  ``os.replace``
+        prevents it from ever seeing a half-written plan, while keeping the
+        artifact intentionally separate from the executable approval files.
+        """
+        path = self._state_dir() / self.HALTED_REVIEW_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump(payload, stream, indent=2, sort_keys=True)
+            os.replace(tmp_name, path)
+        except Exception:
+            with suppress(FileNotFoundError):
+                os.unlink(tmp_name)
+            raise
+
+    def _clear_halted_review(self) -> None:
+        """Discard a display-only review once a new normal cycle begins."""
+        path = self._state_dir() / self.HALTED_REVIEW_FILE
+        with suppress(FileNotFoundError):
+            path.unlink()
 
     # ---------------------------------------------------------- helpers
 
@@ -1220,17 +1983,6 @@ class Cycle:
         if exited:
             logger.bind(component="cycle").info(f"PM exit targets set to zero: {exited}")
 
-        # Record what the PM directs NOW, so the next cycle can exit
-        # whatever it drops. Written only on the tradeable path.
-        try:
-            from trading.agents.pm_signal import save_targets
-
-            save_targets(_s.state_dir, set(result.signal.target_weights))
-        except Exception:
-            logger.bind(component="cycle").exception(
-                "could not record PM targets; next cycle may not be able to exit them"
-            )
-
         logger.bind(component="cycle").info(
             f"PM bridge: pm sleeve {sleeve:.1%}, strategy sleeve {strat:.1%}, "
             f"{len(result.signal.target_weights)} PM name(s), "
@@ -1248,9 +2000,61 @@ class Cycle:
                     "strategy_sleeve_pct": f"{strat:.4f}",
                     "pm_decided_at": result.signal.metadata.get("decided_at", ""),
                     "pm_dropped": ",".join(result.dropped),
+                    # This is a candidate only. It is committed after a
+                    # clean normal-cycle broker acknowledgement, never while
+                    # merely planning a review or waiting for approval.
+                    self._PM_TARGET_KEYS_METADATA: json.dumps(
+                        sorted(result.signal.target_weights), separators=(",", ":")
+                    ),
                 },
             }
         )
+
+    def _persist_pm_targets_after_successful_submission(
+        self,
+        signal: Signal,
+        *,
+        orders_submitted: int,
+        submission_failed: bool,
+    ) -> None:
+        """Advance PM exit history only after a clean broker acknowledgement.
+
+        ``last_targets.json`` drives later PM exits, so changing it while a
+        proposal is only hypothetical can turn an untraded name into a
+        phantom exit.  The candidate travels in this cycle's immutable
+        signal; every early return (review, reject, timeout, halt or lock
+        contention) bypasses this method.  A partially failed batch is also
+        deliberately left unchanged: retrying with the known previous state
+        is safer than claiming the proposed PM book reached the broker.
+        """
+        if orders_submitted <= 0 or submission_failed:
+            return
+        encoded_keys = signal.metadata.get(self._PM_TARGET_KEYS_METADATA)
+        if not encoded_keys:
+            return
+        try:
+            parsed_keys = json.loads(encoded_keys)
+            if (
+                not isinstance(parsed_keys, list)
+                or not parsed_keys
+                or any(not isinstance(key, str) or not key for key in parsed_keys)
+            ):
+                raise ValueError("invalid PM target-key metadata")
+            keys = set(parsed_keys)
+        except Exception:
+            logger.bind(component="cycle").error(
+                "refusing to persist malformed PM target-key metadata"
+            )
+            return
+        try:
+            from trading.agents.pm_signal import save_targets
+
+            save_targets(self._state_dir(), keys)
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "could not record PM targets after broker acknowledgement; "
+                "next cycle retains the prior PM exit state"
+            )
 
     def _reconcile_from(self, ts_start: datetime) -> datetime:
         """Earliest timestamp worth asking the broker for fills from.
@@ -1852,8 +2656,15 @@ class Cycle:
         rebuild_with_frozen_symbols: (
             Callable[[str, list[str]], tuple[list[Any], list[RiskDecision]]] | None
         ) = None,
+        defensive: bool = False,
     ) -> list[Any]:
         """Block the cycle until the operator decides via Telegram.
+
+        ``defensive`` marks a reduce-only basket built while execution is
+        halted. It changes two things: the published window carries
+        ``defensive_reduce_only``, which is the only flag that lets the bot
+        accept an ``/approve`` during a halt, and the prompt says plainly
+        that nothing here can add exposure.
 
         Writes the basket summary (+ optional top-N candidate scoreboard)
         to ``state/cycle_approval_pending.json`` and waits for
@@ -2047,6 +2858,10 @@ class Cycle:
                 "selectable_symbols": selectable_symbols,
                 "can_pick": bool(candidates_payload and rebuild_from_picks),
                 "candidates": candidates_payload,
+                # The bot refuses every approval while halted EXCEPT one
+                # carrying this flag. It is written by the runner, which is
+                # the only process that verified the orders reduce-only.
+                "defensive_reduce_only": bool(defensive),
             }
             _write_pending(pending_payload)
         except OSError as exc:
@@ -2059,7 +2874,16 @@ class Cycle:
 
         timeout_s = float(_settings.cycle_approval_timeout_s)
         prompt = format_trade_review(pending_payload, include_controls=True)
-        prompt += f"\n`/approve 80` scales the whole plan · `/approve flat` replaces it with a full exit.\n⏱ Auto-rejects after {int(timeout_s / 60)} min."
+        if defensive:
+            prompt += (
+                "\n🛡 *Reduce-only.* Execution is halted, so this basket can only lower "
+                "exposure — every order was checked against the live book and re-checked "
+                "immediately before submission.\n"
+                f"`/approve` sends it · `/approve 80` sends 80% of each size · `/reject` drops it."
+                f"\n⏱ Auto-rejects after {int(timeout_s / 60)} min."
+            )
+        else:
+            prompt += f"\n`/approve 80` scales the whole plan · `/approve flat` replaces it with a full exit.\n⏱ Auto-rejects after {int(timeout_s / 60)} min."
 
         # Buttons carry the cycle id, so a tap on an older prompt in the
         # chat history is refused rather than applied to this basket.
