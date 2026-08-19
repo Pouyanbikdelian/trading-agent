@@ -26,6 +26,7 @@ from typing import Any
 
 from trading.core.clock import artifact_age_seconds
 from trading.core.logging import logger
+from trading.dashboard.live import convert_curve_to_usd, fetch_usdchf
 
 
 def _effective_watchlist(state_dir: Path) -> list[str]:
@@ -48,6 +49,31 @@ def _effective_watchlist(state_dir: Path) -> list[str]:
     except ValueError as e:
         logger.bind(component="dashboard").warning(f"operator watchlist unavailable: {e}")
         return watchlist.baseline_items()
+
+
+def account_curve_usd(
+    points: list[dict[str, Any]], base_currency: str, fx: dict[str, float]
+) -> tuple[list[dict[str, Any]], bool]:
+    """The account's daily curve in USD, and whether it really is USD.
+
+    The Portfolio tab's race plots this line against SPY and the PM sim,
+    both USD, while the IBKR account is CHF-based (GO_LIVE.md §1). Left
+    unconverted, every USDCHF move renders as strategy alpha — the Live
+    tab has converted since 2026-07-09, this curve had not.
+
+    Returns the raw curve with ``False`` when conversion is needed but
+    impossible. Plotting francs against dollars is only acceptable if the
+    page says so, which is what the flag is for.
+    """
+    if (base_currency or "USD").upper() == "USD":
+        return points, True
+    converted = convert_curve_to_usd(points, fx) if fx else []
+    # convert_curve_to_usd drops points that predate its first known rate,
+    # so a short FX series can empty the curve outright. An account line
+    # that silently disappears reads as "flat"; a flagged CHF one does not.
+    if not converted:
+        return points, False
+    return converted, True
 
 
 def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
@@ -86,6 +112,25 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         logger.bind(component="dashboard").warning(f"equity curve failed: {e}")
         out["equity_curve"] = []
         out["equity_today"] = []
+
+    # The same curve in USD, for the race that compares it with SPY and
+    # the PM sim. One USDCHF fetch per payload, handed to the Live tab
+    # below: two tabs converting the same book at rates fetched seconds
+    # apart is its own way of inventing performance.
+    fx: dict[str, float] = {}
+    try:
+        fx = fetch_usdchf(data_dir)  # never raises; {} when both sources fail
+        snap = RunnerStore(state_dir / "runner.db").latest_snapshot()
+        base_ccy = (snap.base_currency if snap else None) or "USD"
+        out["equity_currency"] = base_ccy
+        out["equity_curve_usd"], out["equity_usd_ok"] = account_curve_usd(
+            out["equity_curve"], base_ccy, fx
+        )
+    except Exception as e:
+        logger.bind(component="dashboard").warning(f"usd equity curve failed: {e}")
+        out["equity_currency"] = "USD"
+        out["equity_curve_usd"] = out["equity_curve"]
+        out["equity_usd_ok"] = False
 
     # Agent PM (simulated sleeve): daily-marked equity history + book.
     try:
@@ -183,7 +228,7 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     try:
         from trading.dashboard.live import build_live
 
-        out["live"] = build_live(state_dir, data_dir)
+        out["live"] = build_live(state_dir, data_dir, fx=fx)
     except Exception as e:
         logger.bind(component="dashboard").warning(f"live tab failed: {e}")
         out["live"] = {}
@@ -405,7 +450,8 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  <div class="card big"><h2>Sleeve race · USD, normalized to 100
   <span class="muted" style="text-transform:none;letter-spacing:0">— daily closes only (today's intraday point excluded); live and paper are always separate series</span></h2>
   <div id="lvRaceEmpty" class="muted" style="display:none;padding:18px 0"></div>
-  <canvas id="lvRace" height="84"></canvas></div>
+  <canvas id="lvRace" height="84"></canvas>
+  <div id="lvRaceNote" class="muted" style="font-size:11.5px;margin-top:8px"></div></div>
  <div class="card big"><h2>Daily PnL · USD <span class="muted" id="lvPnlLbl" style="text-transform:none;letter-spacing:0"></span></h2>
   <canvas id="lvPnl" height="72"></canvas></div>
  <div class="card"><h2>Today's attribution <span class="muted" style="text-transform:none;letter-spacing:0">— which position hurt (or carried) today</span></h2>
@@ -423,11 +469,13 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
   </div><canvas id="eq" height="84"></canvas></div>
  <div class="card big"><h2>Holdings & watchlist · 6M, normalized to 100
   <span class="muted" style="text-transform:none;letter-spacing:0">— solid = held, dashed = watchlist; click legend to toggle</span></h2>
-  <div class="chartbox" style="height:min(50vh,420px)"><canvas id="tick"></canvas></div></div>
- <div class="card big"><h2>Strategy race · normalized to 100
-  <span class="muted" style="text-transform:none;letter-spacing:0">— click legend entries to toggle series</span></h2>
+  <div class="chartbox" style="height:min(50vh,420px)"><canvas id="tick"></canvas></div>
+  <div id="tickNote" class="muted" style="font-size:11.5px;margin-top:8px"></div></div>
+ <div class="card big"><h2>Strategy race · USD, normalized to 100
+  <span class="muted" style="text-transform:none;letter-spacing:0">— every series rebased on the SAME day and flow-adjusted (a deposit is not a return); the account line is the whole NetLiq, not a strategy sleeve</span></h2>
   <div id="raceEmpty" class="muted" style="display:none;padding:18px 0"></div>
-  <canvas id="race" height="84"></canvas></div>
+  <canvas id="race" height="84"></canvas>
+  <div id="raceNote" class="muted" style="font-size:11.5px;margin-top:8px"></div></div>
  <!-- Three adjacent cards describing TWO different books. The PM once
       read its neighbour's positions as its own and "exited" a cluster it
       never held (see agents/pm.py OPERATOR_ACCOUNT_KEYS); a human reading
@@ -508,6 +556,64 @@ const line=(el,labels,sets)=>{
   data:{labels,datasets:sets.map(s=>({...s,borderWidth:1.6,pointRadius:s.pointRadius??0,tension:.2,fill:false}))},
   options:{maintainAspectRatio:!(cv.parentElement.classList.contains('chartbox')||cv.parentElement.classList.contains('mbox')),
    plugins:{legend:{display:sets.some(s=>s.label),labels:{color:'#8b98a5',boxWidth:10}}},scales}});};
+// Keep in step with FLOW_THRESHOLD in dashboard/live.py.
+const FLOW_THRESHOLD=0.25;
+// A capital flow is not a return. The paper account was topped up ~5x in
+// one day (2026-05-20); plotted raw that deposit is a vertical rally, and
+// on a normalized chart it drags every day after it up by the same factor.
+// Compound the daily moves instead and let a flow day contribute 0%.
+const flowAdjustedCurve=(pts)=>{
+ if(!pts||!pts.length)return [];
+ let idx=100;const out=[{t:pts[0].t,v:idx}];
+ for(let i=1;i<pts.length;i++){
+  const a=pts[i-1].v,b=pts[i].v;
+  const r=a>0?b/a-1:0;
+  idx*=1+(Math.abs(r)>FLOW_THRESHOLD?0:r);  // deposit/withdrawal, not a return
+  out.push({t:pts[i].t,v:idx});
+ }
+ return out;};
+const flowAdjusted=(pts)=>{
+ if(!pts||pts.length<2)return null;
+ const c=flowAdjustedCurve(pts);
+ return c[c.length-1].v/c[0].v-1;};
+// ONE rebase for every "normalized to 100" chart on this page.
+// Rebasing each series at its OWN first point put three lines at 100 on
+// three different days: SPY and the PM sim from 2026-06-12, the account
+// from 2026-08-06, all sitting on 100 on their own first day, so the gaps
+// between them measured nothing. Cut to the common window (the LATEST
+// inception) and rebase there. This lived in three copies, which is why
+// the 2026-07-09 common-window fix (GO_LIVE.md §5) reached the Live tab's
+// race only and neither of the other two charts.
+// A base of zero is dropped rather than divided by: a wedged IBKR session
+// writes equity=0 snapshots, and one Infinity rescales the y-axis until
+// every other series is a flat line on the floor.
+const rebase100=(series)=>{
+ const all=(series||[]).filter(s=>s&&s.pts);
+ const usable=all.filter(s=>s.pts.length>1);
+ const dropped=all.filter(s=>s.pts.length<2).map(s=>s.label);
+ if(!usable.length)return {dates:[],sets:[],start:null,dropped};
+ const start=usable.map(s=>s.pts.map(p=>p.t).sort()[0]).sort().slice(-1)[0];
+ const dates=[...new Set(usable.flatMap(s=>s.pts.map(p=>p.t)))].filter(t=>t>=start).sort();
+ const sets=usable.map(s=>{
+  const m={};s.pts.forEach(p=>{m[p.t]=p.v;});  // last same-day point wins
+  const first=dates.find(t=>m[t]!=null);
+  const base=first==null?null:m[first];
+  if(!(base>0)){dropped.push(s.label);return null;}
+  return {label:s.label,data:dates.map(t=>m[t]!=null?+(100*m[t]/base).toFixed(2):null),
+   borderColor:s.color,borderDash:s.dash||[],spanGaps:true};
+ }).filter(Boolean);
+ return {dates,sets,start,dropped};};
+// Say out loud what the chart did — which day it rebased on, and which
+// series is not there. A series with fewer than two marks used to drop out
+// of the legend with nothing on the page to say it had.
+const rebaseNote=(id,r,extra)=>{
+ const el=document.getElementById(id);if(!el)return;
+ const bits=[];
+ if(r&&r.start)bits.push('rebased to 100 at '+r.start+' — the latest series start');
+ if(r&&r.dropped.length)bits.push('not plotted: '+r.dropped.join(', ')
+  +' (fewer than two marks in this window, or a zero base)');
+ if(extra)bits.push(extra);
+ el.textContent=bits.join(' · ');};
 setTimeout(()=>location.reload(),300e3); // fresh data every 5 minutes
 fetch('api/summary').then(r=>r.json()).then(d=>{
  document.getElementById('asof').textContent=' · '+new Date(d.generated_at).toLocaleString()+' · auto-refreshes';
@@ -535,25 +641,25 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
     <div style="margin-top:8px">${net}</div></div>`;
   }).join('')||'<div class="card"><span class="muted">no sleeve data yet</span></div>';
 
-  // Sleeve race: common window (latest inception), each series rebased to
-  // 100 at its first point in-window. Live and paper are separate series
-  // by construction — the server never merges books.
-  const series=sleeves.map((s,i)=>({label:s.label,pts:s.curve_usd||[],
+  // Sleeve race, through the shared rebase (common window, zero-base
+  // guard). Live and paper are separate series by construction — the
+  // server never merges books. Book curves are flow-adjusted; SPY is a
+  // price index and must NOT be, or a genuine -25% session would be
+  // quietly flattened into a flat day.
+  const series=sleeves.map((s,i)=>({label:s.label,pts:flowAdjustedCurve(s.curve_usd||[]),
     color:['#4cc38a','#e8a54b','#b07cf6'][i%3]}));
   if((lv.spy||[]).length)series.push({label:'SPY',pts:lv.spy,color:'#8b98a5'});
-  const usable=series.filter(s=>s.pts.length>1);
   const raceEl=document.getElementById('lvRace'),raceEmpty=document.getElementById('lvRaceEmpty');
-  if(usable.length){
-   const start=usable.map(s=>s.pts[0].t).sort().slice(-1)[0];
-   const dates=[...new Set(usable.flatMap(s=>s.pts.map(p=>p.t)))].filter(t=>t>=start).sort();
-   const sets=usable.map(s=>{
-    const m=Object.fromEntries(s.pts.map(p=>[p.t,p.v]));
-    const first=dates.find(t=>m[t]!=null);const base=first?m[first]:null;
-    return base?{label:s.label,data:dates.map(t=>m[t]!=null?+(100*m[t]/base).toFixed(2):null),
-     borderColor:s.color,spanGaps:true}:null;}).filter(Boolean);
-   if(sets.length&&dates.length>1)line('lvRace',dates,sets);
-   else{raceEl.style.display='none';raceEmpty.style.display='';raceEmpty.textContent='not enough overlapping daily closes yet';}
-  }else{raceEl.style.display='none';raceEmpty.style.display='';raceEmpty.textContent='no daily closes yet — curves start after the first full session';}
+  const lvr=rebase100(series);
+  if(lvr.sets.length&&lvr.dates.length>1){
+   line('lvRace',lvr.dates,lvr.sets);
+   rebaseNote('lvRaceNote',lvr,(lv.fx_ok===false&&sleeves.some(s=>s.currency!=='USD'))?
+    '⚠ USDCHF unavailable — curves shown UNCONVERTED':'');
+  }else{
+   raceEl.style.display='none';raceEmpty.style.display='';
+   raceEmpty.textContent=series.some(s=>s.pts.length)?
+    'not enough overlapping daily closes yet':
+    'no daily closes yet — curves start after the first full session';}
 
   // Daily PnL bars for the momentum sleeve(s).
   const mom=sleeves.find(s=>s.label.startsWith('momentum'));
@@ -595,20 +701,6 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  })();
 
  const daily=d.equity_curve||[],today=d.equity_today||[];let eqChart=null,raceChart=null;
- // Keep in step with FLOW_THRESHOLD in dashboard/live.py.
- const FLOW_THRESHOLD=0.25;
- function flowAdjusted(pts){
-  if(!pts||pts.length<2)return null;
-  let total=1;
-  for(let i=1;i<pts.length;i++){
-   const a=pts[i-1].v,b=pts[i].v;
-   if(!(a>0))continue;
-   const r=b/a-1;
-   if(Math.abs(r)>FLOW_THRESHOLD)continue;  // deposit/withdrawal, not a return
-   total*=1+r;
-  }
-  return total-1;
- }
  const cutFor=(range)=>{
   const now=new Date();
   const days={'1w':7,'1m':31,'3m':92,'6m':183,'1y':365}[range];
@@ -616,34 +708,45 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   if(range==='ytd')return new Date(now.getFullYear(),0,1);
   return null;};
  function drawRace(range){
-  const pmH=((d.agent_pm||{}).history||[]).map(h=>({t:String(h.t).slice(0,10),v:+h.equity,spy:h.spy?+h.spy:null}));
-  // The race only makes sense over the sim's lifetime: the paper book's
-  // history includes capital injections that wreck any longer-window
-  // normalization. Clamp the window to PM inception.
-  let cut=range==='today'?null:cutFor(range);
-  if(pmH.length){const pmStart=new Date(pmH[0].t);if(!cut||cut<pmStart)cut=pmStart;}
+  // The account curve stops at yesterday — its last point would be a 60s
+  // snapshot, not a close. The PM and SPY marks have to stop there too:
+  // with today left in on one side only, the two series ended on
+  // different days and the final gap between them was an artefact of one
+  // curve carrying an extra, intraday-priced point.
+  const todayISO=new Date().toISOString().slice(0,10);
+  const pmH=((d.agent_pm||{}).history||[])
+   .map(h=>({t:String(h.t).slice(0,10),v:+h.equity,spy:h.spy?+h.spy:null}))
+   .filter(h=>h.t<todayISO);
+  const cut=range==='today'?null:cutFor(range);
   const inWin=p=>!cut||new Date(p.t)>=cut;
-  const paper=daily.filter(inWin);
+  // USD-converted account NetLiq (see account_curve_usd): SPY and the PM
+  // sim are USD and the IBKR book is CHF, so the unconverted line drew
+  // every USDCHF move as alpha. rebase100 owns the common window now —
+  // the old clamp to PM inception was doing that by hand, for one series.
+  const acctSrc=(d.equity_curve_usd||[]).length?d.equity_curve_usd:daily;
+  const acct=acctSrc.filter(inWin);
   const pm=pmH.filter(inWin);
-  const spy=pmH.filter(h=>h.spy!=null).filter(inWin);
-  const dates=[...new Set([...paper.map(p=>p.t),...pm.map(p=>p.t),...spy.map(p=>p.t)])].sort();
-  const mk=(pts,key,label,color)=>{
-   if(pts.length<2)return null;
-   const m={};pts.forEach(p=>m[p.t]=p[key]);  // last same-day point wins
-   const base=pts[0][key];
-   return {label,data:dates.map(dt=>m[dt]!=null?100*m[dt]/base:null),borderColor:color,spanGaps:true};};
-  const sets=[mk(paper,'v','momentum top-k ('+(d.env||'paper')+')','#4cc38a'),
-              mk(pm,'v','agent PM (sim)','#b07cf6'),
-              mk(spy,'spy','SPY','#8b98a5')].filter(Boolean);
+  const spy=pmH.filter(h=>h.spy!=null).filter(inWin).map(h=>({t:h.t,v:h.spy}));
+  const ccy=d.equity_usd_ok===false?(d.equity_currency||'USD'):'USD';
+  // NOT "momentum top-k": at STRATEGY_SLEEVE_PCT=0.0 the momentum book
+  // places no orders, so this line is the whole account's NetLiq —
+  // operator positions included. Labelled as a strategy, it invited
+  // reading personal PnL as strategy performance.
+  const r=rebase100([
+   {label:'account NetLiq ('+(d.env||'paper')+' · '+ccy+')',pts:flowAdjustedCurve(acct),color:'#4cc38a'},
+   {label:'agent PM (sim)',pts:flowAdjustedCurve(pm),color:'#b07cf6'},
+   {label:'SPY',pts:spy,color:'#8b98a5'}]);
   if(raceChart){raceChart.destroy();raceChart=null;}
-  const ok=sets.length&&dates.length>1;
+  const ok=r.sets.length&&r.dates.length>1;
   document.getElementById('race').style.display=ok?'':'none';
   const em=document.getElementById('raceEmpty');
   em.style.display=ok?'none':'';
   em.textContent=pmH.length?
-   'sim started today — the race plots from its second daily mark (21:15 UTC tomorrow); both curves rebase to 100 at sim inception':
+   'not enough overlapping daily closes yet — the race starts at the latest series inception and needs two marks after it':
    'no sim book yet — /pm run in Telegram starts one';
-  if(ok)raceChart=line('race',dates,sets);
+  rebaseNote('raceNote',ok?r:null,(acct.length&&d.equity_usd_ok===false)?
+   '⚠ USDCHF unavailable — the '+ccy+' account line is UNCONVERTED, so FX moves show as performance':'');
+  if(ok)raceChart=line('race',r.dates,r.sets);
  }
  function drawEq(range){
   let pts;
@@ -727,14 +830,16 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  if(tsyms.length){
   const palette=['#3fcf8e','#58a6ff','#8b7cf6','#e8a54b','#f0556d','#2dd4bf','#f472b6',
    '#a3e635','#fb923c','#94a3b8','#facc15','#38bdf8','#c084fc','#4ade80','#f87171','#818cf8'];
-  const tdates=[...new Set(tsyms.flatMap(s=>tser[s].map(p=>p.t)))].sort();
-  const sets=tsyms.map((sym,i)=>{
-   const m=Object.fromEntries(tser[sym].map(p=>[p.t,p.v]));
-   const base=tser[sym][0].v;
-   return {label:sym,data:tdates.map(dt=>m[dt]!=null?+(100*m[dt]/base).toFixed(2):null),
-    borderColor:palette[i%palette.length],spanGaps:true,
-    borderDash:(tk.held||[]).includes(sym)?[]:[5,4]};});
-  line('tick',tdates.map(t=>t.slice(5)),sets);
+  // Same rebase as the races. Per-symbol bases had the same defect: a
+  // name whose history starts inside the window (recent listing, or a
+  // symbol the cache only has a short tail for) entered at 100 on its own
+  // first day and read as "went nowhere" while everything else moved.
+  const tr=rebase100(tsyms.map((sym,i)=>({label:sym,pts:tser[sym],color:palette[i%palette.length],
+   dash:(tk.held||[]).includes(sym)?[]:[5,4]})));
+  if(tr.dates.length>1){
+   line('tick',tr.dates.map(t=>t.slice(5)),tr.sets);
+   rebaseNote('tickNote',tr,'');
+  }
  }
 
  // Posture history: dissent line, dots colored by posture.

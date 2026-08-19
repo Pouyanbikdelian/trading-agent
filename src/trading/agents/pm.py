@@ -244,6 +244,23 @@ PM_CHARTER = (
     "code. Do not count them as portfolio exposure either; they are not "
     "your book.\n"
     "\n"
+    "OPERATOR EXCLUSIONS (mandatory): symbols listed in "
+    "operator_excluded_never_buy are names the operator has permanently "
+    "banned. NEVER allocate to them, at any weight, for any thesis. Code "
+    "cuts them to cash after you answer, so proposing one only wastes a "
+    "slot. You may still reduce or exit an existing position in one. Do "
+    "not argue with an exclusion in your rationale — it is not a view, it "
+    "is a constraint.\n"
+    "\n"
+    "ESTABLISHED LESSONS (mandatory to address): established_lessons in "
+    "today_context are conclusions the desk has already drawn from its own "
+    "outcome history — not suggestions from an agent. Each one that bears "
+    "on a name you are sizing must be answered explicitly in your "
+    "rationale: apply it, or say which specific evidence in TODAY's "
+    "context overrides it. Silently ignoring one is the failure mode this "
+    "line exists to prevent. operator_lessons_under_consideration are "
+    "candidates, not yet established: weigh them, you may disagree.\n"
+    "\n"
     "STOCK PREFERENCE (mandatory): Individual stocks are the PRIMARY vehicle. "
     "When a sector thesis is clear, own the best 1-3 individual names in "
     "that sector rather than the sector ETF — and pick those names from the "
@@ -427,7 +444,11 @@ def _budgeted_prompt(payload: dict[str, Any], budget: int = PROMPT_BUDGET) -> st
         if s is not None:
             return s
     if isinstance(ctx, dict):
-        for key in ("dossiers", "source_trust", "established_lessons", "economy"):
+        # ``established_lessons`` is deliberately NOT in this list. The
+        # charter now makes them mandatory to address, and a prompt that
+        # silently drops what it then demands an answer about is worse
+        # than one that never asked.
+        for key in ("dossiers", "source_trust", "economy"):
             ctx.pop(key, None)
             s = fitted()
             if s is not None:
@@ -866,6 +887,15 @@ def run_agent_pm(
 
     held = frozenset(load_holds(Path(state_dir)))
 
+    # Operator exclusions: names permanently banned from ever being
+    # bought. Told to the PM so it stops spending slots on them, and
+    # blocked in code so the telling is not what enforces it — a
+    # standing "never buy this" that lives only in a prompt is exactly
+    # what failed for `PM` (Philip Morris) before 2026-08-19.
+    from trading.runner.exclusions import load_exclusions
+
+    excluded = frozenset(load_exclusions(Path(state_dir)))
+
     # Standing instructions the operator left from Telegram. Passed as
     # context for the decision — the weights this produces still go
     # through _clamp_weights, so a mandate can never lift a cap.
@@ -874,6 +904,7 @@ def run_agent_pm(
     payload: dict[str, Any] = {
         "operator_mandates": _mandates_for_context(Path(state_dir)),
         "operator_held_do_not_trade": sorted(held),
+        "operator_excluded_never_buy": sorted(excluded),
         "sim_portfolio": {
             "equity": round(equity, 2),
             "cash": round(float(book["cash"]), 2),
@@ -912,7 +943,7 @@ def run_agent_pm(
         return {"ok": False, "reason": f"PM call failed: {e}"}
 
     weights, clamp_adjustments = _clamp_weights_with_audit(
-        out.get("target_weights"), stocks, blocked=held
+        out.get("target_weights"), stocks, blocked=held | excluded
     )
     # Late pricing for newly targeted names not already marked.
     need_px = [s for s in weights if s not in px]

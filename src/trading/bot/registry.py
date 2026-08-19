@@ -183,6 +183,14 @@ REGISTRY: tuple[Spec, ...] = (
     ),
     Spec("/unhold", "release a pinned position", usage="/unhold SYMBOL", example="/unhold NVDA"),
     Spec("/holds", "list pinned positions"),
+    Spec(
+        "/exclude",
+        "never buy this symbol again (selling still works)",
+        usage="/exclude SYMBOL [reason]",
+        example="/exclude PM tobacco, not for this book",
+    ),
+    Spec("/unexclude", "lift a standing ban", usage="/unexclude SYMBOL", example="/unexclude PM"),
+    Spec("/exclusions", "list the standing never-buy names"),
     Spec("/k", "override the strategy top-K", usage="/k [N|clear]", example="/k 12"),
     Spec("/pm", "PM research simulation", usage="/pm [run]", example="/pm run"),
     # --- mode

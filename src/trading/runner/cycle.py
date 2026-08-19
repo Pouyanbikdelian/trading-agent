@@ -770,6 +770,27 @@ class Cycle:
                     f"pinned position(s): `{names}`. Use `/unhold <sym>` to release."
                 )
 
+        # 8a-ter. Operator exclusions (/exclude SYM): a standing "never buy
+        # this again". Only the BUY side is dropped — banning a name must
+        # never trap the position, so sells and trims still go through.
+        # This is the code half of the constraint; the PM is also told, but
+        # a preference that lives only in a prompt is what failed for `PM`
+        # (Philip Morris) up to 2026-08-19.
+        from trading.runner.exclusions import filter_excluded_orders, load_exclusions
+
+        excluded_syms = load_exclusions(_settings_holds.state_dir)
+        if excluded_syms and orders:
+            orders, banned = filter_excluded_orders(orders, excluded_syms)
+            if banned:
+                names = ", ".join(sorted({o.instrument.symbol for o in banned}))
+                logger.bind(component="cycle").info(
+                    f"exclusions: dropped {len(banned)} buy order(s): {names}"
+                )
+                self.alerts.info(
+                    f"🚫 Exclusions respected — skipped {len(banned)} buy order(s) on "
+                    f"excluded name(s): `{names}`. `/unexclude <sym>` to allow again."
+                )
+
         # 8b. Buying-power preflight. Estimate notional required vs cash
         # available; warn (don't refuse) if we're going to run short. The
         # broker will issue the actual rejection if margin doesn't permit
@@ -917,6 +938,20 @@ class Cycle:
                             RiskDecision(
                                 action="scale",
                                 reason=f"operator hold removed revised orders for: {names}",
+                                scale_factor=1.0,
+                            )
+                        )
+                # Same for exclusions. `/pick` and `/approve only ...` both
+                # land here, and either would otherwise let a banned name
+                # back into the book through the revision door.
+                if excluded_syms and new_orders:
+                    new_orders, banned = filter_excluded_orders(new_orders, excluded_syms)
+                    if banned:
+                        names = ", ".join(sorted({o.instrument.symbol for o in banned}))
+                        new_decisions.append(
+                            RiskDecision(
+                                action="scale",
+                                reason=f"operator exclusion removed revised buys for: {names}",
                                 scale_factor=1.0,
                             )
                         )
@@ -3167,6 +3202,19 @@ class Cycle:
 
                 params, _ = apply_runtime_overrides(params, _settings_k2.state_dir)
                 ranked = cls(params=params).top_candidates(prices, top_n=top_n)
+                # Offering an excluded name on the approval scoreboard is
+                # an invitation to pick something the order path will then
+                # silently refuse. Strike them here so the ladder the
+                # operator sees is the ladder they can actually act on.
+                from trading.runner.exclusions import load_exclusions as _load_excl
+
+                banned = _load_excl(_settings_k2.state_dir)
+                if banned and ranked:
+                    ranked = [
+                        (symbol, score)
+                        for symbol, score in ranked
+                        if str(symbol).split(":")[-1].upper() not in banned
+                    ]
                 if ranked:
                     return ranked
             except Exception:

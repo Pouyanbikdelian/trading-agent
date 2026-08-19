@@ -85,6 +85,84 @@ _STRENGTH_PATTERNS: tuple[tuple[str, str], ...] = (
     (SOFT, r"\bkeep an eye\b"),
 )
 
+POSITIVE = "positive"
+NEGATIVE = "negative"
+
+# Prohibitions. Added 2026-08-19 after an audit of what became of the
+# operator's "I don't like PM (Philip Morris), don't buy it in the
+# future". It was captured — and then graded STRONG by the `\bbuy\b`
+# pattern below, because the grader read the verb and ignored the "don't"
+# in front of it. STRENGTH_GUIDANCE then told every agent to "act on it
+# unless there is a concrete reason not to", which for a prohibition is
+# precisely backwards.
+#
+# So polarity is read first and separately. Nothing here decides strength
+# on its own; it decides which ladder strength is read from.
+_NEGATION_RE = re.compile(
+    r"\b(?:do ?n[o']?t|don t|doesn'?t|never|no longer|no more|stop|cease|"
+    r"quit|refrain from|steer clear of|stay away from|get rid of|"
+    r"avoid|exclude|ban|blacklist|drop|dump|skip|omit|leave out)\b"
+    r"|\bnot\s+(?:buy|hold|own|want|interested|keen|a fan)\b"
+    r"|\b(?:dis)?like\b(?=[^.!?]*\bn[o']t\b)"
+    r"|\bi\s+(?:really\s+)?(?:do ?n[o']?t|don t)\s+(?:like|want)\b"
+    r"|\bdislike\b"
+    r"|\bhate\b"
+    r"|\bnothing\s+(?:in|from)\b",
+    re.IGNORECASE,
+)
+
+# How firmly a *prohibition* was phrased. Read strongest-first, like the
+# positive ladder. "never" and "don't" are as strong as an instruction
+# gets; "rather not" is a preference.
+_NEGATIVE_STRENGTH_PATTERNS: tuple[tuple[str, str], ...] = (
+    (STRONG, r"\bnever\b"),
+    # A negated ACTION verb is an order, and it is checked before the
+    # preference patterns below. "I don't like PM, don't buy it in the
+    # future" contains both a taste ("don't like") and an instruction
+    # ("don't buy"); grading it off the taste would under-weight the
+    # instruction the operator actually gave.
+    (
+        STRONG,
+        r"\b(?:do ?n[o']?t|don t|no longer|stop|cease|quit|refrain from)\b"
+        r"(?:\W+\w+){0,2}?\W+"
+        r"(?:buy|buying|purchase|hold|holding|own|owning|add|adding|"
+        r"allocat\w*|touch\w*|trade|trading|invest\w*)\b",
+    ),
+    (STRONG, r"\bno more\b"),
+    (STRONG, r"\bexclude\b|\bban\b|\bblacklist\b"),
+    (STRONG, r"\bget rid of\b|\bdump\b"),
+    (STRONG, r"\bhate\b"),
+    # Tastes, not orders. "I don't like PM" is a standing preference the
+    # desk should weigh; it is not the same act as "don't buy PM".
+    (MEDIUM, r"\bavoid\b|\bstay away from\b|\bsteer clear of\b"),
+    (
+        MEDIUM,
+        r"\bdislike\b|\b(?:do ?n[o']?t|don t)\s+(?:really\s+)?"
+        r"(?:like|want|rate|trust|fancy)\b",
+    ),
+    (MEDIUM, r"\brather not\b|\bprefer not\b|\bwould rather\b"),
+    # Catch-all: a bare "don't" with no recognised object is still a
+    # refusal, and refusals default to binding rather than advisory.
+    (STRONG, r"\bdo ?n[o']?t\b|\bdon t\b|\bstop\b|\bcease\b|\bquit\b"),
+    (SOFT, r"\bnot keen\b|\bnot a fan\b|\bnot sure about\b"),
+)
+
+# Bare dislikes with no instruction verb at all — "I don't like PM",
+# "no more PM", "PM is a name I never want to own". Every one of these
+# fell through the detector entirely before 2026-08-19 and was journalled
+# as ordinary chat that no agent ever reads. A statement of standing
+# distaste for a named holding is an instruction about future runs,
+# whatever grammar it arrives in.
+_NEGATIVE_PREFERENCE_RE = re.compile(
+    r"\b(?:do ?n[o']?t|don t|doesn'?t|never)\s+(?:really\s+)?"
+    r"(?:like|want|rate|trust|fancy)\b"
+    r"|\bdislike\b|\bhate\b|\bnot a fan of\b|\bnot keen on\b"
+    r"|\bno more\b|\bno longer want\b"
+    r"|\bnever want to (?:own|hold|buy)\b"
+    r"|\bget rid of\b",
+    re.IGNORECASE,
+)
+
 # A mandate is forward-looking: it is about what the NEXT run should do.
 # Without this the module would capture every opinion as an instruction.
 _FORWARD_MARKERS = (
@@ -116,7 +194,12 @@ _INSTRUCTION_RE = re.compile(
     r"put|place|deploy|invest|weight|tilt|lean|skew|bias|"
     r"target|aim for|cap|limit|reserve|set aside|keep|maintain|"
     r"trim|cut|reduce|increase|raise|lower|rotate|shift|move|"
-    r"prioriti[sz]e|emphasi[sz]e|favou?r|prefer|stick with|stay in)\b",
+    r"prioriti[sz]e|emphasi[sz]e|favou?r|prefer|stick with|stay in|"
+    # Prohibition verbs, and the -ing forms the positive list missed:
+    # "stop buying PM" matched nothing, because `\bbuy\b` does not match
+    # "buying" and "stop" was not a verb this module knew.
+    r"stop|cease|refrain|ban|blacklist|"
+    r"buying|holding|owning|adding|allocating|touching)\b",
     re.IGNORECASE,
 )
 
@@ -187,12 +270,22 @@ def _clause_is_mandate(clause: str) -> bool:
         return False
     if _FORWARD_RE.search(t):
         return True
+    # A standing dislike of a named thing is an instruction about future
+    # runs even with no verb and no forward marker. "I don't like PM" was
+    # journalled as chat and read by nobody until 2026-08-19.
+    if _NEGATIVE_PREFERENCE_RE.search(t):
+        return True
     # An instruction verb OR a percentage aimed at the book. Either alone
     # is ambiguous ("add cash", "30%"), so both still require a strength
     # phrase — that is what separates an instruction from commentary.
     if not (_INSTRUCTION_RE.search(t) or _ALLOCATION_RE.search(t)):
         return False
-    return any(re.search(p, t.lower()) for _s, p in _STRENGTH_PATTERNS)
+    # Grade off the ladder that matches the clause's polarity. Checking a
+    # prohibition against the positive strength patterns is how "exclude
+    # PM from the universe" and "stop buying PM" were both discarded:
+    # neither contains "i want", "buy" or "consider".
+    ladder = _NEGATIVE_STRENGTH_PATTERNS if grade_polarity(t) == NEGATIVE else _STRENGTH_PATTERNS
+    return any(re.search(p, t.lower()) for _s, p in ladder)
 
 
 def mandate_span(text: str) -> str | None:
@@ -216,15 +309,32 @@ class Mandate:
     expires_at: str
     symbols: list[str] = field(default_factory=list)
     status: str = "active"
+    polarity: str = POSITIVE
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def is_expired(self, now: datetime | None = None) -> bool:
+        # An empty ``expires_at`` means "never". Standing prohibitions are
+        # written that way: a ban that quietly lapses after a fortnight is
+        # how "don't buy PM" turned back into "buy PM" without anyone
+        # being told.
+        if not self.expires_at:
+            return False
         try:
             return (now or datetime.now(tz=timezone.utc)) >= datetime.fromisoformat(self.expires_at)
         except ValueError:
             return False
+
+
+def grade_polarity(text: str) -> str:
+    """Is this an instruction to DO something, or to NOT do it?
+
+    Read before strength, because the two ladders are different. Without
+    this, "don't buy PM" scored ``strong`` off the word ``buy`` and the
+    agents were told to act on it.
+    """
+    return NEGATIVE if _NEGATION_RE.search(text or "") else POSITIVE
 
 
 def grade_strength(text: str) -> str:
@@ -232,8 +342,17 @@ def grade_strength(text: str) -> str:
 
     Defaulting soft is deliberate: an unrecognised phrasing should
     under-weight rather than over-weight. The operator can always restate
-    more firmly, but cannot un-buy a position taken on a misread."""
+    more firmly, but cannot un-buy a position taken on a misread.
+
+    A prohibition is graded off its own ladder — matching the positive
+    patterns against "don't buy X" reads the verb and ignores the "don't".
+    """
     t = (text or "").lower()
+    if grade_polarity(t) == NEGATIVE:
+        for strength, pattern in _NEGATIVE_STRENGTH_PATTERNS:
+            if re.search(pattern, t):
+                return strength
+        return SOFT
     for strength, pattern in _STRENGTH_PATTERNS:
         if re.search(pattern, t):
             return strength
@@ -282,6 +401,7 @@ class MandateStore:
                         expires_at=str(r["expires_at"]),
                         symbols=list(r.get("symbols") or []),
                         status=str(r.get("status", "active")),
+                        polarity=str(r.get("polarity") or grade_polarity(str(r["text"]))),
                     )
                 )
             except Exception:
@@ -302,22 +422,50 @@ class MandateStore:
         symbols: list[str] | None = None,
         ttl_days: int = DEFAULT_TTL_DAYS,
         strength: str | None = None,
+        polarity: str | None = None,
     ) -> Mandate:
         now = datetime.now(tz=timezone.utc)
+        resolved_polarity = polarity or grade_polarity(text)
+        # A positive mandate is about a market view, and views go stale —
+        # a fortnight is a reasonable life for "I want GS next round". A
+        # PROHIBITION is not a view about this month; "never buy PM" does
+        # not become false in fourteen days. Expiring one silently is what
+        # let PM back into the book, so prohibitions are permanent until
+        # explicitly cancelled.
+        expires_at = (
+            "" if resolved_polarity == NEGATIVE else (now + timedelta(days=ttl_days)).isoformat()
+        )
         m = Mandate(
             id=f"M{int(now.timestamp() * 1000) % 10_000_000}",
             text=str(text)[:MAX_TEXT_CHARS],
             strength=strength or grade_strength(text),
             created_at=now.isoformat(),
-            expires_at=(now + timedelta(days=ttl_days)).isoformat(),
+            expires_at=expires_at,
             symbols=sorted(symbols or []),
+            polarity=resolved_polarity,
         )
-        # Drop expired rows on write — the file is small and this keeps it
-        # from growing without a sweeper job.
-        keep = [x for x in self._read_all() if not x.is_expired(now)]
-        _atomic_write(self.path, [x.to_dict() for x in [*keep, m]])
+        # Expired rows are RETAINED with status="expired" rather than
+        # deleted. The old sweep dropped them on the next write, so a
+        # mandate the operator still believed was in force left no trace
+        # anywhere he could look. `/mandates` can now show what lapsed.
+        kept: list[Mandate] = []
+        for x in self._read_all():
+            if x.status == "active" and x.is_expired(now):
+                x = Mandate(**{**x.to_dict(), "status": "expired"})
+            kept.append(x)
+        _atomic_write(self.path, [x.to_dict() for x in [*kept, m]])
         self._journal(m)
         return m
+
+    def expired(self, now: datetime | None = None) -> list[Mandate]:
+        """Lapsed mandates, newest first — so the operator can see them."""
+        rows = [
+            m
+            for m in self._read_all()
+            if m.status == "expired" or (m.status == "active" and m.is_expired(now))
+        ]
+        rows.sort(key=lambda m: m.created_at, reverse=True)
+        return rows
 
     def set_strength(self, mandate_id: str, strength: str) -> Mandate | None:
         """Re-grade a mandate whose tone was read wrongly."""
@@ -326,15 +474,7 @@ class MandateStore:
         found: Mandate | None = None
         for m in rows:
             if m.id == mandate_id and m.status == "active":
-                found = Mandate(
-                    id=m.id,
-                    text=m.text,
-                    strength=strength,
-                    created_at=m.created_at,
-                    expires_at=m.expires_at,
-                    symbols=m.symbols,
-                    status=m.status,
-                )
+                found = Mandate(**{**m.to_dict(), "strength": strength})
                 out.append(found)
             else:
                 out.append(m)
@@ -349,17 +489,7 @@ class MandateStore:
         for m in rows:
             if m.id == mandate_id and m.status == "active":
                 hit = True
-                out.append(
-                    Mandate(
-                        id=m.id,
-                        text=m.text,
-                        strength=m.strength,
-                        created_at=m.created_at,
-                        expires_at=m.expires_at,
-                        symbols=m.symbols,
-                        status="cancelled",
-                    )
-                )
+                out.append(Mandate(**{**m.to_dict(), "status": "cancelled"}))
             else:
                 out.append(m)
         if hit:
@@ -393,9 +523,13 @@ def for_context(state_dir: Path) -> list[dict[str, Any]]:
             {
                 "id": m.id,
                 "strength": m.strength,
+                # Without this the agents cannot tell "buy PM" from
+                # "don't buy PM" — the two used to arrive identically
+                # graded and identically phrased as an instruction.
+                "polarity": m.polarity,
                 "said": m.text,
                 "symbols": m.symbols,
-                "expires_at": m.expires_at,
+                "expires_at": m.expires_at or "never",
             }
             for m in MandateStore(state_dir).active()
         ]
@@ -409,7 +543,11 @@ def for_context(state_dir: Path) -> list[dict[str, Any]]:
 # model's mood on the day.
 STRENGTH_GUIDANCE = (
     "operator_mandates are standing instructions from the human operator for "
-    "THIS run, graded by how firmly he phrased them:\n"
+    "THIS run. Read `polarity` FIRST: 'positive' asks you to do something, "
+    "'negative' is a PROHIBITION — the operator does not want the named thing "
+    "bought or held. A strong prohibition is not a strong reason to act; it "
+    "is a reason to stay away, and 'I found a great setup' does not overrule "
+    "it. Then read strength, which grades how firmly it was phrased:\n"
     "- strength 'strong': treat as a strong prior. Act on it unless there is "
     "a concrete, stateable reason not to; if you decline, say so explicitly "
     "and give the reason.\n"
@@ -421,5 +559,10 @@ STRENGTH_GUIDANCE = (
     "cluster and gross caps still bind and are applied after you decide. "
     "Never allocate past a cap because the operator asked — say that the cap "
     "binds instead. If a mandate names a symbol outside the allowed universe, "
-    "say so plainly rather than substituting something similar."
+    "say so plainly rather than substituting something similar. A "
+    "prohibition the operator wants permanently enforced belongs in "
+    "operator_excluded_never_buy, which is applied by code after you "
+    "answer — if you see a negative mandate naming a symbol that is not "
+    "in that list, honour it anyway and say that it should be made an "
+    "exclusion."
 )

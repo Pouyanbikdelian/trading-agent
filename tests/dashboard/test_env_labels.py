@@ -35,8 +35,16 @@ class TestNoHardcodedPaperLabels:
         assert '— traded book (<span class="envlbl">paper</span>)' in APP
 
     def test_the_strategy_race_series_follows_the_environment(self) -> None:
+        """The race's account series names its environment AND its book.
+
+        It was called "momentum top-k": at STRATEGY_SLEEVE_PCT=0.0 the
+        momentum book cannot place an order, so the line is the whole
+        account's NetLiq including the operator's own positions. See
+        tests/dashboard/test_race_chart.py.
+        """
         assert "'momentum top-k (paper)'" not in APP
-        assert "'momentum top-k ('+(d.env||'paper')+')'" in APP
+        assert "'momentum top-k ('+(d.env||'paper')+')'" not in APP
+        assert "'account NetLiq ('+(d.env||'paper')+' · '+ccy+')'" in APP
 
     def test_every_env_label_is_filled_from_the_payload(self) -> None:
         assert "document.querySelectorAll('.envlbl')" in APP

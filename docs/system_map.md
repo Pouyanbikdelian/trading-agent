@@ -195,6 +195,38 @@ The risk manager itself **never auto-unhalts**. By design — an
 automatic recovery on a partially-understood failure is how money
 disappears.
 
+## Standing operator preferences — what binds and what merely advises
+
+Three mechanisms, and the difference between them is the whole point.
+
+| | scope | enforced by | expires |
+|---|---|---|---|
+| `/hold SYM` | freezes a name **both ways** — no buys, no sells | code | never |
+| `/exclude SYM` | blocks every **automatic buy**; selling always works | code | never |
+| a mandate ("avoid X from now on") | context for the agents | the model's judgement | positives after 14 days; **prohibitions never** |
+
+`/exclude` was added 2026-08-19 after tracing what became of the
+operator's *"I don't like PM (Philip Morris), don't buy it in the
+future"*. It had been captured as a mandate: free text in an LLM prompt,
+graded `strong` by a matcher that saw `\bbuy\b` and ignored the "don't"
+in front of it, then pruned from the store fourteen days later with no
+notice. Nothing in code ever consulted it, and the PM went on holding
+`PM` at 7%.
+
+`runner/exclusions.py` is the filter. It binds in `agents/pm.py`
+(`_clamp_weights(blocked=held | excluded)`), on the cycle's order path,
+on the custom-approval rebuild, and on the candidate scoreboard so
+`/pick` cannot reintroduce a banned name. A manual `/buy` still works —
+the operator typing an order now outranks a preference from last month —
+and the bot's reply says the symbol is excluded so the contradiction is
+visible rather than silent.
+
+Mandates keep their advisory role, with the two defects fixed: polarity
+is graded off its own ladder (so "don't buy X" is a prohibition, not a
+strong buy), and a prohibition never expires. When one names a symbol the
+bot now offers `/exclude SYM` in the same reply — the shortest path from
+"I said it" to "it binds".
+
 ## `/baseline` — the drawdown switch's acknowledgement path
 
 `equity_high_watermark` only ratchets upward; nothing lowers it. With a

@@ -95,6 +95,8 @@ HELP_TEXT = (
     "/close SYM — close one position\n"
     "/flatten — close every open position\n"
     "/hold SYM | /unhold SYM | /holds — pin/release positions the cycle must not touch\n"
+    "/exclude SYM \\[reason] — never buy it again; selling still works\n"
+    "/unexclude SYM | /exclusions — lift a ban / list the standing ones\n"
     "/k N | /k clear — override the strategy top-K at runtime\n"
     "/correlation — 12m correlation matrix of current holdings\n"
     "/memory — permanent-memory vitals: calibration, trust, lessons\n"
@@ -377,6 +379,119 @@ def _cmd_hold(args: list[str]) -> str:
             f"cycle ever opening `{sym}` until you `/unhold {sym}`."
         )
     return msg
+
+
+def _normalize_excluded_symbol(raw: str) -> str:
+    from trading.runner.exclusions import normalize_symbol
+
+    return normalize_symbol(raw)
+
+
+def _cmd_exclude(args: list[str]) -> str:
+    """``/exclude PM [reason]`` — ban a name from ever being bought again.
+
+    The counterpart to ``/hold``, and deliberately asymmetric to it. A
+    hold freezes a symbol in both directions to protect a conviction
+    position. An exclusion only blocks the buy side: you must always be
+    able to get out of a name you have banned.
+
+    Enforced in code (``runner/exclusions.py``), not by asking a model
+    nicely. The 2026-08-19 audit found the operator's "don't buy PM" had
+    been stored as a 14-day free-text mandate that expired silently and
+    that no filter ever consulted.
+    """
+    from trading.runner.exclusions import add_exclusion, load_exclusions
+
+    if not args:
+        return registry.usage_for("/exclude") + " — never buy this symbol again"
+    try:
+        sym = _normalize_excluded_symbol(args[0])
+    except ValueError:
+        return f"`{args[0]}` doesn't look like a ticker."
+    reason = " ".join(args[1:]).strip()
+
+    if sym in load_exclusions(settings.state_dir):
+        return f"`{sym}` is already excluded. `/exclusions` to list, `/unexclude {sym}` to allow."
+    try:
+        add_exclusion(settings.state_dir, sym, reason=reason)
+    except Exception as e:
+        logger.bind(component="bot").exception("could not write exclusion")
+        return f"❌ could not record the exclusion: `{type(e).__name__}: {e}`"
+
+    logger.bind(symbol=sym, reason=reason).warning("telegram exclusion added")
+    lines = [
+        f"🚫 `{sym}` excluded — nothing automatic will ever buy it again.",
+        "",
+        "Blocked: the agent PM's target weights, every cycle buy, and the "
+        "candidate scoreboard (`/pick` won't offer it).",
+        f"Still allowed: selling, `/close {sym}`, `/flatten`, and an explicit "
+        f"manual `/buy {sym} ...` — you can overrule yourself, the system can't.",
+    ]
+    if reason:
+        lines.append(f"Reason on file: _{reason}_")
+    if _holds_position(sym):
+        lines.append(
+            f"\n⚠️ you currently hold `{sym}`. This does *not* sell it — excluding "
+            f"a name never liquidates a position. `/close {sym}` if you want out now."
+        )
+    lines.append(f"_`/unexclude {sym}` to allow it again. Exclusions never expire._")
+    return "\n".join(lines)
+
+
+def _cmd_unexclude(args: list[str]) -> str:
+    """``/unexclude PM`` — lift a standing ban."""
+    from trading.runner.exclusions import remove_exclusion
+
+    if not args:
+        return registry.usage_for("/unexclude") + " — allow a previously excluded symbol"
+    try:
+        sym = _normalize_excluded_symbol(args[0])
+    except ValueError:
+        return f"`{args[0]}` doesn't look like a ticker."
+    try:
+        removed = remove_exclusion(settings.state_dir, sym)
+    except Exception as e:
+        logger.bind(component="bot").exception("could not remove exclusion")
+        return f"❌ could not update the exclusion list: `{type(e).__name__}: {e}`"
+    if not removed:
+        return f"`{sym}` was not excluded. `/exclusions` to list."
+    logger.bind(symbol=sym).warning("telegram exclusion removed")
+    return (
+        f"✅ `{sym}` is no longer excluded — the PM and the cycle may buy it again "
+        "from the next cycle onwards."
+    )
+
+
+def _cmd_exclusions() -> str:
+    """``/exclusions`` — the standing never-buy list, with reasons."""
+    from trading.runner.exclusions import load_exclusion_details
+
+    try:
+        entries = load_exclusion_details(settings.state_dir)
+    except Exception:
+        # Loud, because enforcement fails OPEN on a corrupt file: a broken
+        # list means nothing is being blocked right now, and silence would
+        # read as "no bans configured".
+        logger.bind(component="bot").exception("exclusions file unreadable")
+        return (
+            "⚠️ `exclusions.json` could not be read, so *nothing is currently being "
+            "blocked*. Re-issue `/exclude SYM` for each name you want banned."
+        )
+    if not entries:
+        return (
+            "no standing exclusions. `/exclude PM tobacco` bans a name from every "
+            "automatic buy — the PM, the cycle and the `/pick` scoreboard."
+        )
+    lines = ["🚫 *Never buy* (automatic paths only; selling always works)"]
+    for symbol in sorted(entries):
+        meta = entries[symbol] or {}
+        reason = str(meta.get("reason") or "").strip()
+        added = str(meta.get("added_at") or "")[:10]
+        detail = f" — _{reason}_" if reason else ""
+        stamp = f" · since {added}" if added else ""
+        lines.append(f"  `{symbol}`{detail}{stamp}")
+    lines += ["", "_`/unexclude SYM` to lift one. Exclusions never expire._"]
+    return "\n".join(lines)
 
 
 def _holds_position(symbol: str) -> bool:
@@ -2990,6 +3105,12 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_hold(args)
     if cmd == "/unhold":
         return _cmd_unhold(args)
+    if cmd == "/exclude":
+        return _cmd_exclude(args)
+    if cmd == "/unexclude":
+        return _cmd_unexclude(args)
+    if cmd == "/exclusions":
+        return _cmd_exclusions()
     if cmd == "/holds":
         return _cmd_holds()
     if cmd == "/k":
@@ -3172,25 +3293,64 @@ def _maybe_capture_mandate(text: str) -> str | None:
         return f"couldn't save that instruction: `{type(e).__name__}: {e}`"
 
     syms = f"\nnames: {', '.join(f'`{s}`' for s in m.symbols)}" if m.symbols else ""
-    nudge = {
-        "strong": "The desk will act on it unless there's a concrete reason not to.",
-        "medium": "The desk will weigh it seriously and tell you if it declines.",
-        "soft": "The desk will consider it and may drop it.",
-    }[m.strength]
-    return (
-        f"📌 Noted for the next run — read as {_STRENGTH_ICON[m.strength]} *{m.strength}*.\n"
-        f"_{m.text}_{syms}\n\n"
-        f"{nudge}\n"
+    negative = getattr(m, "polarity", "positive") == "negative"
+    if negative:
+        nudge = {
+            "strong": "The desk will stay away from it and say so if anything argues otherwise.",
+            "medium": "The desk will avoid it unless it can state a concrete reason.",
+            "soft": "The desk will treat it as a preference against, not a ban.",
+        }[m.strength]
+    else:
+        nudge = {
+            "strong": "The desk will act on it unless there's a concrete reason not to.",
+            "medium": "The desk will weigh it seriously and tell you if it declines.",
+            "soft": "The desk will consider it and may drop it.",
+        }[m.strength]
+    kind = "a *prohibition*" if negative else "an instruction"
+    lines = [
+        f"\U0001f4cc Noted for the next run as {kind} \u2014 read as "
+        f"{_STRENGTH_ICON[m.strength]} *{m.strength}*.",
+        f"_{m.text}_{syms}",
+        "",
+        nudge,
+    ]
+    # The gap this closes: a mandate is context for an LLM, and an LLM can
+    # weigh it against its own conviction. `/exclude` is a filter in code.
+    # "Don't buy PM" spent weeks as the former and was never honoured, so
+    # a prohibition naming a symbol now offers the latter in the same
+    # breath, while the operator is still looking at the screen.
+    if negative and m.symbols:
+        try:
+            from trading.runner.exclusions import load_exclusions
+
+            already = load_exclusions(settings.state_dir)
+        except Exception:
+            already = set()
+        pending = [sym for sym in m.symbols if sym.upper() not in already]
+        if pending:
+            extra = f"  (also: {', '.join(pending[1:])})" if len(pending) > 1 else ""
+            lines += [
+                "",
+                "\u26a0\ufe0f this is guidance the agents *can* weigh against a thesis. "
+                "To make it bind in code \u2014 never bought again by the PM, the cycle "
+                "or `/pick` \u2014 use:",
+                f"`/exclude {pending[0]}`{extra}",
+            ]
+    lines += [
         f"_Wrong reading? `/harden {m.id}` or `/soften {m.id}`. "
-        f"`/mandates` to review, `/mandates drop {m.id}` to remove._\n"
-        "_Risk caps still apply — a mandate can't lift a position or cluster limit._"
-    )
+        f"`/mandates` to review, `/mandates drop {m.id}` to remove._",
+        "_Risk caps still apply \u2014 a mandate can't lift a position or cluster limit._",
+    ]
+    return "\n".join(lines)
 
 
 def _format_mandate(m: Any) -> str:
     icon = _STRENGTH_ICON.get(m.strength, "•")
     syms = f" [{', '.join(m.symbols)}]" if m.symbols else ""
-    return f"{icon} `{m.id}` *{m.strength}*{syms}\n   _{m.text}_"
+    # Polarity is shown because "strong" alone is ambiguous between "do
+    # this hard" and "never do this", and the two used to render the same.
+    kind = " \U0001f6ab" if getattr(m, "polarity", "positive") == "negative" else ""
+    return f"{icon} `{m.id}` *{m.strength}*{kind}{syms}\n   _{m.text}_"
 
 
 def _cmd_mandates(args: list[str]) -> str:
@@ -3211,13 +3371,31 @@ def _cmd_mandates(args: list[str]) -> str:
             else f"no active mandate `{args[1]}`."
         )
     active = store.active()
-    if not active:
+    # Lapsed mandates used to be deleted on the next write, so an
+    # instruction the operator still believed was in force left no trace
+    # anywhere he could look. They are retained now, and shown here.
+    try:
+        lapsed = store.expired()[:5]
+    except Exception:
+        lapsed = []
+    if not active and not lapsed:
         return (
             "_no standing instructions._\n"
             "Just tell me one — e.g. `high conviction on GS, look at it next round`."
         )
-    lines = ["📌 *Standing instructions for the next run*"]
-    lines.extend(_format_mandate(m) for m in active)
+    lines: list[str] = []
+    if active:
+        lines.append("📌 *Standing instructions for the next run*")
+        lines.extend(_format_mandate(m) for m in active)
+    else:
+        lines.append("_no active standing instructions._")
+    if lapsed:
+        lines += ["", "⌛ *Lapsed* (no longer shown to the agents)"]
+        lines.extend(f"  `{m.id}` _{m.text}_" for m in lapsed)
+        lines.append(
+            "_Re-state one to renew it. For a permanent ban use `/exclude SYM`, "
+            "which never expires._"
+        )
     lines.append("\n_`/soften ID` · `/harden ID` · `/mandates drop ID`_")
     return "\n".join(lines)
 

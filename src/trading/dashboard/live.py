@@ -422,14 +422,21 @@ def _pm_sleeve(state_dir: Path) -> dict[str, Any] | None:
     }
 
 
-def build_live(state_dir: Path, data_dir: Path) -> dict[str, Any]:
+def build_live(
+    state_dir: Path, data_dir: Path, *, fx: dict[str, float] | None = None
+) -> dict[str, Any]:
     """Everything the Live tab renders. Sleeves are ALWAYS separate series
-    — live and paper books must never merge (GO_LIVE.md §1)."""
+    — live and paper books must never merge (GO_LIVE.md §1).
+
+    ``fx`` lets the caller share one USDCHF fetch across the payload: the
+    Portfolio tab converts the same account curve, and the two tabs must
+    price one book at one rate or the same book shows two returns.
+    """
     import os
 
     from trading.core.config import settings
 
-    fx = fetch_usdchf(data_dir)
+    fx = fetch_usdchf(data_dir) if fx is None else fx
     env = str(settings.trading_env)
     sleeves: list[dict[str, Any]] = []
     s = _momentum_sleeve(Path(state_dir), fx, f"momentum ({env})")

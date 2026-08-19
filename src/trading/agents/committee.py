@@ -18,6 +18,7 @@ function so tests run hermetically without keys or network.
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -325,6 +326,52 @@ def _frontier_llm(system: str, prompt: str) -> dict[str, Any]:
     return complete_json(system, prompt, tier="frontier")
 
 
+MANAGER_PROMPT_BUDGET = 9_000
+
+
+def _budgeted_manager_prompt(payload: dict[str, Any], budget: int = MANAGER_PROMPT_BUDGET) -> str:
+    """Serialize under ``budget`` by dropping whole items, never slicing.
+
+    This used to be ``json.dumps(payload)[:9000]``. ``established_lessons``
+    is the second-to-last key, after eight full agent takes — so on a busy
+    day the raw slice cut the lesson book off first and handed the model
+    JSON truncated mid-string. Silent, and exactly backwards: the takes
+    are today's opinions, the lessons are what the desk has already
+    learned, and the opinions are what should give way.
+
+    ``agents/pm.py`` was rewritten for the same defect; this is the same
+    trim order applied to the manager's smaller payload. The result is
+    always valid JSON.
+    """
+    p = copy.deepcopy(payload)
+
+    def fitted() -> str | None:
+        s = json.dumps(p, default=str)
+        return s if len(s) <= budget else None
+
+    s = fitted()
+    if s is not None:
+        return s
+
+    # Takes are newest-first, so popping the tail sheds the stalest view.
+    # One always survives: a manager with zero takes has nothing to rule on.
+    seq = p.get("takes")
+    while isinstance(seq, list) and len(seq) > 1:
+        seq.pop()
+        s = fitted()
+        if s is not None:
+            return s
+
+    # Then the supporting apparatus, least decision-bearing first. The
+    # lesson keys are absent from this list on purpose.
+    for key in ("calibration", "objections", "guard_flags", "disagreement_index"):
+        p.pop(key, None)
+        s = fitted()
+        if s is not None:
+            return s
+    return json.dumps(p, default=str)
+
+
 def run_committee(
     context: dict[str, Any],
     mem: MemoryStore,
@@ -398,7 +445,7 @@ def run_committee(
     disagreement = float(max(stances) - min(stances)) / 2.0 if stances else 0.0
     ruling: dict[str, Any] = {}
     try:
-        manager_prompt = json.dumps(
+        manager_prompt = _budgeted_manager_prompt(
             {
                 "takes": takes,
                 "objections": objections,
@@ -413,9 +460,8 @@ def run_committee(
                 "operator_lessons_under_consideration": context.get(
                     "operator_lessons_under_consideration", []
                 ),
-            },
-            default=str,
-        )[:9000]
+            }
+        )
         ruling = decision_llm(MANAGER_CHARTER, manager_prompt)
     except Exception as e:
         logger.bind(component="agents", agent="manager").warning(f"ruling failed: {e}")

@@ -295,6 +295,18 @@ def _condition_match(
     return (len(matched) / compared if compared else 0.0), matched, different
 
 
+def _is_operator_lesson(card: dict[str, Any]) -> bool:
+    """True for a lesson the operator stated himself.
+
+    ``/lesson`` writes ``tags="operator <strength>"``; the historian's own
+    proposals never carry that token. Matched on a word boundary so a tag
+    like "operators" or "cooperative" cannot smuggle a machine-generated
+    rule into the guaranteed slots.
+    """
+    tags = str(card.get("tags") or "").lower()
+    return "operator" in tags.replace(",", " ").split()
+
+
 def _condition_signature(conditions: dict[str, Any]) -> str:
     """Stable comparison key that also works when a fingerprint has lists."""
     return json.dumps(conditions, sort_keys=True, separators=(",", ":"), default=str)
@@ -756,12 +768,35 @@ class MemoryStore:
         if status not in _ACTIVE_LESSON_STATUSES:
             raise ValueError(f"retrieval status must be active, got {status!r}")
         cards = self._lesson_cards_for_status(status, current_conditions)
+        selected: list[dict[str, Any]] = []
+
+        # Operator-stated lessons are seated FIRST, outside the ranking.
+        #
+        # They used to be effectively unreachable. `/lesson` stores with no
+        # conditions, so `_condition_match` scores them 0.0 and the loop
+        # below skips every zero-relevance card; they then landed in the
+        # `broad` bucket, which guarantees exactly one slot, awarded by
+        # support minus contradict. A freshly stated operator lesson has zero
+        # evidence, so any legacy rule with one supporting episode outranked
+        # it and the operator's own conclusion never reached a prompt.
+        #
+        # Ranking the operator against the historian was the category
+        # error. His lessons are not regime-matched heuristics competing on
+        # evidence; they are standing beliefs the desk is meant to hold.
+        # They take slots off the top and the ranked picks fill the rest.
+        operator_cards = sorted(
+            (c for c in cards if _is_operator_lesson(c)),
+            key=lambda c: c["created_ts"],
+            reverse=True,
+        )
+        for card in operator_cards[:max_relevant]:
+            selected.append({**card, "retrieval_role": "operator_stated"})
+
         ranked = sorted(
-            cards,
+            (c for c in cards if not _is_operator_lesson(c)),
             key=lambda c: (c["relevance"], self._evidence_strength(c), c["created_ts"]),
             reverse=True,
         )
-        selected: list[dict[str, Any]] = []
         for card in ranked:
             if card["relevance"] <= 0 or len(selected) >= max_relevant:
                 continue
