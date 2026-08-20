@@ -134,6 +134,33 @@ def bought_symbols(target_weights: dict[str, float] | None) -> set[str]:
     }
 
 
+def _scaled_strategy_targets(
+    target_weights: dict[str, float], strategy_sleeve_pct: float
+) -> dict[str, float]:
+    """Scale the mechanical book's targets, or withdraw it entirely at zero.
+
+    ``top_k_momentum`` emits a row for the WHOLE universe — its picks, and
+    an explicit ``0.0`` for every other name (``pd.DataFrame(0.0,
+    columns=prices.columns)``). A zero target is not "no opinion": the risk
+    manager reads it as "hold none of this" and sells whatever is there.
+    That is correct while the strategy manages the book, because a name it
+    has dropped *should* be sold.
+
+    At ``STRATEGY_SLEEVE_PCT=0.0`` it manages nothing, and multiplying
+    those targets by zero turned "this book is benchmark-only" into "flatten
+    every position in the S&P 500". On 2026-08-20 that combined with a PM
+    refused for staleness — no fresh opinion from either book — and the
+    cycle proposed closing the desk's entire live position. The operator
+    saw it and asked why nothing was being bought; nothing was being
+    bought because nothing had decided anything.
+
+    A book that directs no capital has no view. It contributes no keys.
+    """
+    if strategy_sleeve_pct <= 0:
+        return {}
+    return {key: weight * strategy_sleeve_pct for key, weight in target_weights.items()}
+
+
 class Cycle:
     """All-in-one bound cycle. Construct once at startup; call ``run_cycle()``
     every bar."""
@@ -1944,14 +1971,13 @@ class Cycle:
             # The strategy's own share still applies even when the PM does
             # not trade. Skipping this on the refusal path would hand the
             # whole account to a strategy the operator had deliberately
-            # sized down — or, at strat 0, trade a book meant to be
-            # benchmark-only.
+            # sized down.
             return signal.model_copy(
-                update={"target_weights": {k: w * strat for k, w in signal.target_weights.items()}}
+                update={"target_weights": _scaled_strategy_targets(signal.target_weights, strat)}
             )
 
         sleeve = result.sleeve_pct
-        merged: dict[str, float] = {k: w * strat for k, w in signal.target_weights.items()}
+        merged: dict[str, float] = _scaled_strategy_targets(signal.target_weights, strat)
         # The operator's mode applies to the PM sleeve too. Step 6b
         # reshapes the MECHANICAL strategy's weights and the PM is merged
         # in here, afterwards — so before this, `/mode flatten` zeroed the

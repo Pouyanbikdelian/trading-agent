@@ -116,19 +116,28 @@ class TestTheTwoSleevesAreIndependent:
 
         out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
 
-        assert out.target_weights["equity:AAPL"] == 0.0
-        assert out.target_weights["equity:MSFT"] == 0.0
+        # ABSENT, not zero. A zero target tells the risk manager to hold
+        # none of the name, which sells whatever is there — see
+        # _scaled_strategy_targets. A book directing no capital has no view.
+        assert "equity:AAPL" not in out.target_weights
+        assert "equity:MSFT" not in out.target_weights
         assert out.target_weights["equity:NVDA"] == pytest.approx(0.10)
 
     def test_the_strategy_can_be_benchmark_only(self, cycle, monkeypatch) -> None:
-        """Signals, shadow ledger and dashboard still compute; every weight
-        is zero so nothing can reach an order."""
+        """Signals, shadow ledger and dashboard still compute; the book
+        contributes no targets, so nothing of its can reach an order.
+
+        This assertion used to read ``== 0.0`` with the comment "every
+        weight is zero so nothing can reach an order". That belief is
+        false and it shipped: a zero target is an instruction to hold none
+        of the name, and the risk manager sells to reach it.
+        """
         patch_strategy_sleeve(monkeypatch, 0.0)
         patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.2}, sleeve=0.2))
         out = cycle._merge_pm_signal(
             strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW
         )
-        assert out.target_weights["equity:AAPL"] == 0.0
+        assert "equity:AAPL" not in out.target_weights
         assert out.strategy == "agent_pm"
 
     def test_both_can_run_side_by_side(self, cycle, monkeypatch) -> None:
@@ -190,13 +199,22 @@ class TestRefusalStillRespectsTheStrategySleeve:
         self, cycle, monkeypatch
     ) -> None:
         """The dangerous path: PM declines on freshness, and a strategy the
-        operator had set to benchmark-only inherits the whole account."""
+        operator had set to benchmark-only inherits the whole account.
+
+        Production, 2026-08-20. The PM was 18.1h old against a 6h limit
+        and the strategy sleeve was 0.0 — so neither book had a view. The
+        merged target became every universe name at zero weight, and the
+        cycle proposed CLOSING the desk's entire live position. Only the
+        operator's holds and the approval gate stopped it.
+
+        "No fresh opinion" must mean no orders, never liquidate.
+        """
         patch_strategy_sleeve(monkeypatch, 0.0)
         patch_bridge(monkeypatch, make_result(None, reason="PM decision 96.0h old"))
         out = cycle._merge_pm_signal(
             strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW
         )
-        assert out.target_weights["equity:AAPL"] == 0.0
+        assert out.target_weights == {}
         assert any("96.0h" in m for m in cycle.alerts.error_msgs)
 
 
@@ -620,3 +638,59 @@ class TestThePMDollarCapExists:
         )
 
         assert out.target_weights["equity:NVDA"] == pytest.approx(0.10)
+
+
+class TestNoOpinionNeverMeansLiquidate:
+    """The 2026-08-20 near-miss, pinned from both directions.
+
+    `top_k_momentum` emits a row for the whole universe: its picks, plus an
+    explicit 0.0 for every other name. While the strategy manages the book
+    that is right — a name it dropped should be sold. At
+    STRATEGY_SLEEVE_PCT=0.0 it manages nothing, and scaling those targets
+    by zero turned "benchmark-only" into "flatten everything".
+
+    Combined with a PM refused for staleness, the cycle proposed closing
+    the desk's entire live position because a JSON file was 18 hours old.
+    """
+
+    def test_a_switched_off_strategy_contributes_no_targets_at_all(
+        self, cycle, monkeypatch
+    ) -> None:
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(monkeypatch, make_result({"equity:NVDA": 0.10}, sleeve=0.11))
+        # The whole universe, as the strategy really emits it.
+        base = strategy_signal(
+            **{"equity:AAPL": 0.5, "equity:MSFT": 0.5, "equity:AMD": 0.0, "equity:MU": 0.0}
+        )
+
+        out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
+
+        assert set(out.target_weights) == {"equity:NVDA"}
+
+    def test_both_books_silent_produces_no_targets_not_a_flatten(self, cycle, monkeypatch) -> None:
+        """The exact production shape: stale PM, benchmark-only strategy."""
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(monkeypatch, make_result(None, reason="PM decision 18.1h old, limit 6h"))
+        base = strategy_signal(**{"equity:AMD": 0.0, "equity:MU": 0.0, "equity:AAPL": 0.5})
+
+        out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
+
+        # Nothing to act on. Previously this was three explicit zeros,
+        # which the risk manager turns into three sell orders.
+        assert out.target_weights == {}
+
+    def test_a_live_strategy_sleeve_still_emits_its_exits(self, cycle, monkeypatch) -> None:
+        """The behaviour that must NOT change.
+
+        A strategy that directs capital and has dropped a name is entitled
+        to sell it; its zero is a real instruction. Only a sleeve of zero
+        withdraws the book entirely.
+        """
+        patch_strategy_sleeve(monkeypatch, 0.5)
+        patch_bridge(monkeypatch, make_result(None, reason="disabled"))
+        base = strategy_signal(**{"equity:AAPL": 0.4, "equity:AMD": 0.0})
+
+        out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
+
+        assert out.target_weights["equity:AAPL"] == pytest.approx(0.2)
+        assert out.target_weights["equity:AMD"] == 0.0
