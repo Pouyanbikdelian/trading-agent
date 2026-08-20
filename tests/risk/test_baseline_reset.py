@@ -144,7 +144,9 @@ class TestItEndsTheLockout:
         assert after.daily_baseline_session == SESSION
         assert after.daily_baseline_source == "operator_reset:telegram"
         assert after.daily_baseline_currency == "CHF"
-        assert after.daily_baseline_captured_at == IN_SESSION
+        # Stamped when the operator reset, not when the snapshot was taken:
+        # the live runner adopts a disk baseline only if it is strictly newer.
+        assert after.daily_baseline_captured_at == IN_SESSION + timedelta(seconds=30)
 
     def test_off_session_it_still_lowers_the_peak_but_claims_no_daily_baseline(
         self, tmp_path: Path
@@ -255,3 +257,108 @@ class TestItLeavesARecord:
             _reset(tmp_path, equity=0.0)
 
         assert not (tmp_path / "baseline_resets.jsonl").exists()
+
+
+class TestTheRunnerAdoptsAResetWrittenByTheBot:
+    """The reset must survive contact with a live RiskManager.
+
+    Production, 2026-08-20. The operator ran `/baseline reset`; the bot
+    wrote 84,504.72 to halt.json; sixty seconds later the runner halted
+    again on "drawdown -4.17%", which is 84,504.72 measured against the
+    ORIGINAL 88,182.64 peak. `_reload_halt_state` refreshed only the halt
+    trio, so the runner never saw the new mark — and `_save_state` then
+    wrote its stale copy back over the operator's. The reset appeared to
+    do nothing, every time, forever.
+    """
+
+    def _live_manager(self, state_dir: Path) -> RiskManager:
+        return RiskManager(
+            RiskLimits(max_daily_loss_pct=0.006, max_drawdown_pct=0.02),
+            halt_state_path=state_dir / "halt.json",
+        )
+
+    def _account(self, equity: float = 84_504.72) -> AccountSnapshot:
+        return AccountSnapshot(
+            ts=IN_SESSION, cash=1_000.0, equity=equity, base_currency="CHF", positions={}
+        )
+
+    def test_a_reset_written_while_the_runner_is_live_takes_effect(self, tmp_path: Path) -> None:
+        _drawn_down(tmp_path)
+        runner_side = self._live_manager(tmp_path)
+        # The runner has the stale peak in memory and halts on it.
+        assert (
+            runner_side.evaluate_session_risk(self._account(), session_label=SESSION).action
+            == "halt"
+        )
+
+        # The bot, a separate process, resets and the operator resumes.
+        _reset(tmp_path, equity=84_504.72)
+        set_halted(tmp_path, halted=False)
+
+        decision = runner_side.evaluate_session_risk(self._account(), session_label=SESSION)
+
+        assert decision.action == "allow"
+        assert runner_side.state.equity_high_watermark == 84_504.72
+
+    def test_the_runner_never_writes_the_stale_peak_back(self, tmp_path: Path) -> None:
+        """`_save_state` persisting the old mark is what made it permanent."""
+        _drawn_down(tmp_path)
+        runner_side = self._live_manager(tmp_path)
+        runner_side.evaluate_session_risk(self._account(), session_label=SESSION)
+
+        _reset(tmp_path, equity=84_504.72)
+        set_halted(tmp_path, halted=False)
+        # Any evaluation triggers a save via the high-water ratchet.
+        runner_side.evaluate_session_risk(self._account(equity=85_000.0), session_label=SESSION)
+
+        assert read_halt_state(tmp_path).equity_high_watermark == 85_000.0
+
+    def test_an_older_baseline_on_disk_does_not_displace_a_newer_one(self, tmp_path: Path) -> None:
+        """Adoption is strictly newer-wins, so a stale file cannot rewind us."""
+        _drawn_down(tmp_path)
+        runner_side = self._live_manager(tmp_path)
+        held = runner_side.state.equity_high_watermark
+
+        write_halt_state(
+            tmp_path,
+            HaltState(
+                equity_high_watermark=70_000.0,
+                daily_equity_open=70_000.0,
+                daily_baseline_session=SESSION,
+                daily_baseline_captured_at=IN_SESSION - timedelta(hours=3),
+                daily_baseline_source="snapshot_refresh",
+                daily_baseline_currency="CHF",
+            ),
+        )
+        runner_side._reload_halt_state()
+
+        assert runner_side.state.equity_high_watermark == held
+
+    def test_an_unprovenanced_disk_state_never_displaces_a_verified_one(
+        self, tmp_path: Path
+    ) -> None:
+        """A legacy halt.json has no capture time and cannot be ordered.
+
+        Refusing it is what keeps a hand-edited or pre-provenance file
+        from silently becoming the risk reference.
+        """
+        _drawn_down(tmp_path)
+        runner_side = self._live_manager(tmp_path)
+        held = runner_side.state.equity_high_watermark
+
+        write_halt_state(tmp_path, HaltState(equity_high_watermark=1.0, daily_equity_open=1.0))
+        runner_side._reload_halt_state()
+
+        assert runner_side.state.equity_high_watermark == held
+
+    def test_a_halt_or_resume_alone_leaves_the_baseline_untouched(self, tmp_path: Path) -> None:
+        """`/halt` and `/resume` preserve counters — that must still hold."""
+        _drawn_down(tmp_path)
+        runner_side = self._live_manager(tmp_path)
+        before = runner_side.state.equity_high_watermark
+
+        set_halted(tmp_path, halted=True, reason="telegram")
+        runner_side._reload_halt_state()
+
+        assert runner_side.is_halted() is True
+        assert runner_side.state.equity_high_watermark == before

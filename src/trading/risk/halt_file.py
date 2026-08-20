@@ -251,7 +251,14 @@ def reset_equity_baseline(
             daily_equity_open=equity,
             last_day=session_label,
             daily_baseline_session=session_label,
-            daily_baseline_captured_at=observed_at,
+            # Stamped at the moment of the RESET, not at the snapshot it
+            # was computed from. Two reasons. It is what actually happened
+            # — the operator established this baseline now. And the live
+            # runner adopts a disk baseline only when it is strictly newer
+            # than its own; an operator resetting minutes after the
+            # opening capture, off a snapshot taken before it, would
+            # otherwise write a baseline the runner then ignores.
+            daily_baseline_captured_at=moment,
             daily_baseline_source=f"operator_reset:{actor}",
             daily_baseline_currency=normalized_currency,
         )

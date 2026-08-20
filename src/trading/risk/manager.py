@@ -58,6 +58,26 @@ from trading.risk.limits import HaltState, RiskLimits
 _EPS_QTY = 1e-9
 
 
+def _baseline_is_newer(disk: HaltState, memory: HaltState) -> bool:
+    """Whether ``disk`` carries a baseline captured after ``memory``'s.
+
+    Deliberately strict. An equal timestamp is the same capture re-read,
+    and a missing timestamp on disk is a legacy or unprovenanced state
+    that must never displace a verified in-memory one.
+    """
+    fresh = disk.daily_baseline_captured_at
+    if fresh is None or disk.equity_high_watermark <= 0:
+        return False
+    held = memory.daily_baseline_captured_at
+    if held is None:
+        return True
+    if fresh.tzinfo is None or held.tzinfo is None:
+        # A naive timestamp cannot be ordered against an aware one.
+        # Refuse rather than guess; the next verified capture repairs it.
+        return False
+    return fresh > held
+
+
 class RiskManager:
     """The hard-blocking gate between strategies and the broker."""
 
@@ -200,14 +220,28 @@ class RiskManager:
 
     def _reload_halt_state(self) -> None:
         """Refresh halt-related fields from disk, preserving in-memory
-        daily P&L tracking.
+        daily P&L tracking — and adopt a NEWER baseline written elsewhere.
 
-        We do NOT swap ``self._state`` wholesale here: the runner's
-        ``start_of_day`` populates ``daily_equity_open`` and
-        ``equity_high_watermark`` in-memory and those don't always land
-        in halt.json between processes. Reloading just the halt trio
-        keeps the bot's /halt and /resume effective without losing
-        live counters.
+        We do NOT swap ``self._state`` wholesale: the runner populates
+        ``daily_equity_open`` and ``equity_high_watermark`` in-memory and
+        those don't always land in halt.json between processes. Reloading
+        just the halt trio keeps the bot's /halt and /resume effective
+        without losing live counters.
+
+        That was complete only while this manager was the sole writer of
+        the baseline fields. ``/baseline reset`` (2026-08-19) made the bot
+        a second writer, and on 2026-08-20 the consequence showed up in
+        production: the operator reset his high-water mark, this manager
+        kept the stale 88,182.64 in memory, halted on a drawdown measured
+        against it, and ``_save_state`` wrote the stale figure straight
+        back over the reset. The reset appeared to do nothing, forever.
+
+        So the baseline is adopted when the copy on disk was captured
+        LATER than ours. ``daily_baseline_captured_at`` is the arbiter:
+        both writers stamp it, an operator reset always stamps "now", and
+        a same-instant re-read is a no-op. All seven fields move together
+        because they describe one capture — taking the mark without its
+        provenance is how a baseline stops being trustworthy.
         """
         with self._state_lock:
             if self._halt_path is None:
@@ -224,6 +258,24 @@ class RiskManager:
                 reason=disk.reason,
                 halted_at=disk.halted_at,
             )
+            if _baseline_is_newer(disk, self._state):
+                logger.bind(component="risk").warning(
+                    "adopting a newer baseline from disk: high-water "
+                    f"{self._state.equity_high_watermark:,.2f} -> "
+                    f"{disk.equity_high_watermark:,.2f}, daily open "
+                    f"{self._state.daily_equity_open:,.2f} -> "
+                    f"{disk.daily_equity_open:,.2f} "
+                    f"(source {disk.daily_baseline_source!r})"
+                )
+                self._state = self._state.replace(
+                    equity_high_watermark=disk.equity_high_watermark,
+                    daily_equity_open=disk.daily_equity_open,
+                    last_day=disk.last_day,
+                    daily_baseline_session=disk.daily_baseline_session,
+                    daily_baseline_captured_at=disk.daily_baseline_captured_at,
+                    daily_baseline_source=disk.daily_baseline_source,
+                    daily_baseline_currency=disk.daily_baseline_currency,
+                )
 
     @contextmanager
     def submission_gate(self, *, allow_when_halted: bool = False) -> Iterator[bool]:
