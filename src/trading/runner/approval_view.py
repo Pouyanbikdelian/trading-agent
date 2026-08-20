@@ -179,12 +179,29 @@ def format_trade_review(
             f"⚠️ FX rate unavailable for {', '.join(fallback)}; shown at a 1:1 fallback used by risk."
         )
     if include_controls:
-        lines += [
-            "",
-            "✅ Approve as shown · ❌ Reject",
-            "Edit: `/approve only AMD DD` · `/approve all except XLV`",
-            "`/proposal` repeats this plan · `/candidates` shows alternate ranked picks.",
+        # Worked examples built from THIS basket. They were hardcoded as
+        # "/approve only AMD DD" and "/approve all except XLV" until
+        # 2026-08-19, and a plan containing neither DD nor XLV rendered
+        # instructions that the approval path then refuses outright
+        # ("symbols are not in this cycle's planned changes"). An example
+        # you cannot copy is worse than no example.
+        planned = [
+            str(row.get("symbol") or "").upper()
+            for row in rows
+            if isinstance(row, dict) and row.get("symbol")
         ]
+        seen: list[str] = []
+        for symbol in planned:
+            if symbol not in seen:
+                seen.append(symbol)
+        lines += ["", "✅ Approve as shown · ❌ Reject"]
+        if len(seen) > 1:
+            lines.append(f"Edit: `/approve only {seen[0]}` · `/approve all except {seen[-1]}`")
+        elif seen:
+            # With one name there is nothing to filter down to: "only X"
+            # is the whole plan and "except X" is an empty one.
+            lines.append("Edit: `/approve 80` scales this single change to 80%.")
+        lines.append("`/proposal` repeats this plan · `/candidates` shows alternate ranked picks.")
     return "\n".join(lines)
 
 

@@ -200,6 +200,7 @@ class TestTheDefensiveCycleItself:
         def _approval(orders, account, last_prices, **kw):
             seen["approval_orders"] = list(orders)
             seen["defensive_flag"] = kw.get("defensive")
+            seen["gate_label"] = kw.get("defensive_gate")
             seen["offered_picks"] = kw.get("candidates")
             return list(orders) if approved is None else approved
 
@@ -208,6 +209,7 @@ class TestTheDefensiveCycleItself:
             seen["allow_when_halted"] = allow_when_halted
             return len(orders), [], False, False
 
+        cycle.risk_manager = SimpleNamespace(is_halted=lambda: True)  # type: ignore[assignment]
         cycle._request_cycle_approval = _approval  # type: ignore[method-assign]
         cycle._submit_and_reconcile = _submit  # type: ignore[method-assign]
         cycle._fetch_account = lambda _ts: _account(*live)  # type: ignore[method-assign]
@@ -273,3 +275,62 @@ class TestTheDefensiveCycleItself:
         self._run(cycle, [_order("AMD", Side.SELL, 80)], _account(_position("AMD", 160)))
 
         assert seen["offered_picks"] is None
+
+
+class TestItReportsTheRealReasonForRefusing:
+    """ "Halted" is a specific claim, not a synonym for "cannot trade".
+
+    On 2026-08-19 the operator had already `/resume`d. The gate refused
+    because no verified NYSE-open baseline existed yet — and the card
+    told him execution was halted. Reporting the wrong reason for a
+    refusal is the exact defect the rest of this work removed.
+    """
+
+    def _rig(self, cycle: Cycle, *, halted: bool):
+        seen: dict[str, object] = {}
+        cycle.risk_manager = SimpleNamespace(is_halted=lambda: halted)  # type: ignore[assignment]
+
+        def _approval(orders, account, last_prices, **kw):
+            seen["gate_label"] = kw.get("defensive_gate")
+            return []
+
+        cycle._request_cycle_approval = _approval  # type: ignore[method-assign]
+        cycle._elapsed_ms = lambda _ts: 1000.0  # type: ignore[method-assign]
+        cycle._clock = lambda: NOW  # type: ignore[method-assign]
+        return seen
+
+    def _run(self, cycle: Cycle, reason: str):
+        from trading.core.types import RiskDecision, Signal
+
+        return cycle._run_defensive_cycle(
+            ts_start=NOW,
+            intraday=RiskDecision(action="reject", reason=reason),
+            decisions=[],
+            orders=[_order("AMD", Side.SELL, 6)],
+            dropped=[],
+            clamped=[],
+            account=_account(_position("AMD", 8)),
+            prices=None,
+            last_prices={},
+            fx_rates={},
+            signal=Signal(ts=NOW, strategy="agent_pm", target_weights={}),
+            held_symbols=set(),
+        )
+
+    def test_a_gated_but_unhalted_account_is_not_called_halted(self, cycle: Cycle) -> None:
+        seen = self._rig(cycle, halted=False)
+
+        self._run(cycle, "daily-loss baseline unavailable for the current NYSE session")
+
+        assert seen["gate_label"] == "execution is gated"
+        assert "execution is halted" not in cycle.alerts.text
+        # The actual reason still reaches the operator verbatim.
+        assert "baseline unavailable" in cycle.alerts.text
+
+    def test_a_genuinely_halted_account_still_says_halted(self, cycle: Cycle) -> None:
+        seen = self._rig(cycle, halted=True)
+
+        self._run(cycle, "daily loss -1.09% breaches limit -0.60%")
+
+        assert seen["gate_label"] == "execution is halted"
+        assert "execution is halted" in cycle.alerts.text

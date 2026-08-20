@@ -1552,10 +1552,17 @@ class Cycle:
         if held_symbols:
             detail.append("Holds preserved: `" + ", ".join(sorted(held_symbols)) + "`.")
 
+        # Do NOT say "halted" here unless the account actually is. On
+        # 2026-08-19 the operator had already /resume'd; the gate refused
+        # for a missing NYSE-open baseline, and the card told him he was
+        # halted anyway. Reporting the wrong reason for a refusal is the
+        # same defect this whole day was spent removing.
+        halted_now = self.risk_manager.is_halted()
+        gate_label = "execution is halted" if halted_now else "execution is gated"
         self.alerts.warning(
             "\n".join(
                 [
-                    "🛡 *DEFENSIVE CYCLE — REDUCE-ONLY* (execution is halted)",
+                    f"🛡 *DEFENSIVE CYCLE — REDUCE-ONLY* ({gate_label})",
                     f"Reason: `{intraday.reason}`",
                     f"Live account: {base_currency} {equity:,.0f} equity · "
                     f"{len(getattr(account, 'positions', {}) or {})} position(s).",
@@ -1574,6 +1581,7 @@ class Cycle:
             last_prices,
             fx_rates=fx_rates,
             defensive=True,
+            defensive_gate=gate_label,
         )
         if not approved:
             return CycleReport(
@@ -2692,6 +2700,7 @@ class Cycle:
             Callable[[str, list[str]], tuple[list[Any], list[RiskDecision]]] | None
         ) = None,
         defensive: bool = False,
+        defensive_gate: str = "execution is gated",
     ) -> list[Any]:
         """Block the cycle until the operator decides via Telegram.
 
@@ -2911,9 +2920,9 @@ class Cycle:
         prompt = format_trade_review(pending_payload, include_controls=True)
         if defensive:
             prompt += (
-                "\n🛡 *Reduce-only.* Execution is halted, so this basket can only lower "
-                "exposure — every order was checked against the live book and re-checked "
-                "immediately before submission.\n"
+                f"\n🛡 *Reduce-only.* Right now {defensive_gate}, so this basket can only "
+                "lower exposure — every order was checked against the live book and "
+                "re-checked immediately before submission.\n"
                 f"`/approve` sends it · `/approve 80` sends 80% of each size · `/reject` drops it."
                 f"\n⏱ Auto-rejects after {int(timeout_s / 60)} min."
             )
