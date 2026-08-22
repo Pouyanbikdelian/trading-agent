@@ -313,6 +313,60 @@ class RiskManager:
                 )
                 yield not self._state.halted or allow_when_halted
 
+    def _reconcile_baseline_scope(self, account: AccountSnapshot) -> str | None:
+        """Keep the kill-switch baselines and the equity they judge in the
+        same units.
+
+        ``daily_equity_open`` and ``equity_high_watermark`` are absolute
+        amounts of money. They only mean anything against an equity
+        figure describing the same book. When the operator pins a
+        position with ``/hold``, the desk's equity drops by that
+        position's value — while a high-water mark stamped before the pin
+        still describes the whole account.
+
+        Left alone, the very first evaluation after such a change reads
+        as a catastrophic drawdown on an account that has not moved, and
+        halts the desk. So a change of scope re-stamps both baselines to
+        the current figure and says so. Provenance is carried across
+        rather than cleared: the account and the currency are the same,
+        only the slice being measured is different, and clearing it would
+        cost a trading day for a change the operator made deliberately.
+
+        Returns a note for the operator, or None when nothing moved.
+        """
+        scope = str(getattr(account, "scope", "account") or "account")
+        with self._state_lock:
+            stored = self._state.baseline_scope
+            # A state written before this field existed is account-scoped by
+            # construction: the managed view is what introduced the field.
+            # Treating None as "different" would re-stamp every legacy
+            # baseline on first read and announce a migration that isn't one.
+            if (stored or "account") == scope:
+                if stored is None:
+                    self._state = self._state.replace(baseline_scope=scope)
+                    self._save_state()
+                return None
+
+            previous_hwm = self._state.equity_high_watermark
+            source = self._state.daily_baseline_source
+            note = (
+                f"baselines re-stamped for a change of scope "
+                f"({stored or 'account'} -> {scope}): high-water mark "
+                f"{previous_hwm:,.0f} described a different book than equity "
+                f"{account.equity:,.0f} does. Both baselines set to "
+                f"{account.equity:,.0f}. This is not a loss."
+            )
+            self._state = self._state.replace(
+                baseline_scope=scope,
+                daily_equity_open=account.equity,
+                equity_high_watermark=account.equity,
+                daily_baseline_source=(f"scope_migration:{scope}" if source else source),
+            )
+            self._save_state()
+            logger.bind(component="risk").warning(note)
+            self._last_baseline_note = note
+            return note
+
     def baseline_divergence(self, equity: float) -> float | None:
         """|equity − stored daily open| as a fraction of the stored open.
 
@@ -334,6 +388,7 @@ class RiskManager:
         trustworthy market-open baseline after a restart.
         """
         with self._state_lock:
+            self._reconcile_baseline_scope(account)
             today = account.ts.date()
             divergence = self.baseline_divergence(account.equity)
             implausible = (
@@ -376,6 +431,7 @@ class RiskManager:
                 last_day=today,
                 daily_equity_open=account.equity,
                 equity_high_watermark=new_hwm,
+                baseline_scope=str(getattr(account, "scope", "account") or "account"),
                 # This is explicitly *not* trusted by the live session
                 # monitor.  It preserves legacy tests/research semantics
                 # without making a noon restart look like an opening print.
@@ -468,6 +524,7 @@ class RiskManager:
                 last_day=session_date,
                 daily_equity_open=account.equity,
                 equity_high_watermark=new_hwm,
+                baseline_scope=str(getattr(account, "scope", "account") or "account"),
                 daily_baseline_session=session_date,
                 daily_baseline_captured_at=captured_at,
                 daily_baseline_source=source,
@@ -532,6 +589,9 @@ class RiskManager:
 
         with self._state_lock:
             self._reload_halt_state()
+            # Before any comparison: are the stored baselines even talking
+            # about the same book as this snapshot?
+            self._reconcile_baseline_scope(account)
             if self._state.halted:
                 return RiskDecision(action="halt", reason=f"already halted: {self._state.reason}")
 

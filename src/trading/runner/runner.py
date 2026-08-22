@@ -1407,7 +1407,29 @@ class Runner:
             if per_ccy:
                 snap = snap.model_copy(update={"cash_by_currency": per_ccy})
 
-        self._monitor_live_account_risk(snap, liveness=liveness)
+        # The kill switches judge the book the desk actually runs, so the
+        # monitor sees the managed view — pinned positions removed, their
+        # value out of equity. The SNAPSHOT WE STORE stays the whole
+        # account: /positions and the dashboard are reporting reality, and
+        # a report that hid the operator's own holdings would be a lie.
+        #
+        # These two must agree on scope. If the monitor judged the whole
+        # account while the cycle sized the managed slice, the baselines
+        # would be re-stamped every sixty seconds as the scope flipped
+        # back and forth, and neither kill switch would mean anything.
+        monitor_fx: dict[str, float] = {}
+        try:
+            monitor_fx = self.broker.get_fx_rates()
+        except Exception as e:
+            logger.bind(component="runner").debug(
+                f"get_fx_rates failed during refresh: {type(e).__name__}: {e!r}"
+            )
+        if monitor_fx:
+            snap = snap.model_copy(update={"fx_rates": monitor_fx})
+        self._monitor_live_account_risk(
+            self.cycle._as_managed_account(snap, fx_rates=monitor_fx, announce=False),
+            liveness=liveness,
+        )
         self.cycle.runner_store.save_snapshot(snap)
 
         # Touch heartbeat. A successful snapshot refresh proves the trader

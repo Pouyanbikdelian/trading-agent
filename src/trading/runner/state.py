@@ -129,6 +129,10 @@ class RunnerStore:
             conn.execute(
                 "ALTER TABLE account_snapshots ADD COLUMN cash_by_currency_json TEXT NOT NULL DEFAULT '{}'"
             )
+        if "fx_rates_json" not in cols:
+            conn.execute(
+                "ALTER TABLE account_snapshots ADD COLUMN fx_rates_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def close(self) -> None:
         if self._conn is not None:
@@ -143,8 +147,9 @@ class RunnerStore:
         self.conn.execute(
             """
             INSERT INTO account_snapshots
-                (ts, cash, equity, positions_json, base_currency, cash_by_currency_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (ts, cash, equity, positions_json, base_currency, cash_by_currency_json,
+                 fx_rates_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snap.ts.timestamp(),
@@ -153,6 +158,7 @@ class RunnerStore:
                 _positions_to_json(snap.positions),
                 snap.base_currency,
                 json.dumps(snap.cash_by_currency or {}),
+                json.dumps(snap.fx_rates or {}),
             ),
         )
 
@@ -172,6 +178,7 @@ class RunnerStore:
             cash_by_currency=(
                 json.loads(row["cash_by_currency_json"]) if "cash_by_currency_json" in keys else {}
             ),
+            fx_rates=(json.loads(row["fx_rates_json"]) if "fx_rates_json" in keys else {}),
         )
 
     def day_equity_bounds(self, since: datetime) -> tuple[float, float] | None:

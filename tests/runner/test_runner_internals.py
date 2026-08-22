@@ -435,6 +435,13 @@ def test_memory_grader_journals_exact_next_session_prediction_ids(
     class _Cycle:
         runner_store = _RunnerStore()
 
+        # The runner routes the risk monitor through the cycle's managed
+        # view (pinned positions removed). With no holds configured that
+        # is the identity, which is what this stub stands in for.
+        @staticmethod
+        def _as_managed_account(account, **_kw):
+            return account
+
     memory = _Memory()
     runner = Runner.__new__(Runner)
     runner.cycle = _Cycle()
@@ -499,6 +506,13 @@ def test_snapshot_refresh_records_authenticated_broker_liveness(
 
     class _Cycle:
         runner_store = _RunnerStore()
+
+        # The runner routes the risk monitor through the cycle's managed
+        # view (pinned positions removed). With no holds configured that
+        # is the identity, which is what this stub stands in for.
+        @staticmethod
+        def _as_managed_account(account, **_kw):
+            return account
 
     test_settings = settings.model_copy(
         update={"state_dir": tmp_path, "data_dir": tmp_path / "data"}

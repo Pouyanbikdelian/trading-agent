@@ -227,6 +227,25 @@ class AccountSnapshot(BaseModel):
     # Simulator-backed snapshots leave this empty. The Telegram bot reads
     # this to show per-currency breakdowns without a second broker call.
     cash_by_currency: dict[str, float] = Field(default_factory=dict)
+    # Which book this snapshot describes. "account" is everything the
+    # broker holds. "managed" is that minus the operator's pinned
+    # positions, with their value already taken out of `equity` — the
+    # view the risk manager sizes and halts against, so that a personal
+    # holding the desk may not trade also cannot trip its kill switches.
+    # Both are honest snapshots; confusing them is how a 33% "drawdown"
+    # gets reported on an account that did not move, which is why the
+    # kill-switch baselines record the scope they were stamped in.
+    scope: Literal["account", "managed"] = "account"
+    # Base-currency units per 1 unit of each foreign currency, as the
+    # broker reported them when this snapshot was taken. Persisted with
+    # the snapshot because everything that reads one back later — the
+    # Telegram views, the daily report — needs to value a USD position in
+    # CHF and has no broker connection of its own to ask.
+    fx_rates: dict[str, float] = Field(default_factory=dict)
+    # Base-currency value removed to build a managed view, and the
+    # symbols it came from. Empty on an "account" snapshot.
+    excluded_value: float = 0.0
+    excluded_symbols: tuple[str, ...] = ()
 
     @field_validator("ts")
     @classmethod

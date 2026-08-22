@@ -586,6 +586,20 @@ class Cycle:
         # 3. Get the latest broker account view.
         logger.bind(component="cycle").info("fetching broker account snapshot")
         account = self._fetch_account(ts_start)
+        # FX first, because a pinned USD position has to be valued in the
+        # account's own currency before it can be taken out of equity —
+        # and because the PM's dollar cap needs it further down. It used
+        # to be fetched just before the merge; nothing else moved.
+        fx_rates: dict[str, float] = {}
+        try:
+            fx_rates = self.broker.get_fx_rates()
+        except Exception as e:
+            logger.bind(component="cycle").warning(f"get_fx_rates failed ({e!r}); sizing at 1.0")
+
+        # 3b. Pinned positions leave the building. Everything downstream —
+        # the kill switches at step 4, the PM's sizing base, the risk
+        # manager — now works on the book the desk actually runs.
+        account = self._as_managed_account(account, fx_rates=fx_rates)
         logger.bind(component="cycle").info(
             f"account: cash=${getattr(account, 'cash', 0):,.0f} "
             f"equity=${getattr(account, 'equity', 0):,.0f} "
@@ -703,12 +717,6 @@ class Cycle:
         # Fetched BEFORE the PM merge because the PM's hard dollar cap
         # (PM_SLEEVE_CAPITAL_USD) is denominated in USD and the account is
         # not.
-        fx_rates: dict[str, float] = {}
-        try:
-            fx_rates = self.broker.get_fx_rates()
-        except Exception as e:
-            logger.bind(component="cycle").warning(f"get_fx_rates failed ({e!r}); sizing at 1.0")
-
         signal = self._merge_pm_signal(
             signal,
             instruments_by_key=instruments_by_key,
@@ -2507,6 +2515,55 @@ class Cycle:
             except Exception:
                 bars[sym] = Bar(ts=ts, open=close, high=close, low=close, close=close, volume=0.0)
         return bars
+
+    def _as_managed_account(
+        self,
+        account: AccountSnapshot,
+        *,
+        fx_rates: dict[str, float] | None = None,
+        last_prices: dict[str, float] | None = None,
+        announce: bool = True,
+    ) -> AccountSnapshot:
+        """Strip the operator's pinned positions out of the account.
+
+        ``/hold SYM`` means invisible, not merely untradeable: the value
+        comes out of equity so the desk is sized against — and halted on
+        — the book it actually runs. Cash is untouched; all of it is the
+        desk's to deploy.
+
+        Never raises. A failure here would silently return the whole
+        account, which sizes too large, so the fallback is announced.
+        """
+        from trading.core.config import settings as _held_settings
+        from trading.runner.holds import load_holds
+        from trading.runner.managed_account import managed_view
+
+        try:
+            held = load_holds(_held_settings.state_dir)
+        except Exception:
+            logger.bind(component="cycle").exception(
+                "could not read holds; sizing against the WHOLE account"
+            )
+            if announce:
+                self.alerts.error(
+                    "⚠️ could not read `/holds` — this cycle is sized against the "
+                    "whole account, pinned positions included."
+                )
+            return account
+        if not held:
+            return account
+
+        view = managed_view(account, held, fx_rates=fx_rates, last_prices=last_prices)
+        if not view.changed:
+            return account
+
+        logger.bind(component="cycle").info(
+            f"managed view: {sorted(view.excluded)} excluded, "
+            f"equity {account.equity:,.0f} -> {view.account.equity:,.0f}"
+        )
+        if announce:
+            self.alerts.info(view.note(account.base_currency))
+        return view.account
 
     def _fetch_account(self, ts: datetime) -> AccountSnapshot:
         """Get the broker's account view.

@@ -1180,9 +1180,39 @@ def _cmd_baseline(args: list[str]) -> str:
     equity = float(getattr(snap, "equity", 0.0) or 0.0) if snap is not None else 0.0
     ccy = str(getattr(snap, "base_currency", "") or "").upper() if snap is not None else ""
 
+    # Since 2026-08-22 the baselines may describe the DESK's book rather
+    # than the whole account: `/hold` takes a position out of the equity
+    # the kill switches measure. The stored snapshot is still the whole
+    # account, so comparing the two directly would report a spectacular
+    # gain on an account that did not move. Rebuild the same view the
+    # risk manager sees before quoting any percentage.
+    desk_equity = equity
+    pinned: list[str] = []
+    if str(getattr(state, "baseline_scope", "") or "") == "managed" and snap is not None:
+        try:
+            from trading.runner.holds import load_holds
+            from trading.runner.managed_account import managed_view
+
+            view = managed_view(
+                snap,
+                load_holds(settings.state_dir),
+                fx_rates=getattr(snap, "fx_rates", None) or {},
+            )
+            if view.changed:
+                desk_equity = float(view.account.equity)
+                pinned = sorted(view.excluded)
+        except Exception:
+            desk_equity = equity
+
     def _describe() -> list[str]:
+        scope = str(getattr(state, "baseline_scope", "") or "account")
         lines = [
             "📐 *Kill-switch baselines*",
+            (
+                "measuring: _the desk's book — pinned positions excluded_"
+                if scope == "managed"
+                else "measuring: _the whole account_"
+            ),
             f"high-water mark: `{state.equity_high_watermark:,.2f}`",
             f"daily open: `{state.daily_equity_open:,.2f}`",
         ]
@@ -1194,12 +1224,20 @@ def _cmd_baseline(args: list[str]) -> str:
         else:
             lines.append("daily open captured: _no verified NYSE-open capture yet_")
         if equity > 0:
-            lines.append(f"live equity: `{equity:,.2f} {ccy}`")
+            if pinned:
+                lines.append(f"account equity: `{equity:,.2f} {ccy}`")
+                lines.append(
+                    f"desk equity: `{desk_equity:,.2f} {ccy}` _(excl. {', '.join(pinned)})_"
+                )
+            else:
+                lines.append(f"live equity: `{equity:,.2f} {ccy}`")
+            # Every percentage below is against desk_equity, which equals
+            # `equity` whenever nothing is pinned.
             if state.equity_high_watermark > 0:
-                dd = (equity - state.equity_high_watermark) / state.equity_high_watermark
+                dd = (desk_equity - state.equity_high_watermark) / state.equity_high_watermark
                 lines.append(f"drawdown vs peak: `{dd:+.2%}`")
             if state.daily_equity_open > 0:
-                day = (equity - state.daily_equity_open) / state.daily_equity_open
+                day = (desk_equity - state.daily_equity_open) / state.daily_equity_open
                 lines.append(f"day P&L vs stored open: `{day:+.2%}`")
         else:
             lines.append("live equity: _no recent snapshot_")

@@ -126,6 +126,13 @@ class HaltState(BaseModel):
     daily_baseline_captured_at: datetime | None = None
     daily_baseline_source: str | None = None
     daily_baseline_currency: str | None = None
+    # Which book the two baselines above describe: the whole brokerage
+    # account, or the desk's managed slice with the operator's pinned
+    # positions taken out. Comparing a managed equity to an account-scoped
+    # high-water mark reads as an enormous drawdown on an account that did
+    # not move, so the scope travels with the numbers and a change in it
+    # forces a re-stamp rather than a halt. None = pre-2026-08-22 state.
+    baseline_scope: str | None = None
 
     def replace(self, **fields: Any) -> HaltState:
         return self.model_copy(update=fields)
