@@ -61,6 +61,15 @@ class RiskLimits(BaseModel):
     accounts buying USD stocks need either a pre-trade FX or this limit
     > 0 — otherwise IBKR's auto-loan kicks in and we're on margin."""
 
+    fit_orders_to_cash: bool = Field(default=True)
+    """Whether a basket that overdraws a currency is trimmed to fit or
+    refused outright.
+
+    The refusal is the older behaviour and threw away the whole basket —
+    the sells too — over a shortfall in one currency. Trimming shrinks
+    only that currency's buys, proportionally, so the manager's relative
+    weights survive at a smaller size. See ``risk/cash_fit.py``."""
+
     baseline_sanity_divergence_pct: float = Field(default=0.5, gt=0.0, le=10.0)
     """How far today's equity may sit from the stored daily-open baseline
     before the baseline itself is judged to be the broken thing.
@@ -86,6 +95,7 @@ class RiskLimits(BaseModel):
             max_daily_loss_pct=settings.max_daily_loss_pct,
             max_drawdown_pct=settings.max_drawdown_pct,
             max_margin_borrowing_pct=settings.max_margin_borrowing_pct,
+            fit_orders_to_cash=getattr(settings, "fit_orders_to_cash", True),
             baseline_sanity_divergence_pct=settings.baseline_sanity_divergence_pct,
         )
 

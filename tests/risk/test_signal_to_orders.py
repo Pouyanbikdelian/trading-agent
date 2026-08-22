@@ -251,6 +251,14 @@ def test_halted_manager_produces_no_orders(mgr, aapl, account_100k, t0) -> None:
 
 
 def test_no_margin_rejects_basket_that_would_overdraw_cash(mgr, aapl, msft, t0) -> None:
+    """Strict mode (FIT_ORDERS_TO_CASH=false): all or nothing.
+
+    This was the only behaviour until 2026-08-22. It is still available,
+    and still tested, because an operator who would rather size the FX
+    themselves should be able to say so — but it is no longer the
+    default. See ``test_an_overdrawing_basket_is_trimmed_by_default``
+    directly below for what happens now.
+    """
     # Start with $50k cash, all in USD. Raise per-position cap so the
     # basket can actually push USD negative; w/o raising it, the per-
     # position scaler trims each name to 10% of equity and the basket
@@ -260,6 +268,7 @@ def test_no_margin_rejects_basket_that_would_overdraw_cash(mgr, aapl, msft, t0) 
             "max_position_pct": 0.50,
             "max_gross_exposure": 1.00,
             "max_margin_borrowing_pct": 0.0,
+            "fit_orders_to_cash": False,
         }
     )
     snap = AccountSnapshot(
@@ -281,6 +290,44 @@ def test_no_margin_rejects_basket_that_would_overdraw_cash(mgr, aapl, msft, t0) 
     assert reject, "expected a reject decision"
     assert "no-margin" in reject[0].reason.lower()
     assert "USD" in reject[0].reason
+
+
+def test_an_overdrawing_basket_is_trimmed_by_default(mgr, aapl, msft, t0) -> None:
+    """Same inputs, default settings: $80k of intent against $50k of USD
+    becomes $50k of orders rather than none.
+
+    The relative sizes have to survive — the two names were equal in the
+    signal and must stay equal after the trim, or the fit has quietly
+    rewritten the manager's opinion instead of scaling it.
+    """
+    mgr.limits = mgr.limits.model_copy(
+        update={
+            "max_position_pct": 0.50,
+            "max_gross_exposure": 1.00,
+            "max_margin_borrowing_pct": 0.0,
+        }
+    )
+    snap = AccountSnapshot(
+        ts=t0,
+        cash=50_000.0,
+        equity=100_000.0,
+        base_currency="USD",
+        cash_by_currency={"USD": 50_000.0, "CHF": 50_000.0},
+    )
+    sig = signal_from(t0, {"equity:AAPL": 0.40, "equity:MSFT": 0.40})
+    prices = {"equity:AAPL": 100.0, "equity:MSFT": 100.0}
+
+    orders, decisions = mgr.signal_to_orders(
+        sig, account=snap, last_prices=prices, instruments=instruments_dict(aapl, msft)
+    )
+
+    assert len(orders) == 2
+    spent = sum(o.quantity * prices[o.instrument.key] for o in orders)
+    assert spent <= 50_000.0
+    assert spent > 45_000.0, "should use most of the cash, not a token amount"
+    assert orders[0].quantity == orders[1].quantity
+    assert not [d for d in decisions if d.action == "reject"]
+    assert [d for d in decisions if d.action == "scale" and "cash fit" in d.reason]
 
 
 def test_no_margin_allows_basket_when_cash_sufficient(mgr, aapl, msft, t0) -> None:

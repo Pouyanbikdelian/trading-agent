@@ -972,6 +972,18 @@ class RiskManager:
         # rather than partially fill — operator should FX-convert or
         # reduce sizing and try again.
         if orders and self.limits.max_margin_borrowing_pct < 1.0:
+            # Preferred answer to an overdraft: make the basket smaller.
+            # Refusing it outright throws away the sells too, and a book
+            # that is 20% too big for the wallet is not a bad book.
+            if self.limits.fit_orders_to_cash:
+                fitted, fit_decisions = self._fit_to_cash(orders, account, last_prices)
+                if fitted:
+                    orders = fitted
+                    decisions.extend(fit_decisions)
+                # If the trim leaves nothing at all, keep the original
+                # basket and let the check below speak. A silent empty
+                # cycle is the one outcome worse than a refusal: the
+                # operator needs the sentence that names the currency.
             margin_check = self._check_no_margin(orders, account, last_prices)
             if margin_check is not None:
                 decisions.append(margin_check)
@@ -984,6 +996,40 @@ class RiskManager:
             )
         )
         return orders, decisions
+
+    def _fit_to_cash(
+        self,
+        orders: list[Order],
+        account: AccountSnapshot,
+        last_prices: dict[str, float],
+    ) -> tuple[list[Order], list[RiskDecision]]:
+        """Shrink BUY orders per currency until the account can pay.
+
+        Returns the (possibly smaller) basket and one ``scale`` decision
+        per currency that had to give. The no-margin check still runs
+        afterwards and still has the last word — this only ever removes
+        exposure, so it cannot talk a breach into passing.
+        """
+        from trading.risk.cash_fit import fit_orders_to_cash
+
+        starting = (
+            dict(account.cash_by_currency)
+            if account.cash_by_currency
+            else {account.base_currency: account.cash}
+        )
+        fit = fit_orders_to_cash(
+            orders,
+            cash_by_currency=starting,
+            base_currency=account.base_currency,
+            last_prices=last_prices,
+            allowed_debit=self.limits.max_margin_borrowing_pct * max(account.equity, 0.0),
+        )
+        if not fit.changed:
+            return orders, []
+        return fit.orders, [
+            RiskDecision(action="scale", reason=reason, scale_factor=fit.scaled[ccy])
+            for ccy, reason in zip(sorted(fit.scaled), fit.reasons(), strict=True)
+        ]
 
     def _check_no_margin(
         self,
@@ -1027,8 +1073,14 @@ class RiskManager:
         allowed_debit = self.limits.max_margin_borrowing_pct * max(account.equity, 0.0)
         breaches: list[str] = []
         for ccy, delta in per_ccy_delta.items():
-            after = starting.get(ccy, 0.0) + delta
-            if after < -allowed_debit:
+            before = starting.get(ccy, 0.0)
+            after = before + delta
+            # Compare against the worse of the limit and where we already
+            # are. An account that is somehow already overdrawn must still
+            # be able to submit the sells that dig it out; refusing every
+            # basket until the debit clears itself is a trap with no exit.
+            floor = min(-allowed_debit, before)
+            if after < floor:
                 breaches.append(f"{ccy} {after:,.0f} (limit {-allowed_debit:,.0f})")
 
         if not breaches:

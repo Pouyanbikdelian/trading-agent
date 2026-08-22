@@ -81,6 +81,15 @@ class Settings(BaseSettings):
     # Set to 0.0 explicitly for live trading from a CHF base account
     # buying USD-denominated stocks without an FX pre-trade.
     max_margin_borrowing_pct: float = Field(default=0.0, alias="MAX_MARGIN_BORROWING_PCT")
+    # What to do when a basket costs more of some currency than the
+    # account holds. False is the original all-or-nothing answer: reject
+    # every order, including the sells, and tell the operator to go and
+    # FX-convert by hand. True shrinks that currency's BUY orders
+    # proportionally until they fit and lets the rest through — the same
+    # thing a human would do with a basket that is 20% too big for the
+    # wallet. The trim is always announced and, when approval is on, is
+    # still shown on the card before anything is sent.
+    fit_orders_to_cash: bool = Field(default=True, alias="FIT_ORDERS_TO_CASH")
     # A stored daily-open baseline this far from actual equity is not a
     # loss — it is a baseline from another account, another currency, or
     # from before a deposit. The kill switch re-stamps and alerts instead

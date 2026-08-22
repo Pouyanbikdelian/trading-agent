@@ -917,6 +917,26 @@ class Cycle:
                 "_No orders sent. Address the cause above (e.g. `/fx 500000 "
                 "CHF to USD` for margin breaches) and run `/cycle` again._"
             )
+        # A trimmed basket is still a changed basket. The operator asked
+        # for a book of one size and is about to be shown one of another,
+        # so say so plainly rather than letting the smaller numbers on the
+        # card pass for what the PM actually wanted.
+        from trading.risk.cash_fit import REASON_PREFIX as _CASH_FIT
+
+        trims = [
+            d.reason
+            for d in decisions
+            if d.action == "scale" and str(d.reason).startswith(_CASH_FIT)
+        ]
+        if orders and trims:
+            self.alerts.info(
+                "✂️ *Basket trimmed to available cash*\n"
+                + "\n".join(f"  • {t.split(':', 1)[1].strip()}" for t in trims)
+                + "\n_Sells are untouched; buys scale together so the "
+                "relative weights are unchanged. `/fx` into the short "
+                "currency to get the full size._"
+            )
+
         # An approval-enabled cycle publishes one self-contained decision
         # card below. Sending the raw order table first made operators read
         # the same plan twice and mistook gross turnover for fresh exposure.

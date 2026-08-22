@@ -35,14 +35,17 @@ def _write_prices(
     """Bars ending TODAY, tz-aware UTC — exactly the shape the live cache
     has, which is what made the naive comparison raise in production."""
     idx = pd.date_range(end=(end or NOW).date(), periods=bars, freq="B", tz="UTC")
-    close = 100.0 * np.exp(np.arange(bars) * drift)
+    # `end` on a weekend makes pandas return one bar fewer than asked for,
+    # so every column has to be sized from the index rather than from
+    # `bars`. Without this the whole file errors out on Saturdays.
+    close = 100.0 * np.exp(np.arange(len(idx)) * drift)
     df = pd.DataFrame(
         {
             "open": close,
             "high": close * 1.001,
             "low": close * 0.999,
             "close": close,
-            "volume": np.full(bars, 1e6),
+            "volume": np.full(len(idx), 1e6),
             "adj_close": close,
         },
         index=idx,
