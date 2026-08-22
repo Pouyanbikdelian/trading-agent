@@ -1025,7 +1025,11 @@ class Runner:
     # past this, we abort and notify the operator. Generous enough for
     # a cold data refresh + ~10 IBKR API calls; tight enough that the
     # operator hears about a wedged gateway within minutes, not hours.
-    CYCLE_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
+    #: Kept as the *work* budget only. The live figure is derived per
+    #: cycle by ``trading.runner.timeouts`` so the operator's approval
+    #: window is added rather than eaten — see that module for the
+    #: 2026-08-20 production failure this prevents.
+    CYCLE_TIMEOUT_SECONDS: float = 300.0  # 5 minutes of machine work
 
     # Minimum gap between consecutive cycle starts (audit fix #11). With
     # both a cron schedule AND an off-cycle trigger watcher polling every
@@ -1213,18 +1217,30 @@ class Runner:
             self._consecutive_errors = disk_count
 
         try:
+            from trading.runner.timeouts import from_settings as _cycle_budget
+
+            timeout_s, _ = _cycle_budget(settings)
             cycle_fn = self.cycle.run_review if review_only else self.cycle.run_cycle
             report = await asyncio.wait_for(
                 asyncio.to_thread(cycle_fn),
-                timeout=self.CYCLE_TIMEOUT_SECONDS,
+                timeout=timeout_s,
             )
         except asyncio.TimeoutError:
             self._consecutive_errors += 1
             self._save_error_counter()
+            # Name the two possibilities honestly. This message blamed the
+            # gateway unconditionally, and on 2026-08-20 said so about a
+            # gateway that was fine — the cycle had been waiting for an
+            # approval the operator was still reading.
+            waiting = (settings.state_dir / self.cycle.APPROVAL_PENDING_FILE).exists()
+            cause = (
+                "an approval was still pending — it outlived the whole cycle budget"
+                if waiting
+                else "likely a wedged IBKR Gateway"
+            )
             msg = (
-                f"⏱️ cycle aborted after {self.CYCLE_TIMEOUT_SECONDS:.0f}s "
-                f"(error #{self._consecutive_errors}/{self.AUTO_HALT_AFTER}) — "
-                "likely a wedged IBKR Gateway."
+                f"⏱️ cycle aborted after {timeout_s:.0f}s "
+                f"(error #{self._consecutive_errors}/{self.AUTO_HALT_AFTER}) — {cause}."
             )
             logger.bind(component="runner").error(msg)
             self.alerts.critical(msg)

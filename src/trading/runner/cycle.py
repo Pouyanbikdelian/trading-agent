@@ -1113,7 +1113,10 @@ class Cycle:
                 decisions=decisions,
                 duration_ms=self._elapsed_ms(ts_start),
             )
-        if self._elapsed_ms(ts_start) > 290_000:  # runner aborts awaiting at 300s
+        from trading.runner.timeouts import from_settings as _cycle_budget
+
+        _, zombie_ms = _cycle_budget(_settings)
+        if self._elapsed_ms(ts_start) > zombie_ms:
             self.alerts.critical(
                 "⛔ submit gate: cycle exceeded its timeout before submission "
                 f"— dropping {len(orders)} planned order(s) (zombie-cycle guard)."
@@ -1620,7 +1623,11 @@ class Cycle:
                 duration_ms=self._elapsed_ms(ts_start),
             )
 
-        if self._elapsed_ms(ts_start) > 290_000:
+        from trading.core.config import settings as _zombie_settings
+        from trading.runner.timeouts import from_settings as _cycle_budget
+
+        _, zombie_ms = _cycle_budget(_zombie_settings)
+        if self._elapsed_ms(ts_start) > zombie_ms:
             self.alerts.critical(
                 "⛔ defensive cycle exceeded its timeout before submission — "
                 f"dropping {len(approved)} order(s) (zombie-cycle guard)."
