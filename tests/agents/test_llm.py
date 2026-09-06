@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+import pytest
+
 from trading.agents import llm
 
 
@@ -39,10 +42,31 @@ def test_anthropic_frontier_request_uses_adaptive_high_effort_and_telemetry(monk
     assert seen["json"]["thinking"] == {"type": "adaptive"}
     assert seen["json"]["output_config"] == {"effort": "high"}
     assert seen["json"]["max_tokens"] == 8000
+    assert seen["timeout"] == llm.FRONTIER_TIMEOUT_S
     assert telemetry["provider"] == "anthropic"
     assert telemetry["model"] == "claude-opus-5"
     assert telemetry["tier"] == "frontier"
     assert telemetry["usage"] == {"input_tokens": 123, "output_tokens": 45}
+    assert telemetry["timeout_s"] == llm.FRONTIER_TIMEOUT_S
+
+
+def test_frontier_timeout_is_telemetried_without_a_completion(monkeypatch) -> None:
+    telemetry: dict[str, Any] = {}
+
+    def post(*args: Any, **kwargs: Any) -> _Response:
+        raise httpx.ReadTimeout("slow response")
+
+    monkeypatch.setattr("httpx.post", post)
+    monkeypatch.setattr(llm, "_record_telemetry", lambda **row: telemetry.update(row))
+
+    with pytest.raises(httpx.ReadTimeout):
+        llm._call_anthropic(
+            "system", "prompt", model="claude-opus-5", max_tokens=8000, tier="frontier"
+        )
+
+    assert telemetry["tier"] == "frontier"
+    assert telemetry["timeout_s"] == llm.FRONTIER_TIMEOUT_S
+    assert telemetry["error_type"] == "ReadTimeout"
 
 
 def test_explicit_token_budget_wins_over_tier_default() -> None:

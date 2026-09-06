@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     agents_frontier_effort: Literal["low", "medium", "high"] = Field(
         default="high", alias="AGENTS_FRONTIER_EFFORT"
     )
+    agents_timeout_s: float = Field(default=60.0, alias="AGENTS_TIMEOUT_S", ge=10.0, le=300.0)
+    agents_frontier_timeout_s: float = Field(
+        default=180.0, alias="AGENTS_FRONTIER_TIMEOUT_S", ge=10.0, le=300.0
+    )
     # Hard dollar cap for the agent-PM sleeve IF/WHEN it is bridged into
     # the real order path (GO_LIVE.md §4). The $1M sim book deliberately
     # ignores this — it exists so the bridge, when built, sizes PM target

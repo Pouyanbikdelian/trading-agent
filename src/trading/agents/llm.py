@@ -35,7 +35,8 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 # Overridable via the AGENTS_MODEL_FRONTIER env var without a code change.
 FRONTIER_ANTHROPIC_MODEL = "claude-opus-5"
 FRONTIER_OPENAI_MODEL = "gpt-4o"
-TIMEOUT_S = 60.0
+DEFAULT_TIMEOUT_S = 60.0
+FRONTIER_TIMEOUT_S = 180.0
 DEFAULT_MAX_TOKENS = 2_400
 FRONTIER_MAX_TOKENS = 8_000
 
@@ -122,6 +123,24 @@ def _anthropic_effort(tier: str | None) -> str:
         return "high" if tier == "frontier" else "medium"
 
 
+def _timeout_s(tier: str | None) -> float:
+    """Keep high-effort decision calls bounded without cutting them short.
+
+    A single 60-second transport limit was suitable for short specialist
+    observations, but it turns a valid longer Opus reasoning pass into a
+    failed Curator/PM run.  This is still a finite operator-configurable
+    bound; it is not an unbounded wait in a live scheduler.
+    """
+    try:
+        from trading.core.config import settings
+
+        return float(
+            settings.agents_frontier_timeout_s if tier == "frontier" else settings.agents_timeout_s
+        )
+    except Exception:
+        return FRONTIER_TIMEOUT_S if tier == "frontier" else DEFAULT_TIMEOUT_S
+
+
 def _record_telemetry(
     *,
     provider: str,
@@ -132,6 +151,8 @@ def _record_telemetry(
     latency_ms: float,
     usage: dict[str, Any] | None,
     stop_reason: str | None,
+    timeout_s: float,
+    error_type: str | None = None,
 ) -> None:
     """Persist non-sensitive LLM cost/latency evidence for operations.
 
@@ -147,12 +168,14 @@ def _record_telemetry(
         "tier": tier or "standard",
         "effort": effort,
         "max_tokens": max_tokens,
+        "timeout_s": timeout_s,
         "latency_ms": round(latency_ms, 1),
         "input_tokens": (usage or {}).get("input_tokens"),
         "output_tokens": (usage or {}).get("output_tokens"),
         "cache_creation_input_tokens": (usage or {}).get("cache_creation_input_tokens"),
         "cache_read_input_tokens": (usage or {}).get("cache_read_input_tokens"),
         "stop_reason": stop_reason,
+        "error_type": error_type,
     }
     logger.bind(component="agents.llm", **row).info("LLM completion")
     try:
@@ -177,28 +200,44 @@ def _call_anthropic(
     import httpx
 
     effort = _anthropic_effort(tier)
+    timeout_s = _timeout_s(tier)
     started = time.monotonic()
-    resp = httpx.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": _anthropic_key() or "",
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": max_tokens,
-            "system": system,
-            "messages": [{"role": "user", "content": prompt}],
-            # Claude 5's adaptive thinking lets the API decide how much
-            # scratch work a particular decision needs; effort keeps that
-            # freedom finite.  Do not use a fixed thinking-token budget —
-            # it is brittle across straightforward and adversarial prompts.
-            "thinking": {"type": "adaptive"},
-            "output_config": {"effort": effort},
-        },
-        timeout=TIMEOUT_S,
-    )
+    try:
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": _anthropic_key() or "",
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "system": system,
+                "messages": [{"role": "user", "content": prompt}],
+                # Claude 5's adaptive thinking lets the API decide how much
+                # scratch work a particular decision needs; effort keeps that
+                # freedom finite.  Do not use a fixed thinking-token budget —
+                # it is brittle across straightforward and adversarial prompts.
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort},
+            },
+            timeout=timeout_s,
+        )
+    except Exception as exc:
+        _record_telemetry(
+            provider="anthropic",
+            model=model,
+            tier=tier,
+            effort=effort,
+            max_tokens=max_tokens,
+            latency_ms=(time.monotonic() - started) * 1_000,
+            usage=None,
+            stop_reason=None,
+            timeout_s=timeout_s,
+            error_type=type(exc).__name__,
+        )
+        raise
     _raise_with_body(resp)
     body = resp.json()
     _record_telemetry(
@@ -210,6 +249,7 @@ def _call_anthropic(
         latency_ms=(time.monotonic() - started) * 1_000,
         usage=body.get("usage") if isinstance(body.get("usage"), dict) else None,
         stop_reason=str(body.get("stop_reason")) if body.get("stop_reason") else None,
+        timeout_s=timeout_s,
     )
     return "".join(b.get("text", "") for b in body.get("content", []))
 
@@ -217,20 +257,36 @@ def _call_anthropic(
 def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int, tier: str | None) -> str:
     import httpx
 
+    timeout_s = _timeout_s(tier)
     started = time.monotonic()
-    resp = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {_openai_key() or ''}"},
-        json={
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-        },
-        timeout=TIMEOUT_S,
-    )
+    try:
+        resp = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {_openai_key() or ''}"},
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=timeout_s,
+        )
+    except Exception as exc:
+        _record_telemetry(
+            provider="openai",
+            model=model,
+            tier=tier,
+            effort=None,
+            max_tokens=max_tokens,
+            latency_ms=(time.monotonic() - started) * 1_000,
+            usage=None,
+            stop_reason=None,
+            timeout_s=timeout_s,
+            error_type=type(exc).__name__,
+        )
+        raise
     _raise_with_body(resp)
     body = resp.json()
     choice = body["choices"][0]
@@ -243,6 +299,7 @@ def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int, tier:
         latency_ms=(time.monotonic() - started) * 1_000,
         usage=body.get("usage") if isinstance(body.get("usage"), dict) else None,
         stop_reason=str(choice.get("finish_reason")) if choice.get("finish_reason") else None,
+        timeout_s=timeout_s,
     )
     return str(choice["message"]["content"])
 
