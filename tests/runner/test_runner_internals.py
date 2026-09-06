@@ -172,10 +172,10 @@ def test_core_post_close_triggers_hold_the_same_new_york_times_across_dst(
     historian_trigger = _historian_trigger()
     nyse = ZoneInfo("America/New_York")
     for start in (
-        # Tuesday is a Historian day, so all four post-close jobs land on
+        # Friday is the Historian day, so all four post-close jobs land on
         # the same local session in both DST seasons.
-        datetime(2026, 1, 6, tzinfo=timezone.utc),
-        datetime(2026, 8, 18, tzinfo=timezone.utc),
+        datetime(2026, 1, 9, tzinfo=timezone.utc),
+        datetime(2026, 8, 21, tzinfo=timezone.utc),
     ):
         cache_at = cache_trigger.get_next_fire_time(None, start)
         grader_at = grader_trigger.get_next_fire_time(None, start)

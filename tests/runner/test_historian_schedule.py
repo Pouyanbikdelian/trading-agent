@@ -8,26 +8,25 @@ from zoneinfo import ZoneInfo
 from trading.runner.runner import _add_scorecard_backfill_targets, _historian_trigger
 
 
-def test_historian_runs_tuesday_then_friday_after_the_local_grader() -> None:
+def test_historian_runs_once_on_friday_after_the_local_grader() -> None:
     trigger = _historian_trigger()
     monday = datetime(2026, 8, 10, 23, 0, tzinfo=timezone.utc)
 
-    tuesday = trigger.get_next_fire_time(None, monday)
-    assert tuesday == datetime(2026, 8, 11, 23, 0, tzinfo=timezone.utc)
-
-    friday = trigger.get_next_fire_time(tuesday, tuesday + timedelta(seconds=1))
+    friday = trigger.get_next_fire_time(None, monday)
     assert friday == datetime(2026, 8, 14, 23, 0, tzinfo=timezone.utc)
+    following_friday = trigger.get_next_fire_time(friday, friday + timedelta(seconds=1))
+    assert following_friday == datetime(2026, 8, 21, 23, 0, tzinfo=timezone.utc)
 
 
 def test_historian_keeps_the_same_new_york_time_in_winter() -> None:
     trigger = _historian_trigger()
     monday = datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc)
 
-    tuesday = trigger.get_next_fire_time(None, monday)
+    friday = trigger.get_next_fire_time(None, monday)
 
-    assert tuesday is not None
-    local = tuesday.astimezone(ZoneInfo("America/New_York"))
-    assert (local.weekday(), local.hour, local.minute) == (1, 19, 0)
+    assert friday is not None
+    local = friday.astimezone(ZoneInfo("America/New_York"))
+    assert (local.weekday(), local.hour, local.minute) == (4, 19, 0)
 
 
 def test_scorecard_backfill_fetches_an_out_of_universe_index_proxy() -> None:

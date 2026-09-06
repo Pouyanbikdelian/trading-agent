@@ -150,7 +150,7 @@ def _precycle_trigger(cron: str, tz: str, *, lead_minutes: int = 60) -> Any:
 
 
 def _historian_trigger() -> Any:
-    """Tuesday and Friday distillation, after the nightly grader.
+    """Friday-only distillation, after the nightly grader.
 
     Keep the cadence in one helper so the schedule has a direct, testable
     representation rather than being buried among the runner's jobs.
@@ -160,7 +160,7 @@ def _historian_trigger() -> Any:
     # Keep the full post-close learning chain on New York wall time.  A UTC
     # literal put the winter grader before the cache refresh, then let the
     # historian distil that incomplete result.
-    return CronTrigger(day_of_week="tue,fri", hour=19, minute=0, timezone="America/New_York")
+    return CronTrigger(day_of_week="fri", hour=19, minute=0, timezone="America/New_York")
 
 
 def _add_scorecard_backfill_targets(
