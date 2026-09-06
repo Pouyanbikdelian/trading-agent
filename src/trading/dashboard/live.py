@@ -120,9 +120,13 @@ def realized_by_symbol(fills: list[dict[str, Any]]) -> dict[str, dict[str, float
 # ----------------------------------------------------------- fx / curves
 
 
-def fetch_usdchf(data_dir: Path) -> dict[str, float]:
-    """Daily USDCHF closes keyed by ISO date. Parquet cache first, then
-    yfinance; empty dict if both fail (caller falls back to unconverted)."""
+def fetch_usdchf(data_dir: Path, *, allow_network: bool = False) -> dict[str, float]:
+    """Daily USDCHF closes keyed by ISO date.
+
+    The dashboard request path is deliberately cache-only: an unavailable
+    market-data provider must degrade a chart, never tie up an HTTP worker.
+    Background refresh code can opt into the bounded network fallback.
+    """
     try:
         from trading.runtime.portfolio_stats import _read_close
 
@@ -131,6 +135,8 @@ def fetch_usdchf(data_dir: Path) -> dict[str, float]:
             return {str(ix)[:10]: float(v) for ix, v in s.items()}
     except Exception:
         pass
+    if not allow_network:
+        return {}
     try:
         import yfinance as yf
 

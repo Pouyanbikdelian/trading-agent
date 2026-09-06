@@ -125,7 +125,9 @@ def _book_concentration(
         return None
 
 
-def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
+def build_context(
+    state_dir: Path, data_dir: Path, *, include_candidate_ladder: bool = True
+) -> dict[str, Any]:
     from trading.memory.store import MemoryStore, lesson_condition_fingerprint
     from trading.runner.holds import load_holds, load_k_override
     from trading.runner.state import RunnerStore
@@ -281,14 +283,15 @@ def build_context(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     # name the desk doesn't already own can reach an agent. Without it the
     # context named nothing but current holdings, and every allocator
     # downstream re-picked the book it was shown (see agents/candidates.py).
-    try:
-        from trading.agents.candidates import build_candidate_ladder
+    if include_candidate_ladder:
+        try:
+            from trading.agents.candidates import build_candidate_ladder
 
-        ladder = build_candidate_ladder(data_dir)
-        if ladder:
-            ctx["candidate_ladder"] = ladder
-    except Exception as e:
-        logger.bind(component="agents").warning(f"context: candidate ladder unavailable ({e})")
+            ladder = build_candidate_ladder(data_dir)
+            if ladder:
+                ctx["candidate_ladder"] = ladder
+        except Exception as e:
+            logger.bind(component="agents").warning(f"context: candidate ladder unavailable ({e})")
 
     # --- slow macro (FRED): CPI, claims, HY spreads etc. Compact latest
     # readings only — the dashboard owns the full history.

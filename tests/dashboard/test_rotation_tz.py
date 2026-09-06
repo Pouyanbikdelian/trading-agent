@@ -117,3 +117,24 @@ def test_load_history_normalizes_before_building_the_frame() -> None:
     frame = src.index("return pd.DataFrame(closes), dollar_vol")
 
     assert norm < frame
+
+
+def test_degraded_rotation_is_negative_cached(tmp_path, monkeypatch) -> None:
+    """A cache miss must not repeat expensive fallback work per refresh."""
+    from trading.dashboard import rotation
+
+    calls = 0
+
+    def unavailable(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("cache unavailable")
+
+    monkeypatch.setattr(rotation, "_cache", {"t": 0.0, "payload": None, "key": None})
+    monkeypatch.setattr(rotation, "_load_history", unavailable)
+
+    first = rotation.build_rotation(tmp_path / "state", tmp_path / "data")
+    second = rotation.build_rotation(tmp_path / "state", tmp_path / "data")
+
+    assert calls == 1
+    assert first == second

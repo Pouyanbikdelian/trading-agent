@@ -261,7 +261,7 @@ def classify_regimes(econ: dict[str, Any]) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- I/O layer
 
-_cache: dict[str, Any] = {"t": 0.0, "payload": None}
+_cache: dict[str, Any] = {"t": 0.0, "payload": None, "key": None}
 
 
 def _daily_utc(s: pd.Series) -> pd.Series:
@@ -288,10 +288,15 @@ def _daily_utc(s: pd.Series) -> pd.Series:
     return out[~out.index.duplicated(keep="last")]
 
 
-def _load_history(data_dir: Path) -> tuple[pd.DataFrame, dict[str, float]]:
-    """Daily closes for SECTOR_ETFS + SPY: parquet cache first, one
-    yfinance batch for whatever's missing. Also returns a 90-day average
-    dollar-volume per symbol (treemap tile size = where money trades)."""
+def _load_history(
+    data_dir: Path, *, allow_network: bool = False
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Daily closes for SECTOR_ETFS + SPY from the local cache.
+
+    HTTP handlers pass ``allow_network=False`` so an empty cache renders a
+    degraded Rotation tab promptly instead of serializing dashboard requests
+    behind provider timeouts. A background refresh may opt into the fallback.
+    """
     from trading.runtime.portfolio_stats import _read_close
 
     want = [*SECTOR_ETFS, "SPY"]
@@ -304,7 +309,7 @@ def _load_history(data_dir: Path) -> tuple[pd.DataFrame, dict[str, float]]:
             closes[sym] = s.iloc[-800:]
         else:
             missing.append(sym)
-    if missing:
+    if missing and allow_network:
         import yfinance as yf
 
         raw = yf.download(
@@ -329,16 +334,23 @@ def _load_history(data_dir: Path) -> tuple[pd.DataFrame, dict[str, float]]:
     return pd.DataFrame(closes), dollar_vol
 
 
-def build_rotation(state_dir: Path, data_dir: Path) -> dict[str, Any]:
+def build_rotation(
+    state_dir: Path, data_dir: Path, *, allow_network: bool = False
+) -> dict[str, Any]:
     """Assemble the rotation payload, TTL-cached in memory: the numbers
     move daily, the page refreshes every five minutes."""
     now = time.time()
-    if _cache["payload"] is not None and now - float(_cache["t"]) < _CACHE_TTL_S:
+    key = (str(state_dir), str(data_dir), allow_network)
+    if (
+        _cache["payload"] is not None
+        and _cache["key"] == key
+        and now - float(_cache["t"]) < _CACHE_TTL_S
+    ):
         return dict(_cache["payload"])
 
     out: dict[str, Any] = {"t": datetime.now(tz=timezone.utc).isoformat()}
     try:
-        closes, dollar_vol = _load_history(data_dir)
+        closes, dollar_vol = _load_history(data_dir, allow_network=allow_network)
         out.update(compute_rotation(closes, dollar_vol))
     except Exception as e:  # degraded tab beats a dead dashboard
         logger.bind(component="rotation").warning(f"rotation compute failed: {e}")
@@ -349,6 +361,7 @@ def build_rotation(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     except Exception as e:
         logger.bind(component="rotation").warning(f"regime classify failed: {e}")
         out["regimes"] = {}
-    if out.get("sectors"):
-        _cache.update(t=now, payload=dict(out))
+    # Cache degraded results too. Otherwise an unavailable cache/provider
+    # repeats the same expensive attempt for every dashboard refresh.
+    _cache.update(t=now, payload=dict(out), key=key)
     return out

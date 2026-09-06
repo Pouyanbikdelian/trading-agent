@@ -87,7 +87,10 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
 
     # Book, monitors, holds — reuse the committee's context pass.
     try:
-        out["context"] = build_context(state_dir, data_dir)
+        # The committee needs the live ladder; a dashboard refresh does not.
+        # Building it scans hundreds of parquet files and can make the UI look
+        # hung on a constrained VPS. The dashboard remains a state reader.
+        out["context"] = build_context(state_dir, data_dir, include_candidate_ladder=False)
     except Exception as e:
         logger.bind(component="dashboard").warning(f"context failed: {e}")
         out["context"] = {}
@@ -119,7 +122,7 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     # apart is its own way of inventing performance.
     fx: dict[str, float] = {}
     try:
-        fx = fetch_usdchf(data_dir)  # never raises; {} when both sources fail
+        fx = fetch_usdchf(data_dir, allow_network=False)
         snap = RunnerStore(state_dir / "runner.db").latest_snapshot()
         base_ccy = (snap.base_currency if snap else None) or "USD"
         out["equity_currency"] = base_ccy
@@ -164,10 +167,10 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
 
     # Holdings + watchlist: 6 months of closes per symbol, normalized
     # client-side. Held names from the snapshot; extras from the static
-    # config watchlist plus approval-gated operator overrides in state
-    # (cache-served via yfinance fallback). The bot mounts config read-only,
-    # so this merge is what makes Telegram edits visible without broadening
-    # the bot's container authority.
+    # config watchlist plus approval-gated operator overrides in state. The
+    # bot mounts config read-only, so this merge is what makes Telegram edits
+    # visible without broadening the bot's container authority. Cache misses
+    # remain explicit rather than triggering network I/O in an HTTP request.
     try:
         from trading.runtime.portfolio_stats import _read_close
 
@@ -189,30 +192,12 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
                 ]
             else:
                 missing.append(sym)
-        if missing:
-            try:
-                import yfinance as yf
-
-                raw = yf.download(
-                    " ".join(missing),
-                    period="6mo",
-                    auto_adjust=True,
-                    progress=False,
-                    group_by="ticker",
-                    threads=False,
-                )
-                for sym in missing:
-                    try:
-                        s = raw[sym]["Close"].dropna()
-                        if len(s) > 20:
-                            series[sym] = [
-                                {"t": str(ix)[:10], "v": round(float(v), 4)} for ix, v in s.items()
-                            ]
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-        out["tickers"] = {"held": held, "watchlist": wl, "series": series}
+        out["tickers"] = {
+            "held": held,
+            "watchlist": wl,
+            "series": series,
+            "missing": missing,
+        }
     except Exception as e:
         logger.bind(component="dashboard").warning(f"tickers failed: {e}")
         out["tickers"] = {}
@@ -237,7 +222,7 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     try:
         from trading.dashboard.rotation import build_rotation
 
-        out["rotation"] = build_rotation(state_dir, data_dir)
+        out["rotation"] = build_rotation(state_dir, data_dir, allow_network=False)
     except Exception as e:
         logger.bind(component="dashboard").warning(f"rotation failed: {e}")
         out["rotation"] = {}
@@ -937,7 +922,7 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
   const QCOL={leading:'#3fcf8e',improving:'#58a6ff',weakening:'#e8a54b',lagging:'#f0556d'};
   const cv=document.getElementById('rrg');
   if(!secs.length){
-   cv.parentElement.innerHTML='<div class="muted" style="padding:24px">no rotation data yet — needs ~15 months of sector-ETF closes (yfinance fetch on next summary build)</div>';
+   cv.parentElement.innerHTML='<div class="muted" style="padding:24px">no rotation data yet — needs ~15 months of cached sector-ETF closes; the data refresh job will populate it</div>';
   } else {
    // Shared daily timeline: union of all trail dates, carry-forward gaps.
    const days=[...new Set(secs.flatMap(s=>s.trail.map(p=>p.t)))].sort();

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 import threading
+import types
 import urllib.request
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
@@ -82,6 +84,29 @@ def test_build_summary_degrades_on_empty_dirs(tmp_path) -> None:
     assert out["equity_curve"] == []
     # memory store auto-creates; stats present but empty
     assert out["memory"]["stats"]["journal"] == 0
+
+
+def test_summary_is_cache_only_on_a_data_miss(tmp_path, monkeypatch) -> None:
+    """A stalled market-data provider must never hold an HTTP request open."""
+    from trading.agents import context as context_module
+
+    seen: dict[str, object] = {}
+    real_build_context = context_module.build_context
+
+    def capture_context(*args, **kwargs):
+        seen.update(kwargs)
+        return real_build_context(*args, **kwargs)
+
+    def forbidden_download(*args, **kwargs):
+        pytest.fail("dashboard summary attempted a network market-data fetch")
+
+    monkeypatch.setattr(context_module, "build_context", capture_context)
+    monkeypatch.setitem(sys.modules, "yfinance", types.SimpleNamespace(download=forbidden_download))
+
+    out = build_summary(tmp_path / "state", tmp_path / "data")
+
+    assert seen["include_candidate_ladder"] is False
+    assert isinstance(out["tickers"]["missing"], list)
 
 
 def test_corrupt_operator_watchlist_keeps_dashboard_baseline(tmp_path, monkeypatch) -> None:
