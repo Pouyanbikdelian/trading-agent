@@ -169,7 +169,23 @@ def _default_llm(system: str, prompt: str) -> dict[str, Any]:
     return complete_json(system, prompt, tier="frontier", max_tokens=HISTORIAN_MAX_TOKENS)
 
 
-PROMPT_BUDGET = 24_000
+# This is a character budget (not an output-token setting).  The Curator is
+# intentionally a frontier call and only runs twice a week, so it has enough
+# room to review the active rulebook *and* the week's measured outcomes.  A
+# 24k budget was too small for a perfectly healthy ten-card rulebook and made
+# the fail-closed guard fire before the model saw any new evidence.
+# 72k also retains the capped set of graded weekly outcomes after their
+# deterministic prompt projection.  That is roughly 18k input tokens: small
+# against the frontier model's context window, and warranted for a
+# twice-weekly, permanent-memory decision.
+PROMPT_BUDGET = 72_000
+
+# A graded prediction journal row carries the entire original prediction
+# statement.  That is useful for the immutable journal, but repeating sixty
+# 500-character narratives is a poor use of the Curator's scarce context.  A
+# lossless-for-attribution card keeps every measured field and source id while
+# retaining just enough of the contemporaneous thesis to reason about it.
+OUTCOME_STATEMENT_CHARS = 180
 
 # Journal buckets in the order they may be sacrificed when the evidence
 # does not fit. Chatter first. The active rulebook and historical dossier
@@ -238,6 +254,44 @@ def _budgeted_evidence(
     )
 
 
+def _outcome_card(row: dict[str, Any]) -> dict[str, Any]:
+    """Project an immutable graded prediction into a compact curator card.
+
+    The raw journal remains the audit record.  This prompt projection avoids
+    allowing repeated agent prose to crowd out the objectively graded outcome
+    that the Historian is supposed to learn from.
+    """
+    raw = row.get("payload")
+    payload = raw if isinstance(raw, dict) else {}
+    compact: dict[str, Any] = {}
+    for field in (
+        "id",
+        "agent",
+        "subject",
+        "direction",
+        "horizon_days",
+        "confidence",
+        "outcome",
+        "realized_move",
+        "brier",
+    ):
+        value = payload.get(field)
+        if value is None or isinstance(value, (str, int, float, bool)):
+            compact[field] = value
+    statement = payload.get("statement")
+    if isinstance(statement, str) and statement.strip():
+        compact["statement"] = statement.strip()[:OUTCOME_STATEMENT_CHARS]
+        if len(statement.strip()) > OUTCOME_STATEMENT_CHARS:
+            compact["statement_truncated"] = True
+    return {
+        "id": row.get("id"),
+        "ts": row.get("ts"),
+        "kind": row.get("kind"),
+        "actor": row.get("actor"),
+        "payload": compact,
+    }
+
+
 def build_week_evidence(mem: MemoryStore, days: float = HISTORIAN_WINDOW_DAYS) -> dict[str, Any]:
     """What the week actually contained — a real time window, by kind.
 
@@ -257,6 +311,8 @@ def build_week_evidence(mem: MemoryStore, days: float = HISTORIAN_WINDOW_DAYS) -
     for kind, budget in HISTORIAN_KINDS.items():
         if kind in journal:
             journal[kind] = journal[kind][-budget:]
+    if graded := journal.get("prediction_graded"):
+        journal["prediction_graded"] = [_outcome_card(row) for row in graded]
 
     measured: dict[str, Any] = {}
     try:
@@ -503,8 +559,6 @@ def run_historian(
             "contradict": r["contradict"],
             "outcome_support": r["outcome_support"],
             "outcome_contradict": r["outcome_contradict"],
-            "conditions": r["conditions"],
-            "scope": r["scope"],
             "retrieval_role": r.get("retrieval_role", "review_queue"),
             "evidence": mem.lesson_evidence(r["id"], limit=8),
         }

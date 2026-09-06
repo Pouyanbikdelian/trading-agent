@@ -79,6 +79,50 @@ def test_garbage_statements_skipped_and_empty_week_ok(mem: MemoryStore) -> None:
     assert "no new lessons" in format_historian_digest(digest)
 
 
+def test_historian_keeps_grades_and_rulebook_under_the_prompt_budget(mem: MemoryStore) -> None:
+    """A busy week must not make the Curator skip its permanent-memory review.
+
+    This mirrors the production failure mode: twelve full lesson cards plus
+    sixty graded prediction rows.  Outcome cards may shorten old prose, but
+    the exact outcome ids and measurements must remain visible for citations.
+    """
+    from trading.agents.historian import OUTCOME_STATEMENT_CHARS, PROMPT_BUDGET
+
+    for index in range(12):
+        mem.add_lesson(f"Lesson {index}: " + "falsifiable historical rule. " * 70)
+    for index in range(60):
+        prediction_id = mem.add_prediction(
+            agent="quant",
+            subject=f"S{index}",
+            direction="up",
+            horizon_days=5,
+            confidence=0.6,
+            statement="contemporaneous thesis " * 80,
+        )
+        mem.grade_prediction(prediction_id, realized_move=0.02)
+
+    seen: dict[str, str] = {}
+
+    def llm(system: str, prompt: str) -> dict[str, Any]:
+        if "reviewer" in system:
+            return {"votes": []}
+        seen["prompt"] = prompt
+        return {"new_lessons": [], "retire": []}
+
+    digest = run_historian(mem, llm=llm)
+
+    assert digest["ok"] is True
+    assert len(seen["prompt"]) <= PROMPT_BUDGET
+    payload = json.loads(seen["prompt"])
+    grades = payload["week_journal"]["prediction_graded"]
+    assert len(payload["lesson_book"]) == 12
+    assert len(grades) == 60
+    assert grades[0]["payload"]["id"].startswith("pr-")
+    assert grades[0]["payload"]["outcome"] == "hit"
+    assert len(grades[0]["payload"]["statement"]) == OUTCOME_STATEMENT_CHARS
+    assert grades[0]["payload"]["statement_truncated"] is True
+
+
 def test_historian_stores_scope_and_today_snapshot_for_new_lessons(mem: MemoryStore) -> None:
     conditions = {"macro_bucket": "stress", "vol_bucket": "elevated"}
     evidence_id = mem.add_prediction(
@@ -618,13 +662,16 @@ def test_source_and_vote_must_survive_prompt_budget(mem: MemoryStore) -> None:
 
     digest = run_historian(mem, llm=llm)
 
-    assert "week_journal" not in json.loads(seen["curator"])
-    assert "week_journal" not in json.loads(seen["voter"])
-    assert digest["created"] == []
-    assert digest["voted"] == 0
-    assert mem.lessons(status="candidate")[0]["id"] == lesson_id
-    assert mem.lessons(status="candidate")[0]["support"] == 0
-    assert mem.curator_summary()["last_run"]["status"] == "degraded"
+    curator_payload = json.loads(seen["curator"])
+    voter_payload = json.loads(seen["voter"])
+    assert target_id in seen["curator"]
+    assert target_id in seen["voter"]
+    assert len(curator_payload["week_journal"]["prediction_graded"]) == 60
+    assert len(voter_payload["week_journal"]["prediction_graded"]) == 60
+    assert len(digest["created"]) == 1
+    assert digest["voted"] == 1
+    original = next(row for row in mem.lessons(status="candidate") if row["id"] == lesson_id)
+    assert original["support"] == 1
 
 
 def test_curator_replay_does_not_duplicate_an_identical_candidate(mem: MemoryStore) -> None:
