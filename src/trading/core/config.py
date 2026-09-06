@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     # a larger output budget; an eight-person committee must not silently
     # inherit that cost on every routine observation.
     agents_model_frontier: str | None = Field(default=None, alias="AGENTS_MODEL_FRONTIER")
-    agents_max_tokens: int = Field(default=2_400, alias="AGENTS_MAX_TOKENS", ge=256, le=32_000)
+    agents_max_tokens: int = Field(default=4_000, alias="AGENTS_MAX_TOKENS", ge=256, le=32_000)
     agents_frontier_max_tokens: int = Field(
         default=8_000, alias="AGENTS_FRONTIER_MAX_TOKENS", ge=256, le=64_000
     )

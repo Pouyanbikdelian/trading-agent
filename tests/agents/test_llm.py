@@ -71,5 +71,6 @@ def test_frontier_timeout_is_telemetried_without_a_completion(monkeypatch) -> No
 
 def test_explicit_token_budget_wins_over_tier_default() -> None:
     assert llm._token_budget("frontier", 1234) == 1234
+    assert llm._token_budget("standard", None) == 4000
     assert llm.DEFAULT_ANTHROPIC_MODEL == "claude-sonnet-5"
     assert llm.FRONTIER_ANTHROPIC_MODEL == "claude-opus-5"
