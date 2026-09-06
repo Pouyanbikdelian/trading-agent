@@ -14,7 +14,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from trading.agents.candidates import MIN_BARS, STALE_LADDER_DAYS, build_candidate_ladder
+from trading.agents.candidates import (
+    MIN_BARS,
+    STALE_LADDER_DAYS,
+    build_candidate_ladder,
+    build_runner_candidate_snapshot,
+    load_runner_candidate_snapshot,
+    write_runner_candidate_snapshot,
+)
 from trading.core.types import AssetClass, Instrument
 from trading.data.cache import ParquetCache
 
@@ -167,3 +174,49 @@ def test_unknown_universe_degrades_to_none(tmp_path: Path, monkeypatch) -> None:
 def test_unknown_strategy_degrades_to_none(desk: Path, monkeypatch) -> None:
     monkeypatch.setenv("STRATEGY", "no_such_strategy")
     assert build_candidate_ladder(desk) is None
+
+
+def test_runner_snapshot_keeps_exact_resolved_config_and_correlation_review(tmp_path: Path) -> None:
+    """The agent ladder must describe the runner's actual inputs, not env defaults."""
+    from types import SimpleNamespace
+
+    idx = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=100, freq="B")
+    base = np.linspace(100.0, 150.0, len(idx))
+    prices = pd.DataFrame({"AAA": base, "BBB": base * 1.01, "CCC": base[::-1]}, index=idx)
+    cfg = SimpleNamespace(
+        universe="actual_live_universe",
+        strategies=["top_k_momentum"],
+        strategy_params={"top_k_momentum": {"rebalance": 63}},
+        freq="1D",
+        screens=object(),
+    )
+    snap = build_runner_candidate_snapshot(
+        prices,
+        ranked=[("AAA", 0.31), ("BBB", 0.29), ("CCC", 0.02)],
+        selected={"AAA", "BBB"},
+        config=cfg,
+    )
+    assert snap is not None
+    assert snap["universe"] == "actual_live_universe"
+    assert snap["strategy_params"]["top_k_momentum"]["rebalance"] == 63
+    assert snap["selected_mechanical"] == ["AAA", "BBB"]
+    assert snap["correlation_review"]["avg_pairwise_corr"] > 0.9
+    assert snap["ranked"][2]["correlation_warning"]
+
+    write_runner_candidate_snapshot(tmp_path, snap)
+    assert load_runner_candidate_snapshot(tmp_path) == snap
+
+
+def test_context_prefers_runner_snapshot_to_a_second_cache_rebuild(tmp_path: Path) -> None:
+    """The committee must see the actual resolved runner configuration."""
+    from trading.agents.context import build_context
+
+    snapshot = {
+        "schema_version": 1,
+        "source": "runner_snapshot",
+        "as_of": "2026-09-06",
+        "ranked": [{"rank": 1, "symbol": "ACTUAL", "score": 0.22}],
+    }
+    write_runner_candidate_snapshot(tmp_path / "state", snapshot)
+    context = build_context(tmp_path / "state", tmp_path / "data")
+    assert context["candidate_ladder"] == snapshot

@@ -178,6 +178,34 @@ def test_correlation_filter_falls_back_when_short_history() -> None:
     assert (w.abs() > 0).any().any()
 
 
+def test_calendar_rebalance_is_stable_when_the_runner_window_rolls() -> None:
+    """A rolling 252-row cache must not slide a quarterly rebalance date.
+
+    Both calculations finish on the identical Friday but start months apart.
+    Calendar mode should therefore produce the same current target, whereas
+    row-relative ``arange(warmup, n, 63)`` is sensitive to that start row.
+    """
+    idx = pd.date_range("2023-01-03", periods=430, freq="B", tz="UTC")
+    prices = pd.DataFrame(
+        {
+            "FAST": 100.0 * np.exp(np.arange(len(idx)) * 0.0011),
+            "SLOW": 100.0 * np.exp(np.arange(len(idx)) * 0.0004),
+            "DOWN": 200.0 * np.exp(-np.arange(len(idx)) * 0.0002),
+        },
+        index=idx,
+    )
+    strategy = TopKMomentum(
+        k=2,
+        lookback=126,
+        skip=21,
+        vol_lookback=60,
+        calendar_rebalance_months=3,
+    )
+    full = strategy.generate(prices).iloc[-1]
+    rolled = strategy.generate(prices.iloc[-252:]).iloc[-1]
+    assert full.to_dict() == rolled.to_dict()
+
+
 def test_top_k_empty_universe_returns_zeros() -> None:
     idx = pd.date_range("2020-01-01", periods=100, freq="1D", tz="UTC")
     empty = pd.DataFrame(index=idx)

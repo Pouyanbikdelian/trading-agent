@@ -469,6 +469,37 @@ class TestAntiFixation:
         assert res["opened_off_ladder"] == ["JPM"]
         assert "opened off-ladder" in format_pm_digest(res)
 
+    def test_off_ladder_open_records_a_bounded_shadow_exception(
+        self, mem: MemoryStore, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("trading.agents.pm._stock_universe", lambda: ("JPM",))
+        ctx = {"candidate_ladder": {"ranked": [{"rank": 1, "symbol": "AMAT"}]}}
+
+        def llm(_system: str, _prompt: str) -> dict[str, Any]:
+            return {
+                "target_weights": {"JPM": 0.05},
+                "rationale": "A falsifiable bank-margin thesis.",
+                "watch": "Net interest income guidance.",
+                "structured_exceptions": [
+                    {
+                        "symbol": "JPM",
+                        "thesis": "Net-interest-income expectations are improving while credit losses are contained.",
+                        "source_ids": ["headline:bank-margins"],
+                        "horizon_days": 21,
+                        "invalidation": "Management guides to lower net interest income.",
+                        "max_weight": 0.05,
+                        "sector_impact": "Adds financials to a technology-heavy book.",
+                        "correlation_impact": "Low correlation with the current semiconductor sleeve.",
+                    }
+                ],
+            }
+
+        result = run_agent_pm(ctx, mem, tmp_path, llm=llm, prices=dict(PRICES, JPM=200.0))
+        assert result["off_ladder_pending_approval"] == ["JPM"]
+        assert result["off_ladder_exception_ids"]
+        rows = mem.conn.execute("SELECT origin, symbol, snapshot FROM shadow").fetchall()
+        assert any(row["origin"] == "creative_exception" and row["symbol"] == "JPM" for row in rows)
+
     def test_etf_opens_are_exempt_from_the_ladder_check(
         self, mem: MemoryStore, tmp_path: Path
     ) -> None:

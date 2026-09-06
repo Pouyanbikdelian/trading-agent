@@ -95,6 +95,12 @@ REGISTRY: tuple[Spec, ...] = (
         usage="/edge [why] [5|21|63]",
         example="/edge why 21",
     ),
+    Spec(
+        "/exceptions",
+        "review or approve a structured off-ladder research exception",
+        usage="/exceptions [approve|reject EXCEPTION_ID]",
+        example="/exceptions approve ex-1a2b3c4d5e",
+    ),
     # --- cycle approval
     Spec(
         "/approve",

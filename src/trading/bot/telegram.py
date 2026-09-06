@@ -104,6 +104,7 @@ HELP_TEXT = (
     "/lessons [harden|soften <id>] — review or propose a re-weighting\n"
     "/edge [5|21|63] — did our picks beat the names we passed on?\n"
     "/edge why — the breakdown: rank, market conditions, entry level\n"
+    "/exceptions — review off-ladder research; approve/reject a bounded proposal\n"
     "/detail — full transcript of the latest committee debate\n"
     "/committee — convene the agents for a fresh debate right now\n"
     "/pm — PM research simulation · /pm run — refresh PM research (no broker order)\n"
@@ -3250,6 +3251,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_lessons(args)
     if cmd == "/edge":
         return _cmd_edge(args)
+    if cmd == "/exceptions":
+        return _cmd_exceptions(args)
     if cmd == "/detail":
         return _cmd_detail()
     if cmd == "/committee":
@@ -3361,6 +3364,55 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
 
 
 _STRENGTH_ICON = {"strong": "🔴", "medium": "🟠", "soft": "🟡"}
+
+
+def _cmd_exceptions(args: list[str]) -> str:
+    """Review the approval-gated off-ladder exception ledger.
+
+    Approving a proposal never submits an order.  It only makes the exact,
+    time-bounded risk budget eligible for the PM bridge; any later target
+    still needs freshness checks, normal risk sizing and the usual cycle
+    approval controls.
+    """
+    from trading.agents.exceptions import list_exceptions, set_exception_status
+    from trading.core.text import clip
+
+    if args and args[0].lower() in {"approve", "reject"}:
+        if len(args) != 2:
+            return registry.usage_for("/exceptions")
+        wanted = "approved" if args[0].lower() == "approve" else "rejected"
+        row = set_exception_status(settings.state_dir, args[1], wanted)
+        if row is None:
+            return "_No pending exception with that id. Use `/exceptions` to review the ledger._"
+        if wanted == "approved":
+            return (
+                f"✅ Exception `{row['id']}` for `{row['symbol']}` approved through "
+                f"{str(row['expires_at'])[:10]} at max {float(row['max_weight']):.1%}.\n"
+                "_No order was placed. Any PM target still goes through freshness, risk and cycle approval._"
+            )
+        return f"🗂 Exception `{row['id']}` for `{row['symbol']}` rejected; no order was placed."
+
+    rows = list_exceptions(settings.state_dir)
+    if not rows:
+        return (
+            "🧪 *Off-ladder exceptions* — none pending.\n"
+            "_Creative names must carry thesis, sources, horizon, invalidation and risk budget first._"
+        )
+    lines = ["🧪 *Off-ladder exceptions* — research ledger", ""]
+    for row in rows[:10]:
+        lines.append(
+            f"`{row.get('id', '?')}` · *{str(row.get('status', '?')).upper()}* · "
+            f"`{row.get('symbol', '?')}` ≤{float(row.get('max_weight') or 0):.1%} "
+            f"· expires {str(row.get('expires_at', '?'))[:10]}"
+        )
+        lines.append(f"  {clip(str(row.get('thesis', '')), 180)}")
+    lines.extend(
+        [
+            "",
+            "_`/exceptions approve ID` makes only that bounded thesis eligible for PM bridge; it never submits an order._",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _maybe_capture_mandate(text: str) -> str | None:

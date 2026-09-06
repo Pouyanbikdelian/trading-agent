@@ -1112,6 +1112,39 @@ def test_mandates_command_lists_and_drops(tmp_path: Path, monkeypatch) -> None:
     assert "no standing instructions" in _cmd_mandates([])
 
 
+def test_exceptions_command_approves_research_without_submitting_an_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from trading.agents.exceptions import normalise_proposal, record_proposals
+    from trading.bot import telegram as telegram_module
+
+    monkeypatch.setattr(
+        telegram_module,
+        "settings",
+        telegram_module.settings.model_copy(update={"state_dir": tmp_path}),
+    )
+    proposal = normalise_proposal(
+        {
+            "thesis": "A specific earnings revision and valuation gap create a bounded upside setup.",
+            "source_ids": ["headline:earnings-revision"],
+            "horizon_days": 21,
+            "invalidation": "The next earnings update cuts the core guidance range.",
+            "max_weight": 0.05,
+            "sector_impact": "Adds one industrials name to a technology-heavy sleeve.",
+        },
+        symbol="TEST",
+        origin="agent",
+        requested_weight=0.05,
+    )
+    assert proposal is not None
+    saved = record_proposals(tmp_path, [proposal])[0]
+
+    listed = asyncio.run(_dispatch("/exceptions")) or ""
+    approved = asyncio.run(_dispatch(f"/exceptions approve {saved['id']}")) or ""
+    assert saved["id"] in listed
+    assert "No order was placed" in approved
+
+
 def test_soften_and_harden_regrade(tmp_path: Path, monkeypatch) -> None:
     from trading.bot.telegram import _cmd_restrength
     from trading.copilot.mandates import MandateStore

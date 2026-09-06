@@ -160,7 +160,7 @@ HISTORIAN_WINDOW_DAYS = 7.0
 # the system attached to its most durable output. Two calls a week on the
 # frontier model is a rounding error next to the per-cycle committee; a
 # badly-conditioned lesson costs for months.
-HISTORIAN_MAX_TOKENS = 4000
+HISTORIAN_MAX_TOKENS = 8000
 
 
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:

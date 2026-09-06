@@ -83,6 +83,12 @@ class TopKMomentumParams(StrategyParams):
     lookback: int = Field(default=126, ge=21)
     skip: int = Field(default=21, ge=0)
     rebalance: int = Field(default=63, ge=1)
+    calendar_rebalance_months: int | None = Field(default=None, ge=1, le=12)
+    """Optional calendar anchor for live use.  When set, rebuild on the
+    final trading bar of every Nth calendar month (anchored to Jan 2000),
+    rather than every Nth row of whatever rolling cache happened to be
+    loaded. ``None`` preserves historical backtests and requires explicit
+    paper validation before a live runner opts in."""
     vol_lookback: int = Field(default=60, ge=5)
     abs_momentum_threshold: float | None = Field(default=0.0)
     """If set, exclude names whose formation return is below this floor.
@@ -131,9 +137,19 @@ class TopKMomentum(Strategy):
 
         weights = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
 
-        # --- rebalance bars: every R bars, starting after warm-up --------
+        # --- rebalance bars ------------------------------------------------
+        # A rolling runner price window has a moving first row. Plain
+        # ``arange(warmup, n_t, R)`` consequently slides the rebalance date
+        # every time the cache shifts by one session. Calendar mode anchors
+        # the choice to an exchange month instead; it is opt-in so existing
+        # research remains reproducible until it has passed paper testing.
         warmup = max(p.lookback, p.vol_lookback)
-        rebal_idx = np.arange(warmup, n_t, p.rebalance)
+        rebal_idx = _rebalance_indices(
+            prices.index,
+            warmup=warmup,
+            rebalance=p.rebalance,
+            calendar_months=p.calendar_rebalance_months,
+        )
 
         # ``current_w`` holds the latest selected row; off-rebalance bars
         # carry it forward. This is what the runner sees if it queries the
@@ -227,6 +243,31 @@ class TopKMomentum(Strategy):
             formation = formation.where(formation > p.abs_momentum_threshold)
         ranked = formation.dropna().sort_values(ascending=False).head(top_n)
         return [(str(sym), float(score)) for sym, score in ranked.items()]
+
+
+def _rebalance_indices(
+    index: pd.Index,
+    *,
+    warmup: int,
+    rebalance: int,
+    calendar_months: int | None,
+) -> np.ndarray:
+    """Rebalance rows, optionally pinned to calendar month-end sessions."""
+    if calendar_months is None:
+        return np.arange(warmup, len(index), rebalance)
+    if warmup >= len(index):
+        return np.array([], dtype=int)
+    # Period arithmetic, not a mutable last-rebalance file, makes the
+    # schedule deterministic across restarts and overlapping cache windows.
+    dates = pd.DatetimeIndex(index)
+    if dates.tz is not None:
+        dates = dates.tz_localize(None)
+    months = dates.to_period("M")
+    anchor = pd.Period("2000-01", freq="M").ordinal
+    eligible = np.array([(period.ordinal - anchor) % calendar_months == 0 for period in months])
+    # One decision per eligible month: the final available trading session.
+    last_of_month = np.r_[months[:-1] != months[1:], True]
+    return np.flatnonzero(eligible & last_of_month & (np.arange(len(index)) >= warmup))
 
 
 def _decorrelated_topk(

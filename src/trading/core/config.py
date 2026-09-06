@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     agents_model: str | None = Field(default=None, alias="AGENTS_MODEL")
+    # Keep the high-volume specialist tier independently configurable from
+    # the decision tier.  The latter is deliberately more capable and gets
+    # a larger output budget; an eight-person committee must not silently
+    # inherit that cost on every routine observation.
+    agents_model_frontier: str | None = Field(default=None, alias="AGENTS_MODEL_FRONTIER")
+    agents_max_tokens: int = Field(default=2_400, alias="AGENTS_MAX_TOKENS", ge=256, le=32_000)
+    agents_frontier_max_tokens: int = Field(
+        default=8_000, alias="AGENTS_FRONTIER_MAX_TOKENS", ge=256, le=64_000
+    )
+    agents_effort: Literal["low", "medium", "high"] = Field(default="medium", alias="AGENTS_EFFORT")
+    agents_frontier_effort: Literal["low", "medium", "high"] = Field(
+        default="high", alias="AGENTS_FRONTIER_EFFORT"
+    )
     # Hard dollar cap for the agent-PM sleeve IF/WHEN it is bridged into
     # the real order path (GO_LIVE.md §4). The $1M sim book deliberately
     # ignores this — it exists so the bridge, when built, sizes PM target

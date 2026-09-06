@@ -372,6 +372,71 @@ def _budgeted_manager_prompt(payload: dict[str, Any], budget: int = MANAGER_PROM
     return json.dumps(p, default=str)
 
 
+def _record_committee_selection_snapshot(
+    mem: MemoryStore, context: dict[str, Any], takes: dict[str, dict[str, Any]]
+) -> None:
+    """Grade explicit committee preferences against the same ladder as PM.
+
+    A committee view is distinct from the mechanical ranking and from the
+    later PM selection.  Only an exact ticker match is recorded — inferring a
+    name from prose would make the ledger look more precise than the actual
+    decision.  The resulting rows are graded by the shared 5/21/63-day
+    counterfactual process.
+    """
+    try:
+        ladder_raw = context.get("candidate_ladder")
+        ladder = ladder_raw if isinstance(ladder_raw, dict) else {}
+        ranked = ladder.get("ranked")
+        if not isinstance(ranked, list):
+            return
+        rows = [row for row in ranked if isinstance(row, dict) and row.get("symbol")]
+        symbols = {str(row["symbol"]).upper() for row in rows}
+        recommendations: set[str] = set()
+        compact_takes: dict[str, Any] = {}
+        for agent, take in takes.items():
+            prediction_raw = take.get("prediction") if isinstance(take, dict) else None
+            prediction = prediction_raw if isinstance(prediction_raw, dict) else {}
+            subject = str(prediction.get("subject", "")).upper().strip()
+            direction = str(prediction.get("direction", "")).lower()
+            if subject in symbols and direction == "up":
+                recommendations.add(subject)
+                compact_takes[agent] = {
+                    "subject": subject,
+                    "direction": direction,
+                    "confidence": prediction.get("confidence"),
+                    "take": str(take.get("take", ""))[:800],
+                }
+        if not recommendations:
+            return
+        snapshot = {
+            "candidate_ladder_as_of": ladder.get("as_of"),
+            "candidate_ladder_source": ladder.get("source"),
+            "recommendations": compact_takes,
+        }
+        conditions = dict(context.get("lesson_conditions") or {})
+        for row in rows:
+            symbol = str(row["symbol"]).upper()
+            mem.add_shadow(
+                symbol=symbol,
+                origin="committee_recommendation",
+                disposition="taken" if symbol in recommendations else "passed",
+                rank=int(row["rank"]) if isinstance(row.get("rank"), int) else None,
+                score=float(row["score"]) if isinstance(row.get("score"), (int, float)) else None,
+                why="committee explicitly bullish"
+                if symbol in recommendations
+                else "committee passed",
+                conditions=conditions,
+                snapshot=snapshot,
+                pctile_52w=(
+                    float(row["pctile_52w"])
+                    if isinstance(row.get("pctile_52w"), (int, float))
+                    else None
+                ),
+            )
+    except Exception:
+        logger.bind(component="agents").exception("committee selection snapshot write failed")
+
+
 def run_committee(
     context: dict[str, Any],
     mem: MemoryStore,
@@ -482,6 +547,7 @@ def run_committee(
         "disagreement_index": disagreement,
         "guard_flags": guard_flags,
     }
+    _record_committee_selection_snapshot(mem, context, takes)
     mem.journal("committee", {"ruling": ruling, "disagreement": disagreement}, actor="manager")
     return digest
 

@@ -165,6 +165,7 @@ CREATE TABLE IF NOT EXISTS shadow (
     score        REAL,                   -- the ranking score at the time
     why          TEXT NOT NULL DEFAULT '',
     conditions   TEXT NOT NULL DEFAULT '{}',  -- JSON regime fingerprint
+    snapshot     TEXT NOT NULL DEFAULT '{}',  -- immutable decision provenance
     px_at        REAL,                   -- close on the day of the decision
     pctile_52w   REAL,                   -- 0=52w low, 1=52w high, at decision time
     r5           REAL,
@@ -435,6 +436,7 @@ class MemoryStore:
             ("lesson_evidence", "reason", "TEXT NOT NULL DEFAULT ''"),
             ("lessons", "conditions", "TEXT NOT NULL DEFAULT '{}'"),
             ("lessons", "last_reviewed_ts", "REAL"),
+            ("shadow", "snapshot", "TEXT NOT NULL DEFAULT '{}'"),
         ):
             with contextlib.suppress(sqlite3.OperationalError):  # already present
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
@@ -1822,6 +1824,7 @@ class MemoryStore:
         score: float | None = None,
         why: str = "",
         conditions: dict[str, Any] | None = None,
+        snapshot: dict[str, Any] | None = None,
         px_at: float | None = None,
         pctile_52w: float | None = None,
         ts: float | None = None,
@@ -1831,8 +1834,8 @@ class MemoryStore:
         self.conn.execute(
             """INSERT INTO shadow
                (id, ts, symbol, origin, disposition, rank, score, why,
-                conditions, px_at, pctile_52w)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                conditions, snapshot, px_at, pctile_52w)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 sid,
                 ts if ts is not None else _now(),
@@ -1843,6 +1846,7 @@ class MemoryStore:
                 score,
                 why[:300],
                 json.dumps(conditions or {}, default=str),
+                json.dumps(snapshot or {}, default=str),
                 px_at,
                 pctile_52w,
             ),

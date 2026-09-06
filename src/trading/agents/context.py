@@ -280,14 +280,23 @@ def build_context(
         logger.bind(component="agents").warning(f"context: recent exits unavailable ({e})")
 
     # --- the ranked candidate ladder: the ONLY channel through which a
-    # name the desk doesn't already own can reach an agent. Without it the
-    # context named nothing but current holdings, and every allocator
-    # downstream re-picked the book it was shown (see agents/candidates.py).
+    # name the desk doesn't already own can reach an agent.  Prefer the
+    # runner-written snapshot: it has the actual live playbook, screens,
+    # runtime parameter overrides and price frame behind it.  The cache
+    # rebuild below is retained only as a degraded fallback for a runner
+    # that has not completed its first cycle yet.
     if include_candidate_ladder:
         try:
-            from trading.agents.candidates import build_candidate_ladder
+            from trading.agents.candidates import (
+                build_candidate_ladder,
+                load_runner_candidate_snapshot,
+            )
 
-            ladder = build_candidate_ladder(data_dir)
+            ladder = load_runner_candidate_snapshot(state_dir)
+            if ladder is None:
+                ladder = build_candidate_ladder(data_dir)
+                if ladder:
+                    ladder["source"] = "cache_fallback"
             if ladder:
                 ctx["candidate_ladder"] = ladder
         except Exception as e:

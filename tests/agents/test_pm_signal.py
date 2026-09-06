@@ -145,6 +145,11 @@ class TestFreshness:
         )
         assert load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.05).ok
 
+    def test_stale_candidate_snapshot_cannot_reach_the_bridge(self, tmp_path: Path) -> None:
+        write_decision(tmp_path, candidate_ladder_stale=True)
+        result = load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.05)
+        assert not result.ok and "snapshot is stale" in result.reason
+
 
 class TestSleeveScaling:
     def test_weights_are_scaled_onto_the_sleeve(self, tmp_path: Path) -> None:
@@ -201,6 +206,43 @@ class TestInstrumentMapping:
         r = load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10)
         assert r.signal is not None
         assert list(r.signal.target_weights) == ["equity:AAPL"]
+
+
+class TestStructuredExceptions:
+    def test_off_ladder_target_requires_explicit_approval_and_honours_approved_budget(
+        self, tmp_path: Path
+    ) -> None:
+        from trading.agents.exceptions import (
+            normalise_proposal,
+            record_proposals,
+            set_exception_status,
+        )
+
+        write_decision(tmp_path, weights={"JPM": 0.10}, off_ladder_targets=["JPM"])
+        blocked = load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10)
+        assert not blocked.ok and "approval" in blocked.reason
+
+        proposal = normalise_proposal(
+            {
+                "thesis": "Bank net-interest margin expectations are improving while credit losses remain contained.",
+                "source_ids": ["headline:bank-margins"],
+                "horizon_days": 21,
+                "invalidation": "JPM guides to a material net-interest-income decline.",
+                "max_weight": 0.05,
+                "sector_impact": "Adds one financials position to an otherwise technology-heavy sleeve.",
+            },
+            symbol="JPM",
+            origin="agent",
+            requested_weight=0.10,
+            now=NOW,
+        )
+        assert proposal is not None
+        recorded = record_proposals(tmp_path, [proposal])
+        assert set_exception_status(tmp_path, recorded[0]["id"], "approved", now=NOW) is not None
+
+        allowed = load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10)
+        assert allowed.signal is not None
+        assert allowed.signal.target_weights["equity:JPM"] == pytest.approx(0.005)
 
 
 class TestNeverRaises:

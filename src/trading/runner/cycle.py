@@ -702,8 +702,18 @@ class Cycle:
         # the approval prompt and discarded minutes later. Recording the
         # names below the cut is the only way to ever answer whether the
         # ranking step adds anything — see docs/LEARNING_ARCHITECTURE.md.
+        ranked_candidates = self._publish_candidate_snapshot(
+            prices, signal, cfg=cfg, position_symbols=position_symbols
+        )
         if not review_only:
-            self._record_shadow_ladder(prices, signal, last_prices, cfg=cfg)
+            self._record_shadow_ladder(
+                prices,
+                signal,
+                last_prices,
+                cfg=cfg,
+                ranked_candidates=ranked_candidates,
+                position_symbols=position_symbols,
+            )
 
         # 7c. Agent PM bridge. Deliberately AFTER the shadow ladder, so the
         # counterfactual keeps measuring the mechanical strategy's ranking
@@ -958,7 +968,9 @@ class Cycle:
         # /approve's, /reject's, /pick's a different basket, or the
         # timeout fires. Default paper mode skips this entirely.
         if _settings.require_cycle_approval and orders:
-            candidates = self._compute_top_candidates(prices, cfg=cfg)
+            candidates = self._compute_top_candidates(
+                prices, cfg=cfg, position_symbols=position_symbols
+            )
 
             def _risk_rebuild(revised_signal: Signal) -> tuple[list[Any], list[RiskDecision]]:
                 """Re-price an operator revision through the normal risk path.
@@ -3299,6 +3311,7 @@ class Cycle:
         *,
         cfg: RunnerConfig | None = None,
         top_n: int = 20,
+        position_symbols: set[str] | None = None,
     ) -> list[tuple[str, float]] | None:
         """Ask the first strategy that supports it for its top-N
         candidates. Used by the approval prompt to give the operator
@@ -3319,7 +3332,9 @@ class Cycle:
                 from trading.core.config import settings as _settings_k2
                 from trading.runner.holds import apply_runtime_overrides
 
-                params, _ = apply_runtime_overrides(params, _settings_k2.state_dir)
+                params, _ = apply_runtime_overrides(
+                    params, _settings_k2.state_dir, position_symbols=position_symbols
+                )
                 ranked = cls(params=params).top_candidates(prices, top_n=top_n)
                 # Offering an excluded name on the approval scoreboard is
                 # an invitation to pick something the order path will then
@@ -3349,6 +3364,8 @@ class Cycle:
         last_prices: dict[str, float],
         *,
         cfg: RunnerConfig | None = None,
+        ranked_candidates: list[tuple[str, float]] | None = None,
+        position_symbols: set[str] | None = None,
     ) -> None:
         """Write every ranked candidate to the counterfactual ledger.
 
@@ -3361,13 +3378,22 @@ class Cycle:
         never cost a cycle.
         """
         try:
-            ranked = self._compute_top_candidates(prices, cfg=cfg, top_n=30)
+            ranked = ranked_candidates or self._compute_top_candidates(
+                prices, cfg=cfg, top_n=30, position_symbols=position_symbols
+            )
             if not ranked:
                 return
             chosen = bought_symbols(signal.target_weights)
             px_by_symbol = {k.split(":")[-1].upper(): v for k, v in (last_prices or {}).items()}
             conditions = self._regime_fingerprint(prices)
             pctiles = self._entry_percentiles(prices)
+            snapshot = {
+                "mechanical_strategy": "+".join((cfg or self.config).strategies),
+                "universe": (cfg or self.config).universe,
+                "strategy_params": dict((cfg or self.config).strategy_params),
+                "selected_symbols": sorted(chosen),
+                "ranked_count": len(ranked),
+            }
 
             from trading.memory.store import default_store
 
@@ -3386,6 +3412,7 @@ class Cycle:
                         score=float(score),
                         why=f"rank {i} of {len(ranked)}",
                         conditions=conditions,
+                        snapshot=snapshot,
                         px_at=px_by_symbol.get(sym),
                         pctile_52w=pctiles.get(sym),
                     )
@@ -3401,6 +3428,46 @@ class Cycle:
             )
         except Exception:
             logger.bind(component="cycle").exception("shadow ladder write failed")
+
+    def _publish_candidate_snapshot(
+        self,
+        prices: pd.DataFrame,
+        signal: Signal,
+        *,
+        cfg: RunnerConfig,
+        position_symbols: set[str] | None = None,
+    ) -> list[tuple[str, float]] | None:
+        """Publish exactly the ranked input behind this cycle's strategy.
+
+        This is intentionally before the PM bridge and risk manager: it
+        describes the mechanical baseline, not a proposed trade.  It is also
+        deliberately best-effort.  A dashboard/agent observability artifact
+        must never affect whether a risk-managed order is considered.
+        """
+        try:
+            ranked = self._compute_top_candidates(
+                prices, cfg=cfg, top_n=30, position_symbols=position_symbols
+            )
+            if not ranked:
+                return None
+            from trading.agents.candidates import (
+                build_runner_candidate_snapshot,
+                write_runner_candidate_snapshot,
+            )
+
+            snapshot = build_runner_candidate_snapshot(
+                prices,
+                ranked=ranked,
+                selected=bought_symbols(signal.target_weights),
+                config=cfg,
+                generated_at=self._clock(),
+            )
+            if snapshot is not None:
+                write_runner_candidate_snapshot(self._state_dir(), snapshot)
+            return ranked
+        except Exception:
+            logger.bind(component="cycle").exception("candidate snapshot write failed")
+            return None
 
     def _entry_percentiles(self, prices: pd.DataFrame, window: int = 252) -> dict[str, float]:
         """Where each name sits in its 52-week range today, 0=low, 1=high.

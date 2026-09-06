@@ -225,6 +225,15 @@ def load_pm_signal(
     if not raw.get("ok"):
         return PMSignalResult(None, f"last PM run failed: {raw.get('reason', 'unknown')}")
 
+    # A PM decision made from stale ranks is a research artifact, not a
+    # tradeable signal.  The mechanical strategy has its own cache/risk
+    # safeguards; this gate prevents the discretionary sleeve from turning
+    # yesterday's agent narrative into a fresh live entry.
+    if raw.get("candidate_ladder_stale") is True:
+        return PMSignalResult(
+            None, "PM candidate snapshot is stale — not trading discretionary entries"
+        )
+
     try:
         decided_at = datetime.fromisoformat(str(raw["ts"]))
     except Exception:
@@ -254,9 +263,21 @@ def load_pm_signal(
             None, "PM decision carries no weights", decided_at=decided_at, age_hours=age_h
         )
 
+    from trading.agents.exceptions import approved_exception_limits
+
+    approved_limits = approved_exception_limits(state_dir, now=now)
+    off_ladder_targets = {
+        str(symbol).upper().strip() for symbol in raw.get("off_ladder_targets", [])
+    }
+    approval_blocked = sorted(off_ladder_targets - set(approved_limits))
+
     keyed: dict[str, float] = {}
     dropped: list[str] = []
     for sym, w in weights.items():
+        normalized = str(sym).upper().strip()
+        if normalized in approval_blocked:
+            dropped.append(f"{normalized} (off-ladder approval required)")
+            continue
         try:
             w = float(w)
         except (TypeError, ValueError):
@@ -264,7 +285,11 @@ def load_pm_signal(
             continue
         if w <= 0:
             continue
-        ins = _instrument_for(str(sym).upper().strip())
+        if normalized in approved_limits:
+            # Preserve the reviewed risk budget even if the PM revises its
+            # rationale between approval and the live cycle.
+            w = min(w, approved_limits[normalized])
+        ins = _instrument_for(normalized)
         if tradeable_keys is not None and ins.key not in tradeable_keys:
             dropped.append(ins.symbol)
             continue
@@ -277,7 +302,11 @@ def load_pm_signal(
     if not keyed:
         return PMSignalResult(
             None,
-            "no PM target survived instrument mapping",
+            (
+                "all off-ladder PM targets await operator approval"
+                if approval_blocked
+                else "no PM target survived instrument mapping"
+            ),
             decided_at=decided_at,
             age_hours=age_h,
             dropped=sorted(dropped),
