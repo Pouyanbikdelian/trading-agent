@@ -324,6 +324,7 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
             "stats": mem.stats(),
             "calibration": mem.calibration(),
             "trust": mem.trust_table(min_graded=1)[:10],
+            "curator": mem.curator_summary(),
             "lessons": [
                 {"id": r["id"], "status": r["status"], "statement": r["statement"]}
                 for r in mem.lessons()[:8]
@@ -537,7 +538,9 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  <div class="card"><h2>Vitals</h2><div id="memstats"></div></div>
  <div class="card"><h2>Agent calibration</h2><div id="memcal"></div></div>
  <div class="card"><h2>Source trust</h2><div id="memtrust"></div></div>
+ <div class="card"><h2>Learning Curator</h2><div id="memcurator"></div></div>
  <div class="card big"><h2>Lessons</h2><div id="memlessons"></div></div>
+ <div class="card big"><h2>Latest Curator review & lesson lifecycle</h2><div id="memcuratorchanges"></div></div>
 </div></div>
 
 <script>
@@ -548,6 +551,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
 const pct=(x,d=1)=>x==null?'–':((x>=0?'+':'')+(100*x).toFixed(d)+'%');
 const fx=(x,d=1)=>x==null?'–':Number(x).toFixed(d);
 const num=(x)=>x==null?'–':Number(x).toLocaleString(undefined,{maximumFractionDigits:0});
+const esc=(x)=>String(x??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const line=(el,labels,sets)=>{
  const cv=document.getElementById(el);
  const scales={x:{ticks:{color:'#8b98a5',maxTicksLimit:el.startsWith('ec')?12:7}},y:{ticks:{color:'#8b98a5'}}};
@@ -871,7 +875,7 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
    <span class="src">— ${h.source||'?'}</span></div>`).join(''):
   '<span class="muted">no headlines collected yet</span>';
 
- // Schedule: next occurrences of the recurring jobs (computed in UTC).
+ // Schedule: next occurrences of the recurring jobs (displayed in UTC).
  // The cycle and the PM run are DERIVED from the runner's actual cron
  // (CRON in .env); the PM lead is supplied by the same environment setting
  // as runner._precycle_trigger. These were hardcoded to Fri 21:05 and
@@ -891,20 +895,24 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  const cyc=parseCron(d.cycle_cron);
  const envl=d.env||'paper';
  const jobs=[
-  {n:'🏛 committee',dow:[1,2,3,4,5],h:14,m:0},
-  {n:'📰 news watch',dow:[1,2,3,4,5],h:13,m:40},
-  {n:'📊 PM daily mark',dow:[1,2,3,4,5],h:21,m:15},
-  {n:'🎓 prediction grading',dow:[0,1,2,3,4,5,6],h:22,m:30},
-  {n:'📜 historian',dow:[5],h:22,m:45}];
+ {n:'🏛 committee',dow:[1,2,3,4,5],h:14,m:0},
+ {n:'📰 news watch',dow:[1,2,3,4,5],h:13,m:40},
+ {n:'📊 PM daily mark',dow:[1,2,3,4,5],h:21,m:15},
+ {n:'🎓 prediction grading',dow:[0,1,2,3,4,5,6],h:22,m:30},
+  {n:'📚 Learning Curator',dow:[2,5],h:19,m:0,tz:'America/New_York'}];
  if(cyc){
   const pm=shift(cyc,Number(d.pm_pre_cycle_lead_minutes)||45);
   if(pm) jobs.push({n:'🧪 PM rebalance',...pm});
   jobs.push({n:'⚖️ rebalance ('+envl+')',...cyc});
  }
  const nowU=new Date();
+ const zoneParts=(date,tz)=>{const out={};new Intl.DateTimeFormat('en-US',{timeZone:tz,weekday:'short',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric',hourCycle:'h23'}).formatToParts(date).forEach(p=>{out[p.type]=p.value;});return {y:+out.year,m:+out.month,d:+out.day,h:+out.hour,min:+out.minute,sec:+out.second,weekday:out.weekday};};
+ const zoneDow={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6};
+ const localInstant=(p,h,m,tz)=>{let ms=Date.UTC(p.y,p.m-1,p.d,h,m,0);for(let i=0;i<2;i++){const seen=zoneParts(new Date(ms),tz);ms=Date.UTC(p.y,p.m-1,p.d,h,m,0)-(Date.UTC(seen.y,seen.m-1,seen.d,seen.h,seen.min,seen.sec)-ms);}return new Date(ms);};
  const nextOf=j=>{for(let i=0;i<8;i++){
-   const c=new Date(Date.UTC(nowU.getUTCFullYear(),nowU.getUTCMonth(),nowU.getUTCDate()+i,j.h,j.m));
-   if(c>nowU&&j.dow.includes(c.getUTCDay()))return c;}return null;};
+   if(!j.tz){const c=new Date(Date.UTC(nowU.getUTCFullYear(),nowU.getUTCMonth(),nowU.getUTCDate()+i,j.h,j.m));if(c>nowU&&j.dow.includes(c.getUTCDay()))return c;continue;}
+   const local=zoneParts(new Date(Date.UTC(nowU.getUTCFullYear(),nowU.getUTCMonth(),nowU.getUTCDate()+i,12)),j.tz);
+   const c=localInstant(local,j.h,j.m,j.tz);if(c>nowU&&j.dow.includes(zoneDow[local.weekday]))return c;}return null;};
  document.getElementById('sched').innerHTML=jobs.map(j=>({j,c:nextOf(j)})).filter(x=>x.c)
   .sort((a,b)=>a.c-b.c).slice(0,5).map(({j,c})=>{
    const mins=Math.round((c-nowU)/6e4);
@@ -1222,11 +1230,26 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  const me=d.memory||{};const st=me.stats||{};
  document.getElementById('memstats').innerHTML=['journal','episodes','lessons','dossiers','predictions','sources']
   .map(k=>`<span class="tile"><b>${st[k]??0}</b><br><span class="muted">${k}</span></span>`).join('');
- const cal=(me.calibration||[]).map(c=>`<tr><td>${c.agent}</td><td>${c.n}</td><td>${pct(c.hit_rate,0)}</td><td>${(c.brier??0).toFixed(2)}</td></tr>`).join('');
+ const cal=(me.calibration||[]).map(c=>`<tr><td>${esc(c.agent)}</td><td>${c.n}</td><td>${pct(c.hit_rate,0)}</td><td>${(c.brier??0).toFixed(2)}</td></tr>`).join('');
  document.getElementById('memcal').innerHTML=cal?`<table><tr><th>agent</th><th>n</th><th>hit</th><th>brier</th></tr>${cal}</table>`:'<span class="muted">no graded predictions yet</span>';
- const tr=(me.trust||[]).map(t=>`<tr><td>${t.source}</td><td>${t.trust.toFixed(2)}</td><td>${t.graded}</td></tr>`).join('');
+ const tr=(me.trust||[]).map(t=>`<tr><td>${esc(t.source)}</td><td>${t.trust.toFixed(2)}</td><td>${t.graded}</td></tr>`).join('');
  document.getElementById('memtrust').innerHTML=tr?`<table><tr><th>source</th><th>trust</th><th>graded</th></tr>${tr}</table>`:'<span class="muted">no sources graded yet</span>';
- document.getElementById('memlessons').innerHTML=(me.lessons||[]).map(l=>`<div class="pill">${l.status}: ${l.statement.slice(0,110)}</div>`).join('')||'<span class="muted">no lessons yet</span>';
+ document.getElementById('memlessons').innerHTML=(me.lessons||[]).map(l=>`<div class="pill">${esc(l.status)}: ${esc(String(l.statement||'').slice(0,110))}</div>`).join('')||'<span class="muted">no lessons yet</span>';
+ const cu=me.curator||{}, cs=cu.status_counts||{}, lr=cu.last_run;
+ const curatorTiles=['candidate','established','challenged','archived']
+  .map(k=>`<span class="tile"><b>${cs[k]??0}</b><br><span class="muted">${k}</span></span>`).join('');
+ const curatorState=lr?.health||lr?.status||'';
+ const curatorLast=lr?`<div class="pill ${curatorState==='ok'?'ok':curatorState==='stale'?'stale':'warn'}">${esc(curatorState)} · ${esc(new Date(lr.ts).toLocaleString())}</div>
+   <div class="muted">${lr.reviewed??0} reviewed · ${lr.voted??0} evidence votes${lr.vote_ok===false?' · voter degraded':''}${lr.age_hours!=null?` · ${lr.age_hours}h ago`:''}</div>
+   ${lr.reason?`<div class="muted">${esc(lr.reason)}</div>`:''}`:'<span class="muted">no Curator review has been recorded yet</span>';
+ const recs=(cu.archive_recommendations||[]).map(r=>`<div class="pill warn">archive review: ${esc(String(r.statement||'').slice(0,100))} (${r.outcome_contradict} contradict / ${r.outcome_support} support)</div>`).join('');
+ document.getElementById('memcurator').innerHTML=curatorTiles+`<div class="muted">${cu.queue?.candidate_unreviewed??0} candidates awaiting first review</div>`+curatorLast+(recs||'');
+ const reviewActions=(cu.recent_review_actions||[]).map(x=>`<div class="pill">${esc(x.action)} · ${esc(String(x.lesson_id||'review').slice(0,110))}${x.reason?` — ${esc(x.reason)}`:''}</div>`).join('');
+ const life=(cu.changes||[]).map(x=>`<div class="pill">${esc(x.action)}${x.actor?` by ${esc(x.actor)}`:''} · ${esc(String(x.statement||x.lesson_id||'').slice(0,110))}${x.reason?` — ${esc(x.reason)}`:''}</div>`).join('');
+ const top=(cu.top_lessons||[]).map(x=>`<div class="pill">evidence rank · ${esc(String(x.statement||'').slice(0,100))} (${x.outcome_support}/${x.outcome_contradict})</div>`).join('');
+ const reviewSection=reviewActions?`<div class="muted">Latest Curator review</div>${reviewActions}`:'';
+ const lifecycleSection=life?`<div class="muted">Lesson lifecycle</div>${life}`:'';
+ document.getElementById('memcuratorchanges').innerHTML=reviewSection+lifecycleSection||top||'<span class="muted">No Curator review actions or lesson lifecycle changes have been recorded.</span>';
 });
 </script></body></html>"""
 

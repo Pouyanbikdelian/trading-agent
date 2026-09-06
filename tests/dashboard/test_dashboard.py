@@ -44,6 +44,39 @@ def test_build_summary_sections(populated_state) -> None:
     assert "context" in out and "generated_at" in out
 
 
+def test_dashboard_exposes_learning_curator_health_and_audit(populated_state) -> None:
+    state, data = populated_state
+    mem = MemoryStore(state / "memory")
+    lesson_id = mem.lessons(status="candidate")[0]["id"]
+    mem.record_curator_run(
+        status="completed",
+        conditions={"vol_bucket": "elevated"},
+        reviewed=1,
+        created=0,
+        voted=0,
+        vote_ok=True,
+        archive_recommendations=0,
+        actions=[
+            {
+                "lesson_id": lesson_id,
+                "rank": 1,
+                "action": "awaiting_evidence",
+                "before_status": "candidate",
+                "after_status": "candidate",
+                "reason": "No measured outcome yet.",
+                "evidence_ids": [],
+            }
+        ],
+    )
+
+    out = build_summary(state, data)
+
+    curator = out["memory"]["curator"]
+    assert curator["last_run"]["status"] == "completed"
+    assert curator["status_counts"]["candidate"] == 1
+    assert curator["recent_review_actions"][0]["lesson_id"] == lesson_id
+
+
 def test_build_summary_degrades_on_empty_dirs(tmp_path) -> None:
     out = build_summary(tmp_path / "nope", tmp_path / "nada")
     assert out["equity_curve"] == []

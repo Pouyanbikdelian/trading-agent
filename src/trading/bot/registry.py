@@ -79,8 +79,8 @@ REGISTRY: tuple[Spec, ...] = (
     ),
     Spec(
         "/lesson",
-        "propose a durable desk lesson; approval applies it",
-        usage="/lesson <what the desk should remember, and when it applies>",
+        "propose or manage a durable desk lesson; approval applies changes",
+        usage="/lesson <text> | show|edit|archive|restore <lesson-id>",
         example="/lesson I want you to add this lesson: never average into a falling knife",
     ),
     Spec(

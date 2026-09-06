@@ -268,6 +268,126 @@ def test_historian_lesson_cannot_be_silently_rewritten(tmp_path: Path) -> None:
     assert "not an active operator lesson" in store.propose_lesson_archive(lesson_id).message
 
 
+def test_operator_lookalike_tag_cannot_gain_edit_or_archive_authority(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    mem = MemoryStore(tmp_path / "state" / "memory")
+    lesson_id = mem.add_lesson(
+        "A machine-authored tag must not imitate a reserved human role.", tags="operator-ish"
+    )
+    mem.close()
+
+    assert (
+        store.propose_lesson_supersede(
+            lesson_id, "This must never be staged as an operator edit."
+        ).proposal
+        is None
+    )
+    assert store.propose_lesson_archive(lesson_id).proposal is None
+
+
+def test_curator_archive_and_restore_both_require_approval(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    mem = MemoryStore(tmp_path / "state" / "memory")
+    lesson_id = mem.add_lesson("A narrow breakout should remain challenged after failures.")
+    outcomes: list[str] = []
+    for index in range(6):
+        prediction_id = mem.add_prediction(
+            agent="quant",
+            subject=f"S{index}",
+            direction="up",
+            horizon_days=5,
+            confidence=0.6,
+            statement="curator archive evidence",
+        )
+        mem.grade_prediction(prediction_id, realized_move=0.02 if index < 3 else -0.02)
+        outcomes.append(prediction_id)
+    for prediction_id in outcomes[:3]:
+        assert mem.add_evidence(lesson_id, prediction_id, supports=True)
+    for prediction_id in outcomes[3:]:
+        assert mem.add_evidence(lesson_id, prediction_id, supports=False)
+    assert mem.lessons(status="challenged")[0]["id"] == lesson_id
+    mem.close()
+
+    staged = store.propose_lesson_archive(lesson_id)
+    assert staged.proposal is not None
+    assert staged.proposal.kind == "lesson_curator_archive"
+    assert (
+        MemoryStore(tmp_path / "state" / "memory").lessons(status="challenged")[0]["id"]
+        == lesson_id
+    )
+
+    assert "Archived Curator lesson" in store.approve(staged.proposal.id).message
+    archived = MemoryStore(tmp_path / "state" / "memory")
+    assert archived.lessons(status="retired")[0]["id"] == lesson_id
+    archived.close()
+
+    restored = store.propose_lesson_restore(
+        lesson_id, "Fresh data warrants another evidence review."
+    )
+    assert restored.proposal is not None
+    assert restored.proposal.kind == "lesson_restore"
+    assert "Restored lesson" in store.approve(restored.proposal.id).message
+    reloaded = MemoryStore(tmp_path / "state" / "memory")
+    assert reloaded.lessons(status="candidate")[0]["id"] == lesson_id
+    reloaded.close()
+
+
+def test_staged_curator_archive_rechecks_evidence_state_on_approval(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    mem = MemoryStore(tmp_path / "state" / "memory")
+    lesson_id = mem.add_lesson("A stale archive proposal must not race a later lesson decision.")
+    outcomes: list[str] = []
+    for index in range(6):
+        prediction_id = mem.add_prediction(
+            agent="quant",
+            subject=f"R{index}",
+            direction="up",
+            horizon_days=5,
+            confidence=0.6,
+            statement="curator approval race evidence",
+        )
+        mem.grade_prediction(prediction_id, realized_move=0.02 if index < 3 else -0.02)
+        outcomes.append(prediction_id)
+    for prediction_id in outcomes[:3]:
+        assert mem.add_evidence(lesson_id, prediction_id, supports=True)
+    for prediction_id in outcomes[3:]:
+        assert mem.add_evidence(lesson_id, prediction_id, supports=False)
+    mem.close()
+
+    staged = store.propose_lesson_archive(lesson_id).proposal
+    assert staged is not None
+    changed = MemoryStore(tmp_path / "state" / "memory")
+    assert changed.set_lesson_status(lesson_id, "candidate", actor="operator")
+    changed.close()
+
+    result = store.approve(staged.id)
+    assert "no longer a challenged lesson" in result.message
+    reloaded = MemoryStore(tmp_path / "state" / "memory")
+    assert reloaded.lessons(status="candidate")[0]["id"] == lesson_id
+    reloaded.close()
+
+
+def test_expired_lesson_restore_proposal_cannot_mutate_memory(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    store = _store(tmp_path, FixedClock(now))
+    mem = MemoryStore(tmp_path / "state" / "memory")
+    lesson_id = mem.add_lesson("An expired restore must not revive a lesson.")
+    assert mem.retire_lesson(lesson_id, "Archived for expiry test")
+    mem.close()
+
+    staged = store.propose_lesson_restore(
+        lesson_id, "Fresh evidence warrants another review."
+    ).proposal
+    assert staged is not None
+    assert isinstance(store.clock, FixedClock)
+    store.clock.instant = now + timedelta(minutes=11)
+
+    assert "no longer pending" in store.approve(staged.id).message
+    reloaded = MemoryStore(tmp_path / "state" / "memory")
+    assert reloaded.lessons(status="retired")[0]["id"] == lesson_id
+    reloaded.close()
+
+
 def test_plain_english_watchlist_request_stages_then_plain_approve_applies(
     tmp_path: Path, monkeypatch
 ) -> None:

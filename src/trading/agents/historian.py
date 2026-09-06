@@ -1,4 +1,4 @@
-"""The Historian — turns recent evidence into at most two lessons per pass.
+"""The Learning Curator — turns recent evidence into durable lessons.
 
 The memory store has had the full lesson lifecycle since day one —
 candidate -> established -> challenged -> retired — but nothing ever
@@ -15,7 +15,9 @@ rebalances) plus the current lesson book, and produces:
   a graded prediction or closed episode. Weekly review can interpret the
   evidence, but cannot manufacture it; only three net measured outcomes
   establish a candidate.
-* **retirements** for challenged lessons the evidence has turned against.
+* **archive recommendations** for challenged machine lessons whose measured
+  evidence has turned decisively against them.  An operator must approve an
+  archive; the Curator never silently removes a belief from the vault.
 
 Advisory infrastructure: journal + lesson cards + Telegram. No order path.
 """
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -36,7 +39,7 @@ LlmFn = Callable[[str, str], dict[str, Any]]
 MAX_NEW_LESSONS = 2
 
 HISTORIAN_CHARTER = (
-    "You are the Historian of a systematic trading desk. You will see one "
+    "You are the Learning Curator (the desk's Historian) of a systematic trading desk. You will see one "
     "week of journal entries (graded predictions with outcomes, committee "
     "rulings, portfolio changes), a current lesson book, and a compact "
     "long-horizon historical dossier. Your job is distillation, not "
@@ -91,17 +94,16 @@ HISTORIAN_CHARTER = (
     "guardrails against rediscovering an old mistake: explicitly explain why "
     "a materially similar proposal is different, or omit it. A challenged "
     "lesson has already lost sufficient outcome support to leave agent "
-    "context. You may propose retiring a CHALLENGED lesson when the evidence "
-    "is conclusive; do not retire an established lesson directly. Respond "
-    "ONLY with JSON:\n"
+    "context. Archival is determined by a separate, evidence-gated operator "
+    "workflow; do not recommend or perform it here. Respond ONLY with JSON:\n"
     '{"new_lessons": [{"title": "<5-8 word label>", '
     '"body": "<4-sentence elaboration>", '
     '"applies_when": "<conditions where it holds>", '
     '"fails_when": "<conditions where it fails or evidence is silent>", '
     '"invalidated_if": "<the observation that retires it>", '
     '"sample": "<distinct names / weeks / episodes and over what period>", '
-    '"tags": "<comma,separated>", "evidence": "<what this week showed>"}], '
-    '"retire": [{"lesson_id": "<id>", "why": "<1 sentence>"}]}'
+    '"tags": "<comma,separated>", "evidence": "<what this week showed>", '
+    '"source_ids": ["<visible pr-... or ep-... outcome ids>"]}]}'
 )
 
 # Voting is a separate call with a separate charter, and it never sees
@@ -284,6 +286,7 @@ def run_lesson_vote(
     evidence: dict[str, Any],
     *,
     llm: LlmFn | None = None,
+    health: dict[str, Any] | None = None,
 ) -> int:
     """Score existing lessons against the week, in a separate call.
 
@@ -296,6 +299,8 @@ def run_lesson_vote(
     leaves the lesson book untouched, which is the safe direction.
     """
     if not lesson_book:
+        if health is not None:
+            health.update({"ok": None, "reason": "no eligible lessons to vote"})
         return 0
     llm = llm or _default_llm
 
@@ -303,7 +308,9 @@ def run_lesson_vote(
     # a book listed oldest-first invites the reviewer to treat the top of
     # the list as the settled ones.
     claims = [{"n": i, "claim": le["statement"]} for i, le in enumerate(lesson_book, start=1)]
-    random.shuffle(claims)
+    # Stable anonymity: a retry over the same lesson set should not alter
+    # the voter prompt purely because process-global random state moved.
+    random.Random("|".join(str(le["id"]) for le in lesson_book)).shuffle(claims)
     by_number = {i: le["id"] for i, le in enumerate(lesson_book, start=1)}
 
     voter_evidence = {
@@ -316,20 +323,22 @@ def run_lesson_vote(
         prompt = _budgeted_evidence(voter_evidence, protected=("historical_dossier", "claims"))
     except ValueError as e:
         logger.bind(component="historian").warning(f"lesson vote skipped: {e}")
+        if health is not None:
+            health.update({"ok": False, "reason": str(e)})
         return 0
 
-    # The reviewer may only attach an outcome it was actually shown. This
-    # turns an LLM's judgment into an auditable link, rather than allowing a
-    # generic weekly impression to promote a permanent desk rule.
-    outcome_ids: set[str] = set()
-    for row in evidence.get("week_journal", {}).get("prediction_graded", []):
-        value = row.get("payload", {}).get("id")
-        if isinstance(value, str) and value.startswith("pr-"):
-            outcome_ids.add(value)
-    for row in evidence.get("week_journal", {}).get("episode", []):
-        value = row.get("payload", {}).get("id")
-        if isinstance(value, str) and value.startswith("ep-"):
-            outcome_ids.add(value)
+    # The reviewer may only attach an outcome it was actually shown. Read
+    # the *budgeted final prompt*, not the larger pre-budget evidence object;
+    # otherwise a trimmed outcome could be cited as if it were visible.
+    try:
+        prompt_payload = json.loads(prompt)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        reason = "lesson voter prompt was not valid JSON"
+        logger.bind(component="historian").warning(reason)
+        if health is not None:
+            health.update({"ok": False, "reason": reason})
+        return 0
+    outcome_ids = mem.completed_outcome_ids(_visible_outcome_ids(prompt_payload))
     # The dossier gives long-horizon context, including outcomes that led
     # to an earlier retired lesson. It is deliberately NOT eligible for a
     # weekly vote: otherwise a new candidate could accumulate three old,
@@ -340,45 +349,108 @@ def run_lesson_vote(
         out = llm(VOTER_CHARTER, prompt)
     except Exception as e:
         logger.bind(component="historian").warning(f"lesson vote failed: {e}")
+        if health is not None:
+            health.update({"ok": False, "reason": f"lesson vote failed: {e}"})
         return 0
+
+    if not isinstance(out, dict):
+        reason = "lesson voter returned a non-object JSON payload"
+        logger.bind(component="historian").warning(reason)
+        if health is not None:
+            health.update({"ok": False, "reason": reason})
+        return 0
+    votes = out.get("votes", [])
+    if not isinstance(votes, list):
+        reason = "lesson voter returned a non-list votes field"
+        logger.bind(component="historian").warning(reason)
+        if health is not None:
+            health.update({"ok": False, "reason": reason})
+        return 0
+    # Validate every actionable item before recording any evidence. A
+    # missing ``supports`` used to become a real contradiction via bool(),
+    # and a malformed later item could leave a partial unaudited vote batch.
+    clean_votes: list[tuple[str, dict[str, Any]]] = []
+    for vote in votes[:10]:
+        if not isinstance(vote, dict):
+            reason = "lesson voter returned a non-object vote"
+        elif type(vote.get("supports")) is not bool:
+            reason = "lesson voter vote supports must be boolean"
+        elif not isinstance(vote.get("lesson_id"), (str, int)) or isinstance(
+            vote.get("lesson_id"), bool
+        ):
+            reason = "lesson voter vote lesson_id must be a string or number"
+        elif not isinstance(vote.get("evidence_id"), str):
+            reason = "lesson voter vote evidence_id must be a string"
+        else:
+            raw_lesson_id = vote["lesson_id"]
+            try:
+                lesson_id = by_number.get(int(raw_lesson_id))
+            except (TypeError, ValueError):
+                lesson_id = (
+                    str(raw_lesson_id)
+                    if any(le["id"] == str(raw_lesson_id) for le in lesson_book)
+                    else None
+                )
+            if lesson_id is None:
+                reason = "lesson voter vote referenced a lesson outside this review"
+            elif vote["evidence_id"] not in outcome_ids:
+                reason = "lesson voter vote cited an outcome not visible in this review"
+            else:
+                clean_votes.append((lesson_id, vote))
+                continue
+        logger.bind(component="historian").warning(reason)
+        if health is not None:
+            health.update({"ok": False, "reason": reason})
+        return 0
+    if health is not None:
+        health.update({"ok": True, "reason": ""})
 
     voted = 0
     voted_lessons: set[str] = set()
-    for vote in list(out.get("votes", []))[:10]:
-        raw = vote.get("lesson_id")
-        try:
-            lid = by_number.get(int(raw))
-        except (TypeError, ValueError):
-            # Tolerate a reviewer that echoes the real id anyway.
-            lid = str(raw) if any(le["id"] == str(raw) for le in lesson_book) else None
-        if not lid or lid in voted_lessons:
+    for lid, vote in clean_votes:
+        if lid in voted_lessons:
             continue
-        evidence_id = str(vote.get("evidence_id", ""))
-        if evidence_id not in outcome_ids:
-            continue
+        evidence_id = vote["evidence_id"]
         if mem.add_evidence(
             lid,
             evidence_id,
             supports=bool(vote.get("supports")),
             reason=str(vote.get("why", "")),
             evidence_kind="outcome",
+            actor="learning_curator",
         ):
             voted += 1
             voted_lessons.add(lid)
     return voted
 
 
-def _review_period_tag(now: datetime) -> str:
-    """Stable origin tag for candidates created in the same ISO week.
+def _visible_outcome_ids(evidence: dict[str, Any]) -> set[str]:
+    """Completed prediction/episode ids the Curator actually saw this pass."""
+    ids: set[str] = set()
+    journal = evidence.get("week_journal", {})
+    if not isinstance(journal, dict):
+        return ids
+    for kind, prefix in (("prediction_graded", "pr-"), ("episode", "ep-")):
+        rows = journal.get(kind, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            payload = row.get("payload", {}) if isinstance(row, dict) else {}
+            value = payload.get("id") if isinstance(payload, dict) else None
+            if isinstance(value, str) and value.startswith(prefix):
+                ids.add(value)
+    return ids
 
-    Tuesday and Friday may both generate a candidate, but their votes now
-    attach to outcome ids and deduplicate at the evidence table. The week
-    tag is retained only as provenance for the newly proposed lesson.
-    """
-    if now.tzinfo is None:
-        raise ValueError("historian timestamp must be timezone-aware")
-    iso = now.astimezone(timezone.utc).isocalendar()
-    return f"wk-{iso.year}-W{iso.week:02d}"
+
+def _safe_historian_tags(raw: object) -> str:
+    """Keep model tags descriptive; they must never claim operator authorship."""
+    tags = re.findall(r"[a-z0-9][a-z0-9_-]{0,31}", str(raw).lower())
+    return " ".join(tag for tag in tags if "operator" not in tag)[:120]
+
+
+def _lesson_fingerprint(statement: str) -> str:
+    """Conservative exact-content dedupe for retries, not semantic deletion."""
+    return " ".join(re.findall(r"[a-z0-9]+", statement.lower()))
 
 
 def run_historian(
@@ -388,11 +460,39 @@ def run_historian(
     now: datetime | None = None,
     conditions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One twice-weekly distillation pass. Returns a digest payload."""
+    """One twice-weekly, evidence-gated Learning Curator pass."""
     llm = llm or _default_llm
     now = now or datetime.now(tz=timezone.utc)
-    week_tag = _review_period_tag(now)
+    if now.tzinfo is None:
+        raise ValueError("historian timestamp must be timezone-aware")
+    if conditions is not None and not isinstance(conditions, dict):
+        raise ValueError("historian conditions must be an object")
     current_conditions = conditions or {}
+    review = mem.lesson_review(current_conditions)
+
+    def failed(reason: str) -> dict[str, Any]:
+        """Persist failures so stale success can never look like current health."""
+        run_id = mem.record_curator_run(
+            status="failed",
+            conditions=current_conditions,
+            reviewed=len(review["queue"]),
+            created=0,
+            voted=0,
+            vote_ok=None,
+            archive_recommendations=len(review["archive_recommendations"]),
+            actions=list(review["review_actions"]),
+            reason=reason,
+            ts=now,
+        )
+        digest = {
+            "ok": False,
+            "ts": now.isoformat(),
+            "reason": reason,
+            "curator_run_id": run_id,
+            "reviewed": len(review["queue"]),
+        }
+        mem.journal("historian", digest, actor="learning_curator")
+        return digest
 
     lesson_book = [
         {
@@ -401,12 +501,14 @@ def run_historian(
             "statement": r["statement"],
             "support": r["support"],
             "contradict": r["contradict"],
+            "outcome_support": r["outcome_support"],
+            "outcome_contradict": r["outcome_contradict"],
             "conditions": r["conditions"],
             "scope": r["scope"],
             "retrieval_role": r.get("retrieval_role", "review_queue"),
             "evidence": mem.lesson_evidence(r["id"], limit=8),
         }
-        for r in mem.lessons_for_historian_review(current_conditions)
+        for r in review["queue"]
     ]
     evidence = build_week_evidence(mem)
     try:
@@ -414,14 +516,8 @@ def run_historian(
             focus_statements=[str(le["statement"]) for le in lesson_book]
         )
     except Exception as e:
-        digest = {
-            "ok": False,
-            "ts": now.isoformat(),
-            "reason": f"historical memory unavailable: {e}",
-        }
-        mem.journal("historian", digest, actor="historian")
         logger.bind(component="historian").exception("historical memory retrieval failed")
-        return digest
+        return failed(f"historical memory unavailable: {e}")
     # Budgeted, not sliced. A raw [:24000] cut here would truncate
     # whichever key happened to land last — and the keys that matter most
     # (measured_edge, the lesson book) are not first. Same failure the PM
@@ -429,20 +525,60 @@ def run_historian(
     try:
         prompt = _budgeted_evidence({**evidence, "lesson_book": lesson_book})
     except ValueError as e:
-        digest = {"ok": False, "ts": now.isoformat(), "reason": str(e)}
-        mem.journal("historian", digest, actor="historian")
         logger.bind(component="historian").warning(str(e))
-        return digest
+        return failed(str(e))
 
     try:
         out = llm(HISTORIAN_CHARTER, prompt)
     except Exception as e:
         logger.bind(component="historian").warning(f"historian call failed: {e}")
-        return {"ok": False, "reason": f"historian call failed: {e}"}
+        return failed(f"historian call failed: {e}")
+    if not isinstance(out, dict):
+        return failed("historian returned a non-object JSON payload")
+    new_lessons = out.get("new_lessons", [])
+    if not isinstance(new_lessons, list):
+        return failed("historian returned a non-list new_lessons field")
+    try:
+        prompt_payload = json.loads(prompt)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return failed("historian prompt was not valid JSON")
 
     created: list[str] = []
+    created_ids: set[str] = set()
     lesson_bodies: dict[str, str] = {}
-    for lesson in list(out.get("new_lessons", []))[:MAX_NEW_LESSONS]:
+    candidate_actions: list[dict[str, Any]] = []
+    candidate_rejections: list[str] = []
+    # Only outcomes that survived prompt budgeting can be cited. The store
+    # then confirms the id is a completed prediction/episode, not merely a
+    # journal-shaped string injected by another component.
+    visible_outcome_ids = mem.completed_outcome_ids(_visible_outcome_ids(prompt_payload))
+
+    def reject_candidate(reason: str, lesson: object) -> None:
+        raw_ids = lesson.get("source_ids", []) if isinstance(lesson, dict) else []
+        evidence_ids = (
+            [str(value) for value in raw_ids[:12] if isinstance(value, str)]
+            if isinstance(raw_ids, list)
+            else []
+        )
+        candidate_rejections.append(reason)
+        candidate_actions.append(
+            {
+                "lesson_id": None,
+                "rank": None,
+                "action": "candidate_rejected",
+                "before_status": None,
+                "after_status": None,
+                "reason": reason,
+                "evidence_ids": evidence_ids,
+            }
+        )
+
+    status_before = {str(row["id"]): str(row["status"]) for row in mem.lessons()}
+    known_fingerprints = {_lesson_fingerprint(str(row["statement"])) for row in mem.lessons()}
+    for lesson in new_lessons[:MAX_NEW_LESSONS]:
+        if not isinstance(lesson, dict):
+            reject_candidate("Candidate rejected: lesson entry must be an object.", lesson)
+            continue
         title = str(lesson.get("title", "")).strip()
         body = str(lesson.get("body", "")).strip()
         # Legacy fallback: LLM may still emit "statement" during migration.
@@ -477,14 +613,61 @@ def run_historian(
             for key in ("applies_when", "fails_when", "invalidated_if", "sample")
             if str(lesson.get(key, "")).strip()
         }
+        raw_source_ids = lesson.get("source_ids")
+        if not isinstance(raw_source_ids, list) or not raw_source_ids:
+            reject_candidate("Candidate rejected: source_ids must be a non-empty array.", lesson)
+            continue
+        if len(raw_source_ids) > 12 or not all(isinstance(value, str) for value in raw_source_ids):
+            reject_candidate(
+                "Candidate rejected: source_ids must contain at most 12 string outcome ids.", lesson
+            )
+            continue
+        source_ids = list(raw_source_ids)
+        if len(set(source_ids)) != len(source_ids):
+            reject_candidate("Candidate rejected: source_ids must be unique.", lesson)
+            continue
+        if not set(source_ids).issubset(visible_outcome_ids):
+            reject_candidate(
+                "Candidate rejected: every source id must be a verified outcome visible in this review.",
+                lesson,
+            )
+            continue
+        fingerprint = _lesson_fingerprint(stmt)
+        if fingerprint in known_fingerprints:
+            candidate_actions.append(
+                {
+                    "lesson_id": None,
+                    "rank": None,
+                    "action": "candidate_duplicate_suppressed",
+                    "before_status": None,
+                    "after_status": None,
+                    "reason": "Candidate suppressed because an identical lesson already exists.",
+                    "evidence_ids": source_ids,
+                }
+            )
+            continue
         lid = mem.add_lesson(
             stmt,
-            origin_episodes=[week_tag],
-            tags=str(lesson.get("tags", ""))[:120],
+            origin_episodes=source_ids,
+            tags=_safe_historian_tags(lesson.get("tags", "")),
             conditions={"snapshot": current_conditions, "scope": scope},
+            actor="learning_curator",
         )
         label = title or stmt[:80]
         created.append(f"{lid}: {label}")
+        created_ids.add(lid)
+        known_fingerprints.add(fingerprint)
+        candidate_actions.append(
+            {
+                "lesson_id": lid,
+                "rank": None,
+                "action": "created",
+                "before_status": None,
+                "after_status": "candidate",
+                "reason": "New candidate lesson proposed by the Learning Curator.",
+                "evidence_ids": source_ids,
+            }
+        )
         if body:
             lesson_bodies[lid] = body
 
@@ -492,24 +675,92 @@ def run_historian(
     # candidate proposed ten seconds ago has no week of evidence behind
     # it, and letting it collect support on the day it was written would
     # start it a third of the way to promotion for free.
+    vote_health: dict[str, Any] = {"ok": None, "reason": ""}
     voted = run_lesson_vote(
         mem,
-        [le for le in lesson_book if le["id"] not in {c.split(":")[0] for c in created}],
+        [le for le in lesson_book if le["id"] not in created_ids],
         evidence,
         llm=llm,
+        health=vote_health,
     )
     # This is a rotation marker, not evidence or expiry. A candidate from a
     # quiet regime remains a candidate and comes back after its peers have
     # had their bounded review turn.
     mem.mark_lessons_reviewed([str(le["id"]) for le in lesson_book])
 
-    retired = 0
-    challenged = {r["id"] for r in lesson_book if r["status"] == "challenged"}
-    for r in list(out.get("retire", []))[:3]:
-        lid = str(r.get("lesson_id", ""))
-        if lid in challenged:
-            mem.retire_lesson(lid, str(r.get("why", ""))[:200])
-            retired += 1
+    # Promotion/challenge transitions are store-owned deterministic
+    # consequences of measured evidence.  The LLM is never allowed to
+    # manufacture either transition or archive a lesson directly.
+    status_after = {str(row["id"]): str(row["status"]) for row in mem.lessons()}
+    actions = [dict(action) for action in review["review_actions"]]
+    action_by_lesson = {str(action["lesson_id"]): action for action in actions}
+    for lesson_id, before_status in status_before.items():
+        after_status = status_after.get(lesson_id, before_status)
+        if after_status == before_status:
+            continue
+        action = action_by_lesson.get(lesson_id)
+        if action is None:
+            action = {"lesson_id": lesson_id, "rank": None, "evidence_ids": []}
+            actions.append(action)
+        transition = (
+            "promoted"
+            if after_status == "established"
+            else "challenged"
+            if after_status == "challenged"
+            else "reviewed"
+        )
+        action.update(
+            {
+                "action": transition,
+                "before_status": before_status,
+                "after_status": after_status,
+                "reason": f"Measured outcome rule moved the lesson from {before_status} to {after_status}.",
+                "evidence_ids": [
+                    item["id"]
+                    for item in mem.lesson_evidence(lesson_id, limit=8)
+                    if item["kind"] == "outcome"
+                ],
+            }
+        )
+    actions.extend(candidate_actions)
+    refreshed_review = mem.lesson_review(current_conditions)
+    for recommendation in refreshed_review["archive_recommendations"]:
+        lesson_id = str(recommendation["lesson_id"])
+        action = action_by_lesson.get(lesson_id)
+        if action is None:
+            action = {"lesson_id": lesson_id, "rank": None}
+            actions.append(action)
+        action.update(
+            {
+                "action": "archive_recommended",
+                "before_status": "challenged",
+                "after_status": "challenged",
+                "reason": recommendation["reason"],
+                "evidence_ids": [
+                    item["id"]
+                    for item in mem.lesson_evidence(lesson_id, limit=8)
+                    if item["kind"] == "outcome"
+                ],
+            }
+        )
+
+    degraded_reasons = list(candidate_rejections)
+    if vote_health["ok"] is False:
+        degraded_reasons.append(str(vote_health["reason"]))
+    run_status = "degraded" if degraded_reasons else "completed"
+    run_reason = " ".join(degraded_reasons)[:1_000]
+    curator_run_id = mem.record_curator_run(
+        status=run_status,
+        conditions=current_conditions,
+        reviewed=len(review["queue"]),
+        created=len(created),
+        voted=voted,
+        vote_ok=vote_health["ok"],
+        archive_recommendations=len(refreshed_review["archive_recommendations"]),
+        actions=actions,
+        reason=run_reason,
+        ts=now,
+    )
 
     digest = {
         "ok": True,
@@ -517,17 +768,34 @@ def run_historian(
         "created": created,
         "lesson_bodies": lesson_bodies,
         "voted": voted,
-        "retired": retired,
+        # Compatibility for Telegram/tests that used the old field.  The
+        # Curator only recommends archival; approval performs it later.
+        "retired": 0,
+        "reviewed": len(review["queue"]),
+        "vote_ok": vote_health["ok"],
+        "archive_recommendations": [
+            item["lesson_id"] for item in refreshed_review["archive_recommendations"]
+        ],
+        "curator_run_id": curator_run_id,
+        "degraded_reason": run_reason,
+        "rejected_candidates": len(candidate_rejections),
     }
-    mem.journal("historian", digest, actor="historian")
+    mem.journal("historian", digest, actor="learning_curator")
     return digest
 
 
 def format_historian_digest(digest: dict[str, Any]) -> str:
     if not digest.get("ok"):
-        return f"🤖 Historian skipped: {digest.get('reason', 'unknown')}"
-    lines = [f"📜 *Historian* — twice-weekly distillation ({digest['voted']} votes"]
-    lines[0] += f", {digest['retired']} retired)" if digest.get("retired") else ")"
+        return f"🤖 Learning Curator skipped: {digest.get('reason', 'unknown')}"
+    lines = [
+        f"📚 *Learning Curator* — {digest.get('reviewed', 0)} lessons reviewed, "
+        f"{digest['voted']} evidence votes"
+    ]
+    if digest.get("vote_ok") is False:
+        lines[0] += " · ⚠️ voter degraded"
+    if digest.get("rejected_candidates"):
+        lines[0] += f" · ⚠️ {digest['rejected_candidates']} invalid candidate(s) rejected"
+    lines[0] += "."
     if digest["created"]:
         lines.append("*New candidate lessons:*")
         for c in digest["created"]:
@@ -541,4 +809,10 @@ def format_historian_digest(digest: dict[str, Any]) -> str:
                 lines.append(f"    _{first_sentence}._")
     else:
         lines.append("_no new lessons this pass — the bar is high by design_")
+    recommendations = list(digest.get("archive_recommendations", []))
+    if recommendations:
+        lines.append(
+            f"*Archive review required:* {len(recommendations)} challenged machine lesson(s) "
+            "meet the measured-evidence threshold."
+        )
     return "\n".join(lines)

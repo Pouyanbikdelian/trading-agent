@@ -39,16 +39,24 @@ def test_creates_capped_lessons_and_votes(mem: MemoryStore) -> None:
                         "evidence_id": evidence_id,
                         "why": "SMH rose 3% after the correction.",
                     },
-                    {"lesson_id": "ls-hallucinated", "supports": True, "why": "n/a"},
                 ]
             }
         assert "Historian" in system
         assert existing in prompt  # sees the lesson book
         return {
             "new_lessons": [
-                {"statement": "Gold breaking down while equities hold flags risk-on rotation"},
-                {"statement": "Crowded sector momentum unwinds fastest in the first 2 days"},
-                {"statement": "A third lesson beyond the cap should be ignored entirely"},
+                {
+                    "statement": "Gold breaking down while equities hold flags risk-on rotation",
+                    "source_ids": [evidence_id],
+                },
+                {
+                    "statement": "Crowded sector momentum unwinds fastest in the first 2 days",
+                    "source_ids": [evidence_id],
+                },
+                {
+                    "statement": "A third lesson beyond the cap should be ignored entirely",
+                    "source_ids": [evidence_id],
+                },
             ],
             "retire": [{"lesson_id": existing, "why": "not established; must be ignored"}],
         }
@@ -56,7 +64,7 @@ def test_creates_capped_lessons_and_votes(mem: MemoryStore) -> None:
     digest = run_historian(mem, llm=llm)
     assert digest["ok"] is True
     assert len(digest["created"]) == 2  # cap enforced
-    assert digest["voted"] == 1  # hallucinated id ignored
+    assert digest["voted"] == 1
     assert digest["retired"] == 0  # candidates cannot be retired
     rows = mem.lessons()
     assert len(rows) == 3
@@ -73,6 +81,15 @@ def test_garbage_statements_skipped_and_empty_week_ok(mem: MemoryStore) -> None:
 
 def test_historian_stores_scope_and_today_snapshot_for_new_lessons(mem: MemoryStore) -> None:
     conditions = {"macro_bucket": "stress", "vol_bucket": "elevated"}
+    evidence_id = mem.add_prediction(
+        agent="quant",
+        subject="SPY",
+        direction="up",
+        horizon_days=5,
+        confidence=0.7,
+        statement="breadth recovery outcome",
+    )
+    mem.grade_prediction(evidence_id, realized_move=0.03)
 
     digest = run_historian(
         mem,
@@ -86,6 +103,7 @@ def test_historian_stores_scope_and_today_snapshot_for_new_lessons(mem: MemorySt
                     "fails_when": "breadth stays narrow",
                     "invalidated_if": "three broad breadth failures in this regime",
                     "sample": "24 weekly observations, 2019-2026",
+                    "source_ids": [evidence_id],
                 }
             ],
             "retire": [],
@@ -279,6 +297,15 @@ class TestVoterIndependence:
         """A candidate written ten seconds ago has no week of evidence
         behind it; letting it collect support immediately would start it a
         third of the way to promotion for free."""
+        evidence_id = mem.add_prediction(
+            agent="quant",
+            subject="SMH",
+            direction="up",
+            horizon_days=5,
+            confidence=0.7,
+            statement="semi momentum recovery outcome",
+        )
+        mem.grade_prediction(evidence_id, realized_move=0.02)
 
         def llm(system: str, prompt: str) -> dict[str, Any]:
             if "reviewer" in system:
@@ -289,7 +316,10 @@ class TestVoterIndependence:
                 return {"votes": [{"lesson_id": c["n"], "supports": True} for c in claims]}
             return {
                 "new_lessons": [
-                    {"statement": "Semis lead the tape out of momentum drawdowns by two days"}
+                    {
+                        "statement": "Semis lead the tape out of momentum drawdowns by two days",
+                        "source_ids": [evidence_id],
+                    }
                 ],
                 "retire": [],
             }
@@ -370,6 +400,8 @@ class TestVoterIndependence:
         digest = run_historian(mem, llm=llm)
         assert digest["ok"] is True  # distillation still succeeded
         assert digest["voted"] == 0
+        assert digest["vote_ok"] is False
+        assert mem.curator_summary()["last_run"]["status"] == "degraded"
         assert mem.lessons()[0]["id"] == lid
         assert mem.lessons()[0]["support"] == 0
 
@@ -381,6 +413,250 @@ def test_llm_failure_reported(mem: MemoryStore) -> None:
     digest = run_historian(mem, llm=boom)
     assert digest["ok"] is False
     assert "skipped" in format_historian_digest(digest)
+    assert mem.curator_summary()["last_run"]["status"] == "failed"
+    assert any(
+        row["kind"] == "historian" and row["payload"]["ok"] is False for row in mem.journal_tail(10)
+    )
+
+
+def test_invalid_new_lessons_shape_is_failed_and_audited(mem: MemoryStore) -> None:
+    digest = run_historian(mem, llm=lambda system, prompt: {"new_lessons": None})
+
+    assert digest["ok"] is False
+    assert mem.lessons() == []
+    assert mem.curator_summary()["last_run"]["status"] == "failed"
+    assert any(
+        row["kind"] == "historian" and row["payload"]["ok"] is False for row in mem.journal_tail(10)
+    )
+
+
+def test_invalid_voter_batch_degrades_without_partial_evidence(mem: MemoryStore) -> None:
+    lesson_id = mem.add_lesson("Semiconductor breadth needs confirmation before a breakout.")
+    evidence_id = mem.add_prediction(
+        agent="quant",
+        subject="SMH",
+        direction="up",
+        horizon_days=5,
+        confidence=0.7,
+        statement="breadth confirmed a measured breakout",
+    )
+    mem.grade_prediction(evidence_id, realized_move=0.03)
+
+    def llm(system: str, prompt: str) -> dict[str, Any]:
+        if "reviewer" in system:
+            return {
+                "votes": [
+                    {"lesson_id": lesson_id, "supports": True, "evidence_id": evidence_id},
+                    # This used to turn into a real contradiction after the
+                    # first vote had already been written.
+                    {"lesson_id": lesson_id, "evidence_id": evidence_id},
+                ]
+            }
+        return {"new_lessons": []}
+
+    digest = run_historian(mem, llm=llm)
+
+    assert digest["ok"] is True
+    assert digest["vote_ok"] is False
+    assert digest["voted"] == 0
+    assert mem.lessons(status="candidate")[0]["support"] == 0
+    assert mem.lessons(status="candidate")[0]["contradict"] == 0
+    assert mem.curator_summary()["last_run"]["status"] == "degraded"
+
+
+def test_non_list_voter_output_degrades_without_mutating_lessons(mem: MemoryStore) -> None:
+    lesson_id = mem.add_lesson("Breadth failures require patience before fresh entries.")
+
+    def llm(system: str, prompt: str) -> dict[str, Any]:
+        if "reviewer" in system:
+            return {"votes": None}
+        return {"new_lessons": []}
+
+    digest = run_historian(mem, llm=llm)
+
+    assert digest["vote_ok"] is False
+    assert digest["voted"] == 0
+    assert mem.lessons(status="candidate")[0]["id"] == lesson_id
+    assert mem.curator_summary()["last_run"]["status"] == "degraded"
+
+
+def test_curator_records_real_origin_ids_and_strips_reserved_operator_tag(mem: MemoryStore) -> None:
+    evidence_id = mem.add_prediction(
+        agent="quant",
+        subject="SMH",
+        direction="up",
+        horizon_days=5,
+        confidence=0.7,
+        statement="semiconductor breadth held",
+    )
+    mem.grade_prediction(evidence_id, realized_move=0.03)
+
+    def llm(system: str, prompt: str) -> dict[str, Any]:
+        if "reviewer" in system:
+            return {"votes": []}
+        return {
+            "new_lessons": [
+                {
+                    "title": "Breadth confirms semi recoveries",
+                    "body": "Breadth improved before the semiconductor recovery. It applies when the sector holds through a broad correction. Broad participation reduces the chance that a single-name bounce is noise. Add only after breadth confirms the turn.",
+                    "source_ids": [evidence_id],
+                    "tags": "operator,semis,breadth",
+                }
+            ]
+        }
+
+    digest = run_historian(mem, llm=llm)
+
+    assert digest["ok"] is True and len(digest["created"]) == 1
+    row = mem.lessons(status="candidate")[0]
+    assert "operator" not in row["tags"].split()
+    assert {item["id"] for item in mem.lesson_evidence(row["id"])} == {evidence_id}
+
+
+def test_curator_rejects_fabricated_new_lesson_origin_ids(mem: MemoryStore) -> None:
+    digest = run_historian(
+        mem,
+        llm=lambda system, prompt: {
+            "votes": [],
+            "new_lessons": [
+                {
+                    "statement": "Fabricated evidence must not become a durable lesson.",
+                    "source_ids": ["pr-does-not-exist"],
+                }
+            ],
+        },
+    )
+
+    assert digest["created"] == []
+    assert mem.lessons() == []
+
+
+def test_curator_requires_complete_array_provenance(mem: MemoryStore) -> None:
+    evidence_id = mem.add_prediction(
+        agent="quant",
+        subject="SMH",
+        direction="up",
+        horizon_days=5,
+        confidence=0.7,
+        statement="verified semiconductor outcome",
+    )
+    mem.grade_prediction(evidence_id, realized_move=0.02)
+    invalid_sources: list[object] = [
+        None,
+        evidence_id,
+        [evidence_id, "pr-fabricated"],
+        [evidence_id, evidence_id],
+    ]
+
+    for index, source_ids in enumerate(invalid_sources):
+        lesson: dict[str, object] = {
+            "statement": f"Candidate {index} must not be created from incomplete provenance.",
+        }
+        if source_ids is not None:
+            lesson["source_ids"] = source_ids
+        digest = run_historian(
+            mem,
+            llm=lambda system, prompt, lesson=lesson: {"new_lessons": [lesson], "votes": []},
+        )
+        assert digest["created"] == []
+        assert mem.curator_summary()["last_run"]["status"] == "degraded"
+        assert mem.curator_summary()["recent_review_actions"][-1]["action"] == "candidate_rejected"
+
+    assert mem.lessons() == []
+
+
+def test_journal_only_source_id_is_not_valid_lesson_provenance(mem: MemoryStore) -> None:
+    mem.journal("prediction_graded", {"id": "pr-forged", "outcome": "hit"})
+
+    digest = run_historian(
+        mem,
+        llm=lambda system, prompt: {
+            "new_lessons": [
+                {
+                    "statement": "A journal-shaped fake outcome must never create a lesson.",
+                    "source_ids": ["pr-forged"],
+                }
+            ]
+        },
+    )
+
+    assert digest["created"] == []
+    assert mem.lessons() == []
+    assert mem.curator_summary()["last_run"]["status"] == "degraded"
+
+
+def test_source_and_vote_must_survive_prompt_budget(mem: MemoryStore) -> None:
+    target_id = ""
+    for index in range(60):
+        prediction_id = mem.add_prediction(
+            agent="quant",
+            subject=f"S{index}",
+            direction="up",
+            horizon_days=5,
+            confidence=0.7,
+            statement=f"{index}: " + "long measured evidence " * 18,
+        )
+        mem.grade_prediction(prediction_id, realized_move=0.02)
+        if index == 0:
+            target_id = prediction_id
+    lesson_id = mem.add_lesson("A budgeted voter must not cite hidden evidence.")
+    seen: dict[str, str] = {}
+
+    def llm(system: str, prompt: str) -> dict[str, Any]:
+        if "reviewer" in system:
+            seen["voter"] = prompt
+            return {"votes": [{"lesson_id": lesson_id, "supports": True, "evidence_id": target_id}]}
+        seen["curator"] = prompt
+        return {
+            "new_lessons": [
+                {
+                    "statement": "Candidates may only cite evidence that survived prompt budgeting.",
+                    "source_ids": [target_id],
+                }
+            ]
+        }
+
+    digest = run_historian(mem, llm=llm)
+
+    assert "week_journal" not in json.loads(seen["curator"])
+    assert "week_journal" not in json.loads(seen["voter"])
+    assert digest["created"] == []
+    assert digest["voted"] == 0
+    assert mem.lessons(status="candidate")[0]["id"] == lesson_id
+    assert mem.lessons(status="candidate")[0]["support"] == 0
+    assert mem.curator_summary()["last_run"]["status"] == "degraded"
+
+
+def test_curator_replay_does_not_duplicate_an_identical_candidate(mem: MemoryStore) -> None:
+    evidence_id = mem.add_prediction(
+        agent="quant",
+        subject="SMH",
+        direction="up",
+        horizon_days=5,
+        confidence=0.7,
+        statement="semi breadth outcome",
+    )
+    mem.grade_prediction(evidence_id, realized_move=0.02)
+
+    def llm(system: str, prompt: str) -> dict[str, Any]:
+        if "reviewer" in system:
+            return {"votes": []}
+        return {
+            "new_lessons": [
+                {
+                    "statement": "Semiconductor breadth must confirm a momentum recovery before entry.",
+                    "tags": "semis",
+                    "source_ids": [evidence_id],
+                }
+            ]
+        }
+
+    first = run_historian(mem, llm=llm)
+    second = run_historian(mem, llm=llm)
+
+    assert len(first["created"]) == 1
+    assert second["created"] == []
+    assert len(mem.lessons(status="candidate")) == 1
 
 
 def test_stock_universe_clamp() -> None:

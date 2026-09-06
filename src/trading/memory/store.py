@@ -30,7 +30,7 @@ import re
 import sqlite3
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +84,37 @@ CREATE TABLE IF NOT EXISTS lesson_evidence (
     reason      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (lesson_id, episode_id, relation)
 );
+
+-- One immutable review card for each Learning Curator pass.  The lesson
+-- tables hold the current state; these tables answer the equally important
+-- question of *why* a state was reviewed or proposed for archival.
+CREATE TABLE IF NOT EXISTS curator_runs (
+    id          TEXT PRIMARY KEY,       -- cr-<uuid8>
+    ts          REAL NOT NULL,
+    status      TEXT NOT NULL,          -- completed|degraded|failed
+    conditions  TEXT NOT NULL DEFAULT '{}',
+    reviewed    INTEGER NOT NULL DEFAULT 0,
+    created     INTEGER NOT NULL DEFAULT 0,
+    voted       INTEGER NOT NULL DEFAULT 0,
+    vote_ok     INTEGER,                -- NULL when no vote was needed
+    archive_recommendations INTEGER NOT NULL DEFAULT 0,
+    reason      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_curator_runs_ts ON curator_runs(ts);
+
+CREATE TABLE IF NOT EXISTS curator_actions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL,
+    lesson_id     TEXT,
+    rank          INTEGER,
+    action        TEXT NOT NULL,        -- reviewed|created|promoted|challenged|archive_recommended
+    before_status TEXT,
+    after_status  TEXT,
+    reason        TEXT NOT NULL DEFAULT '',
+    evidence_ids  TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_curator_actions_run ON curator_actions(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_curator_actions_lesson ON curator_actions(lesson_id);
 
 CREATE TABLE IF NOT EXISTS predictions (
     id          TEXT PRIMARY KEY,        -- pr-<uuid8>
@@ -162,6 +193,15 @@ _LESSON_STATUSES = frozenset(("candidate", "established", "challenged", "retired
 _ACTIVE_LESSON_STATUSES = frozenset(("candidate", "established", "challenged"))
 _PROMOTION_EVIDENCE_KINDS = frozenset(("outcome",))
 _MIN_OUTCOME_EVIDENCE = 3
+_CURATOR_STALE_AFTER = timedelta(days=5)
+_LESSON_LIFECYCLE_KINDS = (
+    "lesson_created",
+    "lesson_status_changed",
+    "lesson_established",
+    "lesson_challenged",
+    "lesson_retired",
+    "lesson_restored",
+)
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
 _RETRIEVAL_STOP_WORDS = frozenset(
     {
@@ -295,16 +335,22 @@ def _condition_match(
     return (len(matched) / compared if compared else 0.0), matched, different
 
 
-def _is_operator_lesson(card: dict[str, Any]) -> bool:
-    """True for a lesson the operator stated himself.
+def is_operator_lesson_tags(tags: object) -> bool:
+    """Whether tags carry the exact, reserved operator-authorship token.
 
     ``/lesson`` writes ``tags="operator <strength>"``; the historian's own
-    proposals never carry that token. Matched on a word boundary so a tag
-    like "operators" or "cooperative" cannot smuggle a machine-generated
-    rule into the guaranteed slots.
+    proposals never carry that token.  Only whitespace/comma/semicolon
+    delimiters are accepted, so tags such as ``operator-ish`` or
+    ``cooperator`` cannot smuggle a machine-generated rule into the
+    guaranteed slots.
     """
-    tags = str(card.get("tags") or "").lower()
-    return "operator" in tags.replace(",", " ").split()
+    words = re.split(r"[\s,;]+", str(tags or "").lower().strip())
+    return "operator" in words
+
+
+def _is_operator_lesson(card: dict[str, Any]) -> bool:
+    """True for a lesson the operator stated himself."""
+    return is_operator_lesson_tags(card.get("tags"))
 
 
 def _condition_signature(conditions: dict[str, Any]) -> str:
@@ -352,6 +398,7 @@ class MemoryStore:
         """``root`` is the memory directory, e.g. ``state/memory``."""
         self.root = Path(root)
         self.lessons_dir = self.root / "lessons"
+        self.reviews_dir = self.root / "reviews"
         self.world_dir = self.root / "world"
         self._conn: sqlite3.Connection | None = None
 
@@ -525,6 +572,7 @@ class MemoryStore:
         tags: str = "",
         status: str = "candidate",
         conditions: dict[str, Any] | None = None,
+        actor: str = "system",
     ) -> str:
         """Record a lesson. ``candidate`` by default — the historian's
         proposals must earn ``established`` through +3 net supporting
@@ -553,14 +601,15 @@ class MemoryStore:
                    VALUES (?, ?, 'origin', ?, 'origin', '')""",
                 (lid, eid, ts),
             )
-        self._write_lesson_card(lid)
         self.journal(
             "lesson_created",
             {"id": lid, "statement": statement, "status": status, "conditions": conditions or {}},
+            actor=actor,
         )
+        self._write_lesson_card(lid)
         return lid
 
-    def set_lesson_status(self, lesson_id: str, status: str) -> bool:
+    def set_lesson_status(self, lesson_id: str, status: str, *, actor: str = "system") -> bool:
         """Promote or demote a lesson by hand. Append-only in spirit: the
         card and the journal keep every transition, so a lesson the
         operator hardened and later softened reads as a change of mind
@@ -569,25 +618,63 @@ class MemoryStore:
             raise ValueError(
                 f"lesson status must be candidate|established|challenged, got {status!r}"
             )
+        old = self.conn.execute("SELECT status FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
+        if old is None or old["status"] == "retired":
+            return False
         cur = self.conn.execute(
             "UPDATE lessons SET status = ? WHERE id = ? AND status != 'retired'",
             (status, lesson_id),
         )
         if not cur.rowcount:
             return False
+        self.journal(
+            "lesson_status_changed",
+            {
+                "id": lesson_id,
+                "status": status,
+                "from_status": old["status"],
+                "to_status": status,
+            },
+            actor=actor,
+        )
         self._write_lesson_card(lesson_id)
-        self.journal("lesson_status_changed", {"id": lesson_id, "status": status})
         return True
 
     def operator_lessons(self, status: str = "candidate") -> list[sqlite3.Row]:
         """Operator-authored lessons at ``status``. Tagged rather than kept
         in a separate table so they age through the same lifecycle as the
         historian's."""
-        return self.conn.execute(
-            "SELECT * FROM lessons WHERE status = ? AND tags LIKE '%operator%' "
-            "ORDER BY created_ts DESC",
-            (status,),
+        rows = self.conn.execute(
+            "SELECT * FROM lessons WHERE status = ? ORDER BY created_ts DESC", (status,)
         ).fetchall()
+        return [row for row in rows if is_operator_lesson_tags(row["tags"])]
+
+    def completed_outcome_ids(self, evidence_ids: list[str] | set[str]) -> set[str]:
+        """Return only real, completed prediction/episode identifiers.
+
+        A journal row says an outcome was *reported* to a reviewer. This
+        method is the persistence-side check that it was actually measured,
+        so a synthetic or malformed journal event cannot become provenance
+        for a durable lesson.
+        """
+        requested = {str(value) for value in evidence_ids if isinstance(value, str)}
+        prediction_ids = sorted(value for value in requested if value.startswith("pr-"))
+        episode_ids = sorted(value for value in requested if value.startswith("ep-"))
+        verified: set[str] = set()
+        if prediction_ids:
+            marks = ",".join("?" for _ in prediction_ids)
+            rows = self.conn.execute(
+                f"SELECT id FROM predictions WHERE graded_ts IS NOT NULL AND id IN ({marks})",
+                prediction_ids,
+            ).fetchall()
+            verified.update(str(row["id"]) for row in rows)
+        if episode_ids:
+            marks = ",".join("?" for _ in episode_ids)
+            rows = self.conn.execute(
+                f"SELECT id FROM episodes WHERE id IN ({marks})", episode_ids
+            ).fetchall()
+            verified.update(str(row["id"]) for row in rows)
+        return verified
 
     def add_evidence(
         self,
@@ -597,6 +684,7 @@ class MemoryStore:
         supports: bool,
         reason: str = "",
         evidence_kind: str | None = None,
+        actor: str = "system",
     ) -> bool:
         """Record one distinct item of lesson evidence and return whether it was new.
 
@@ -610,25 +698,17 @@ class MemoryStore:
         """
         rel = "supports" if supports else "contradicts"
         kind = _evidence_kind(episode_id, evidence_kind)
-        if kind == "outcome":
-            # The caller (normally the Historian) has already checked that
-            # it showed the reviewer this id. Enforce the other half of the
-            # contract at the persistence boundary: an id merely *shaped*
-            # like a prediction or episode must not be able to establish a
-            # desk belief unless it exists as a completed measurement.
-            if episode_id.startswith("pr-"):
-                outcome_exists = self.conn.execute(
-                    "SELECT 1 FROM predictions WHERE id = ? AND graded_ts IS NOT NULL",
-                    (episode_id,),
-                ).fetchone()
-            elif episode_id.startswith("ep-"):
-                outcome_exists = self.conn.execute(
-                    "SELECT 1 FROM episodes WHERE id = ?", (episode_id,)
-                ).fetchone()
-            else:
-                outcome_exists = None
-            if outcome_exists is None:
-                return False
+        lesson = self.conn.execute(
+            "SELECT status FROM lessons WHERE id = ?", (lesson_id,)
+        ).fetchone()
+        # Archived lessons preserve their evidence and card, but must not
+        # silently start influencing the active book again.  An explicit
+        # restore puts the lesson back into ``candidate`` before fresh
+        # evidence can be considered.
+        if lesson is None or lesson["status"] == "retired":
+            return False
+        if kind == "outcome" and episode_id not in self.completed_outcome_ids([episode_id]):
+            return False
         # A realized outcome cannot honestly both support and contradict the
         # same claim. The old primary key included ``relation``, which made
         # that contradiction possible on a retry with flipped model output.
@@ -676,6 +756,7 @@ class MemoryStore:
                     "outcome_support": outcome_support,
                     "outcome_contradict": outcome_contradict,
                 },
+                actor=actor,
             )
         elif (
             row
@@ -696,18 +777,51 @@ class MemoryStore:
                     "outcome_support": outcome_support,
                     "outcome_contradict": outcome_contradict,
                 },
+                actor=actor,
             )
         self._write_lesson_card(lesson_id)
         return True
 
-    def retire_lesson(self, lesson_id: str, why: str) -> None:
+    def retire_lesson(self, lesson_id: str, why: str, *, actor: str = "system") -> bool:
         """Retired, never deleted — the card keeps its full history."""
+        reason = " ".join(why.split())[:500]
+        cur = self.conn.execute(
+            """UPDATE lessons SET status='retired', retired_ts=?, retired_why=?
+               WHERE id=? AND status != 'retired'""",
+            (_now(), reason, lesson_id),
+        )
+        if not cur.rowcount:
+            return False
+        self.journal("lesson_retired", {"id": lesson_id, "why": reason}, actor=actor)
+        self._write_lesson_card(lesson_id)
+        return True
+
+    def restore_retired_lesson(self, lesson_id: str, why: str, *, actor: str = "system") -> bool:
+        """Restore an archived lesson to ``candidate`` with an audit trail.
+
+        Restoration is deliberately conservative: it never makes a prior
+        belief active again.  A candidate remains outside agent context, but
+        can earn establishment through fresh measured outcomes.  The previous
+        archive timestamp and reason remain on the lesson card, while the
+        immutable journal records who restored it and why.
+        """
+        reason = " ".join(why.split())[:500]
+        if not reason:
+            raise ValueError("a restoration reason is required")
+        row = self.conn.execute("SELECT status FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
+        if row is None or row["status"] != "retired":
+            return False
         self.conn.execute(
-            "UPDATE lessons SET status='retired', retired_ts=?, retired_why=? WHERE id=?",
-            (_now(), why, lesson_id),
+            "UPDATE lessons SET status = 'candidate', last_reviewed_ts = NULL WHERE id = ?",
+            (lesson_id,),
+        )
+        self.journal(
+            "lesson_restored",
+            {"id": lesson_id, "from_status": "retired", "to_status": "candidate", "why": reason},
+            actor=actor,
         )
         self._write_lesson_card(lesson_id)
-        self.journal("lesson_retired", {"id": lesson_id, "why": why})
+        return True
 
     def lessons(self, status: str | None = None) -> list[sqlite3.Row]:
         if status:
@@ -722,11 +836,31 @@ class MemoryStore:
     def _lesson_cards_for_status(
         self, status: str, current_conditions: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        rows = self.conn.execute("SELECT * FROM lessons WHERE status = ?", (status,)).fetchall()
+        # ``lessons.support`` / ``contradict`` intentionally include review
+        # provenance.  That is useful history, but it is not measured market
+        # evidence and must never decide which machine-authored lesson wins a
+        # scarce prompt slot.  Calculate outcome-only counts at the query
+        # boundary so every reviewer and retriever uses the same rule.
+        rows = self.conn.execute(
+            """SELECT l.*,
+                      COALESCE(SUM(CASE WHEN e.evidence_kind = 'outcome'
+                                           AND e.relation = 'supports' THEN 1 ELSE 0 END), 0)
+                          AS outcome_support,
+                      COALESCE(SUM(CASE WHEN e.evidence_kind = 'outcome'
+                                           AND e.relation = 'contradicts' THEN 1 ELSE 0 END), 0)
+                          AS outcome_contradict
+               FROM lessons AS l
+               LEFT JOIN lesson_evidence AS e ON e.lesson_id = l.id
+               WHERE l.status = ?
+               GROUP BY l.id""",
+            (status,),
+        ).fetchall()
         cards: list[dict[str, Any]] = []
         for row in rows:
             snapshot, scope = _stored_conditions(row)
             relevance, matched, different = _condition_match(snapshot, current_conditions)
+            outcome_support = int(row["outcome_support"] or 0)
+            outcome_contradict = int(row["outcome_contradict"] or 0)
             cards.append(
                 {
                     "id": row["id"],
@@ -734,6 +868,9 @@ class MemoryStore:
                     "statement": row["statement"],
                     "support": int(row["support"]),
                     "contradict": int(row["contradict"]),
+                    "outcome_support": outcome_support,
+                    "outcome_contradict": outcome_contradict,
+                    "outcome_observations": outcome_support + outcome_contradict,
                     "tags": row["tags"],
                     "conditions": snapshot,
                     "scope": scope,
@@ -748,7 +885,8 @@ class MemoryStore:
 
     @staticmethod
     def _evidence_strength(card: dict[str, Any]) -> int:
-        return int(card["support"]) - int(card["contradict"])
+        """Measured-outcome strength used for machine lesson ranking only."""
+        return int(card["outcome_support"]) - int(card["outcome_contradict"])
 
     def retrieve_lessons(
         self,
@@ -874,6 +1012,135 @@ class MemoryStore:
             ),
         ]
 
+    def lesson_review(
+        self, current_conditions: dict[str, Any], *, candidate_limit: int = 12
+    ) -> dict[str, Any]:
+        """Return the deterministic worklist for one Learning Curator pass.
+
+        This is deliberately a review allocator, not an expiry engine.  Age
+        only rotates scarce attention; measured outcomes determine standing.
+        Archive recommendations are advisory and require an operator-approved
+        desk change before a lesson leaves the active vault.
+        """
+        candidates = self.candidate_review_queue(current_conditions, limit=candidate_limit)
+        established = self.retrieve_lessons(
+            current_conditions, status="established", max_relevant=4, max_diversifiers=1
+        )
+        challenged = self.retrieve_lessons(
+            current_conditions, status="challenged", max_relevant=2, max_diversifiers=1
+        )
+        queue = [*candidates, *established, *challenged]
+        review_actions: list[dict[str, Any]] = []
+        for rank, card in enumerate(queue, start=1):
+            net = self._evidence_strength(card)
+            if card["status"] == "candidate":
+                action = "awaiting_evidence" if card["outcome_observations"] == 0 else "reviewed"
+                reason = (
+                    "No completed outcome linked yet; keep as a candidate."
+                    if action == "awaiting_evidence"
+                    else f"{net:+d} net measured outcomes; candidate remains evidence-gated."
+                )
+            elif card["status"] == "established":
+                action = "kept"
+                reason = f"Active with {net:+d} net measured outcomes."
+            else:
+                action = "reviewed"
+                reason = (
+                    f"Challenged with {net:+d} net measured outcomes; excluded from agent context."
+                )
+            review_actions.append(
+                {
+                    "lesson_id": card["id"],
+                    "rank": rank,
+                    "action": action,
+                    "before_status": card["status"],
+                    "after_status": card["status"],
+                    "reason": reason,
+                    "evidence_ids": [
+                        evidence["id"]
+                        for evidence in self.lesson_evidence(card["id"], limit=8)
+                        if evidence["kind"] == "outcome"
+                    ],
+                }
+            )
+
+        all_established = self._lesson_cards_for_status("established", current_conditions)
+        ranked_established = sorted(
+            all_established,
+            key=lambda c: (
+                self._evidence_strength(c),
+                int(c["outcome_observations"]),
+                float(c["relevance"]),
+                float(c["created_ts"]),
+            ),
+            reverse=True,
+        )
+        all_challenged = self._lesson_cards_for_status("challenged", current_conditions)
+        archive_recommendations: list[dict[str, Any]] = []
+        for card in all_challenged:
+            if _is_operator_lesson(card):
+                continue
+            support, contradict = int(card["outcome_support"]), int(card["outcome_contradict"])
+            if contradict < _MIN_OUTCOME_EVIDENCE or contradict < support:
+                continue
+            archive_recommendations.append(
+                {
+                    "lesson_id": card["id"],
+                    "statement": card["statement"],
+                    "outcome_support": support,
+                    "outcome_contradict": contradict,
+                    "reason": (
+                        f"{contradict} measured contradictions versus {support} supports; "
+                        "machine-authored lesson is already challenged."
+                    ),
+                    "requires_operator_approval": True,
+                }
+            )
+        archive_recommendations.sort(
+            key=lambda c: (
+                int(c["outcome_contradict"]) - int(c["outcome_support"]),
+                c["lesson_id"],
+            ),
+            reverse=True,
+        )
+
+        counts = {status: 0 for status in _LESSON_STATUSES}
+        for row in self.conn.execute("SELECT status, COUNT(*) AS n FROM lessons GROUP BY status"):
+            counts[str(row["status"])] = int(row["n"])
+        candidate_unreviewed = int(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM lessons WHERE status = 'candidate' AND last_reviewed_ts IS NULL"
+            ).fetchone()[0]
+        )
+        return {
+            "status_counts": counts,
+            "candidate_unreviewed": candidate_unreviewed,
+            "queue": queue,
+            "review_actions": review_actions,
+            "ranked_established": ranked_established,
+            "archive_recommendations": archive_recommendations,
+        }
+
+    def archive_challenged_lesson(self, lesson_id: str, why: str, *, actor: str = "system") -> bool:
+        """Archive only a measured, challenged machine lesson after approval.
+
+        This is intentionally narrower than ``retire_lesson``: the latter is
+        the existing explicit operator path, while this method enforces the
+        Curator's evidence and authorship rules at the persistence boundary.
+        """
+        recommendation = next(
+            (
+                row
+                for row in self.lesson_review({})["archive_recommendations"]
+                if row["lesson_id"] == lesson_id
+            ),
+            None,
+        )
+        if recommendation is None:
+            return False
+        reason = " ".join(why.split())[:500] or str(recommendation["reason"])
+        return self.retire_lesson(lesson_id, reason, actor=actor)
+
     def mark_lessons_reviewed(self, lesson_ids: list[str]) -> None:
         """Record review rotation only; it never changes a lesson's standing."""
         ids = list(dict.fromkeys(str(lid) for lid in lesson_ids if str(lid).startswith("ls-")))
@@ -908,6 +1175,48 @@ class MemoryStore:
             }
             for r in rows
         ]
+
+    def _lesson_lifecycle_events(
+        self,
+        *,
+        lesson_id: str | None = None,
+        limit: int | None = None,
+        newest_first: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Read lesson-only lifecycle events without chatty journal rows.
+
+        The journal intentionally stores every system event. Lifecycle views
+        must query their own event family rather than taking a generic tail,
+        otherwise a busy committee can hide the latest archive or restore.
+        """
+        marks = ",".join("?" for _ in _LESSON_LIFECYCLE_KINDS)
+        order = "DESC" if newest_first else "ASC"
+        query = f"SELECT * FROM journal WHERE kind IN ({marks}) ORDER BY id {order}"
+        args: list[Any] = list(_LESSON_LIFECYCLE_KINDS)
+        if limit is not None and lesson_id is None:
+            query += " LIMIT ?"
+            args.append(max(0, limit))
+        events: list[dict[str, Any]] = []
+        for row in self.conn.execute(query, args):
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if lesson_id is not None and payload.get("id") != lesson_id:
+                continue
+            events.append(
+                {
+                    "ts": datetime.fromtimestamp(row["ts"], tz=timezone.utc),
+                    "kind": str(row["kind"]),
+                    "actor": str(row["actor"]),
+                    "payload": payload,
+                }
+            )
+            if limit is not None and lesson_id is not None and len(events) >= limit:
+                break
+        return events
 
     def _write_lesson_card(self, lesson_id: str) -> None:
         """Render the lesson as an Obsidian-compatible markdown card."""
@@ -950,8 +1259,213 @@ class MemoryStore:
             )
         if row["status"] == "retired":
             died = datetime.fromtimestamp(row["retired_ts"], tz=timezone.utc).date().isoformat()
-            lines += ["", f"## Retired {died}", "", row["retired_why"] or ""]
+            lines += ["", f"## Archived (Retired) {died}", "", row["retired_why"] or ""]
+        elif row["retired_ts"] is not None:
+            archived = datetime.fromtimestamp(row["retired_ts"], tz=timezone.utc).date().isoformat()
+            lines += [
+                "",
+                f"## Previously archived {archived}",
+                "",
+                row["retired_why"] or "",
+            ]
+        lifecycle_labels = {
+            "lesson_created": "created",
+            "lesson_status_changed": "status changed",
+            "lesson_established": "established",
+            "lesson_challenged": "challenged",
+            "lesson_retired": "archived",
+            "lesson_restored": "restored",
+        }
+        lifecycle = self._lesson_lifecycle_events(lesson_id=lesson_id, newest_first=False)
+        if lifecycle:
+            lines += ["", "## Lifecycle", ""]
+            for event in lifecycle:
+                payload = event["payload"]
+                detail = str(payload.get("why", "")).strip()
+                if not detail and event["kind"] == "lesson_status_changed":
+                    before = str(payload.get("from_status", "")).strip()
+                    after = str(payload.get("to_status", payload.get("status", ""))).strip()
+                    detail = " → ".join(value for value in (before, after) if value)
+                suffix = f" — {detail}" if detail else ""
+                stamp = event["ts"].date().isoformat()
+                label = lifecycle_labels.get(event["kind"], event["kind"])
+                lines.append(f"- {stamp} **{label}** by {event['actor']}{suffix}")
         _atomic_write(self.lessons_dir / f"{lesson_id}.md", "\n".join(lines) + "\n")
+
+    def record_curator_run(
+        self,
+        *,
+        status: str,
+        conditions: dict[str, Any],
+        reviewed: int,
+        created: int,
+        voted: int,
+        vote_ok: bool | None,
+        archive_recommendations: int,
+        actions: list[dict[str, Any]],
+        reason: str = "",
+        ts: datetime | None = None,
+    ) -> str:
+        """Persist one immutable Learning Curator review and its actions.
+
+        The current lesson row answers what the desk believes now.  This
+        report answers what was seen, ranked, deferred, or recommended on a
+        particular Tuesday/Friday pass.  It is advisory-only and has no path
+        to strategy, risk, or broker state.
+        """
+        if status not in {"completed", "degraded", "failed"}:
+            raise ValueError(f"unknown curator run status: {status!r}")
+        if not isinstance(conditions, dict):
+            raise ValueError("curator run conditions must be an object")
+        if not isinstance(actions, list):
+            raise ValueError("curator run actions must be a list")
+        if vote_ok is not None and type(vote_ok) is not bool:
+            raise ValueError("curator run vote_ok must be true, false, or null")
+        at = ts or datetime.now(tz=timezone.utc)
+        if at.tzinfo is None:
+            raise ValueError("curator run timestamp must be timezone-aware")
+        try:
+            counts = {
+                "reviewed": max(0, int(reviewed)),
+                "created": max(0, int(created)),
+                "voted": max(0, int(voted)),
+                "archive_recommendations": max(0, int(archive_recommendations)),
+            }
+        except (TypeError, ValueError) as e:
+            raise ValueError("curator run counts must be integers") from e
+
+        clean_actions: list[dict[str, Any]] = []
+        for raw_action in actions:
+            if not isinstance(raw_action, dict):
+                raise ValueError("each curator action must be an object")
+            raw_rank = raw_action.get("rank")
+            try:
+                rank = int(raw_rank) if raw_rank is not None else None
+            except (TypeError, ValueError) as e:
+                raise ValueError("curator action rank must be an integer or null") from e
+            evidence_ids = raw_action.get("evidence_ids", [])
+            if not isinstance(evidence_ids, list):
+                raise ValueError("curator action evidence_ids must be a list")
+            action_name = " ".join(str(raw_action.get("action", "reviewed")).split())[:80]
+            clean_actions.append(
+                {
+                    "lesson_id": str(raw_action.get("lesson_id", "")) or None,
+                    "rank": rank,
+                    "action": action_name or "reviewed",
+                    "before_status": str(raw_action.get("before_status", "")) or None,
+                    "after_status": str(raw_action.get("after_status", "")) or None,
+                    "reason": " ".join(str(raw_action.get("reason", "")).split())[:500],
+                    "evidence_ids": [str(value) for value in evidence_ids[:12]],
+                }
+            )
+
+        run_id = _short("cr")
+        clean_reason = " ".join(reason.split())[:1_000]
+        payload = {
+            "id": run_id,
+            "status": status,
+            **counts,
+            "vote_ok": vote_ok,
+            "reason": clean_reason,
+        }
+        # SQLite otherwise autocommits each statement. Keep the run, its
+        # action rows, journal entry, and Markdown audit together so the
+        # dashboard cannot show a successful review with a partial audit.
+        conn = self.conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """INSERT INTO curator_runs
+                   (id, ts, status, conditions, reviewed, created, voted, vote_ok,
+                    archive_recommendations, reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    at.timestamp(),
+                    status,
+                    json.dumps(conditions, default=str, sort_keys=True),
+                    counts["reviewed"],
+                    counts["created"],
+                    counts["voted"],
+                    None if vote_ok is None else int(vote_ok),
+                    counts["archive_recommendations"],
+                    clean_reason,
+                ),
+            )
+            for clean in clean_actions:
+                conn.execute(
+                    """INSERT INTO curator_actions
+                       (run_id, lesson_id, rank, action, before_status, after_status, reason, evidence_ids)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        run_id,
+                        clean["lesson_id"],
+                        clean["rank"],
+                        clean["action"],
+                        clean["before_status"],
+                        clean["after_status"],
+                        clean["reason"],
+                        json.dumps(clean["evidence_ids"]),
+                    ),
+                )
+            self.journal("lesson_curation", payload, actor="learning_curator")
+            self._write_curator_report(run_id, at, payload, conditions, clean_actions)
+            conn.execute("COMMIT")
+        except Exception:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            raise
+        return run_id
+
+    def _write_curator_report(
+        self,
+        run_id: str,
+        at: datetime,
+        payload: dict[str, Any],
+        conditions: dict[str, Any],
+        actions: list[dict[str, Any]],
+    ) -> None:
+        """Render a human-readable immutable companion to ``curator_runs``."""
+        lines = [
+            "---",
+            f"id: {run_id}",
+            f"status: {payload['status']}",
+            f"reviewed: {payload['reviewed']}",
+            f"created: {payload['created']}",
+            f"voted: {payload['voted']}",
+            f"vote_ok: {payload['vote_ok']}",
+            f"archive_recommendations: {payload['archive_recommendations']}",
+            f"timestamp: {at.astimezone(timezone.utc).isoformat()}",
+            "---",
+            "",
+            "# Learning Curator review",
+        ]
+        if payload["reason"]:
+            lines += ["", "## Run note", "", str(payload["reason"])]
+        lines += [
+            "",
+            "## Conditions",
+            "",
+            "```json",
+            json.dumps(conditions, indent=2, sort_keys=True, default=str),
+            "```",
+            "",
+            "## Actions",
+        ]
+        if not actions:
+            lines += ["", "No lesson actions were recorded."]
+        for action in actions:
+            target = action["lesson_id"] or "run"
+            state = " → ".join(
+                value for value in (action["before_status"], action["after_status"]) if value
+            )
+            suffix = f" ({state})" if state else ""
+            lines += ["", f"- **{action['action']}** [[{target}]]{suffix}: {action['reason']}"]
+            if action["evidence_ids"]:
+                lines.append(
+                    "  Evidence: " + ", ".join(f"[[{eid}]]" for eid in action["evidence_ids"])
+                )
+        _atomic_write(self.reviews_dir / f"{run_id}.md", "\n".join(lines) + "\n")
 
     # --------------------------------------------------------- world state
 
@@ -1621,6 +2135,147 @@ class MemoryStore:
                 }
             )
         return out
+
+    def curator_summary(self, *, limit: int = 8) -> dict[str, Any]:
+        """Read-only Learning Curator health, queue, and lifecycle summary.
+
+        This is intentionally derived from the permanent store instead of a
+        dashboard cache, so a restart cannot make a failed or missed review
+        appear successful.  ``retired`` is presented as ``archived`` to the
+        operator; the underlying append-only lifecycle name is retained for
+        compatibility with existing lesson cards and state.
+        """
+        review = self.lesson_review({})
+        raw_counts = dict(review["status_counts"])
+        status_counts = {
+            "candidate": int(raw_counts.get("candidate", 0)),
+            "established": int(raw_counts.get("established", 0)),
+            "challenged": int(raw_counts.get("challenged", 0)),
+            "archived": int(raw_counts.get("retired", 0)),
+        }
+        row = self.conn.execute("SELECT * FROM curator_runs ORDER BY ts DESC LIMIT 1").fetchone()
+        last_run: dict[str, Any] | None = None
+        recent_review_actions: list[dict[str, Any]] = []
+        if row is not None:
+            try:
+                conditions = json.loads(row["conditions"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                conditions = {}
+            age_seconds = max(0.0, _now() - float(row["ts"]))
+            fresh = age_seconds <= _CURATOR_STALE_AFTER.total_seconds()
+            if not fresh:
+                health = "stale"
+            elif row["status"] == "completed":
+                health = "ok"
+            else:
+                health = str(row["status"])
+            last_run = {
+                "id": row["id"],
+                "ts": datetime.fromtimestamp(row["ts"], tz=timezone.utc).isoformat(),
+                "status": row["status"],
+                "ok": health == "ok",
+                "health": health,
+                "fresh": fresh,
+                "age_hours": round(age_seconds / 3600.0, 1),
+                "conditions": conditions if isinstance(conditions, dict) else {},
+                "reviewed": int(row["reviewed"]),
+                "created": int(row["created"]),
+                "voted": int(row["voted"]),
+                "vote_ok": None if row["vote_ok"] is None else bool(row["vote_ok"]),
+                "archive_recommendations": int(row["archive_recommendations"]),
+                "reason": row["reason"],
+            }
+            actions = self.conn.execute(
+                """SELECT lesson_id, rank, action, before_status, after_status, reason, evidence_ids
+                   FROM curator_actions WHERE run_id = ? ORDER BY id LIMIT ?""",
+                (row["id"], limit),
+            ).fetchall()
+            for action in actions:
+                try:
+                    evidence_ids = json.loads(action["evidence_ids"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    evidence_ids = []
+                recent_review_actions.append(
+                    {
+                        "lesson_id": action["lesson_id"],
+                        "rank": action["rank"],
+                        "action": action["action"],
+                        "before_status": action["before_status"],
+                        "after_status": action["after_status"],
+                        "reason": action["reason"],
+                        "evidence_ids": evidence_ids if isinstance(evidence_ids, list) else [],
+                    }
+                )
+
+        lifecycle_kinds = {
+            "lesson_created": "created",
+            "lesson_status_changed": "status changed",
+            "lesson_established": "promoted",
+            "lesson_challenged": "challenged",
+            "lesson_retired": "archived",
+            "lesson_restored": "restored",
+        }
+        lifecycle: list[dict[str, Any]] = []
+        for event in self._lesson_lifecycle_events(limit=max(limit * 2, 20)):
+            action = lifecycle_kinds.get(event["kind"])
+            payload = event["payload"]
+            if action is None:
+                continue
+            lesson_id = str(payload.get("id", ""))
+            if not lesson_id.startswith("ls-"):
+                continue
+            lesson = self.conn.execute(
+                "SELECT statement, support, contradict FROM lessons WHERE id = ?", (lesson_id,)
+            ).fetchone()
+            reason = str(payload.get("why", "")).strip()
+            if not reason and event["kind"] == "lesson_status_changed":
+                before = str(payload.get("from_status", "")).strip()
+                after = str(payload.get("to_status", payload.get("status", ""))).strip()
+                reason = " → ".join(value for value in (before, after) if value)
+            lifecycle.append(
+                {
+                    "ts": event["ts"].isoformat(),
+                    "action": action,
+                    "actor": event["actor"],
+                    "lesson_id": lesson_id,
+                    "statement": "" if lesson is None else lesson["statement"],
+                    "support": 0 if lesson is None else int(lesson["support"]),
+                    "contradict": 0 if lesson is None else int(lesson["contradict"]),
+                    "reason": reason,
+                }
+            )
+            if len(lifecycle) >= limit:
+                break
+
+        def compact(card: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": card["id"],
+                "statement": card["statement"],
+                "outcome_support": int(card["outcome_support"]),
+                "outcome_contradict": int(card["outcome_contradict"]),
+                "outcome_observations": int(card["outcome_observations"]),
+                "relevance": float(card["relevance"]),
+            }
+
+        return {
+            "last_run": last_run,
+            "status_counts": status_counts,
+            "queue": {"candidate_unreviewed": int(review["candidate_unreviewed"])},
+            "top_lessons": [compact(card) for card in review["ranked_established"][:limit]],
+            "archive_recommendations": [
+                {
+                    "id": item["lesson_id"],
+                    "statement": item["statement"],
+                    "outcome_support": item["outcome_support"],
+                    "outcome_contradict": item["outcome_contradict"],
+                    "reason": item["reason"],
+                    "requires_operator_approval": item["requires_operator_approval"],
+                }
+                for item in review["archive_recommendations"][:limit]
+            ],
+            "recent_review_actions": recent_review_actions,
+            "changes": lifecycle,
+        }
 
     # ------------------------------------------------------------ summary
 

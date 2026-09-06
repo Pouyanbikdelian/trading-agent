@@ -210,7 +210,7 @@ def lessons_now(state_dir: Path, limit: int = 24) -> dict[str, Any]:
         ),
     }
     try:
-        from trading.memory.store import MemoryStore
+        from trading.memory.store import MemoryStore, is_operator_lesson_tags
 
         mem = MemoryStore(Path(state_dir) / "memory")
     except Exception:
@@ -228,7 +228,9 @@ def lessons_now(state_dir: Path, limit: int = 24) -> dict[str, Any]:
                         "statement": row["statement"],
                         "support_vs_contradict": f"{row['support']}/{row['contradict']}",
                         "tags": row["tags"],
-                        "author": "operator" if "operator" in (row["tags"] or "") else "historian",
+                        "author": "operator"
+                        if is_operator_lesson_tags(row["tags"])
+                        else "historian",
                     }
                 )
     except Exception:

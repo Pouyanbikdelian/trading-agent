@@ -100,7 +100,7 @@ HELP_TEXT = (
     "/k N | /k clear — override the strategy top-K at runtime\n"
     "/correlation — 12m correlation matrix of current holdings\n"
     "/memory — permanent-memory vitals: calibration, trust, lessons\n"
-    "/lesson <text> — propose a durable desk lesson; approval applies it\n"
+    "/lesson <text> — propose a durable desk lesson; archive/restore stays approval-gated\n"
     "/lessons [harden|soften <id>] — review or propose a re-weighting\n"
     "/edge [5|21|63] — did our picks beat the names we passed on?\n"
     "/edge why — the breakdown: rank, market conditions, entry level\n"
@@ -655,14 +655,14 @@ def _cmd_watchlist(args: list[str]) -> str:
 
 def _cmd_lesson_detail(lesson_id: str) -> str:
     """Show one canonical lesson rather than asking an LLM to paraphrase it."""
-    from trading.memory.store import MemoryStore
+    from trading.memory.store import MemoryStore, is_operator_lesson_tags
 
     mem = MemoryStore(settings.state_dir / "memory")
     try:
         row = next((r for r in mem.lessons() if r["id"] == lesson_id), None)
         if row is None:
             return f"No lesson `{lesson_id}`. Use /lessons to list the book."
-        author = "operator" if "operator" in (row["tags"] or "") else "historian"
+        author = "operator" if is_operator_lesson_tags(row["tags"]) else "historian"
         lines = [
             f"Lesson {row['id']} — {row['status']} ({author})",
             str(row["statement"]),
@@ -679,6 +679,14 @@ def _cmd_lesson_detail(lesson_id: str) -> str:
             lines.append(
                 f"Edit: /lesson edit {lesson_id} <replacement> · archive: /lesson archive {lesson_id}"
             )
+        elif row["status"] == "retired":
+            lines.append(
+                f"Restore: /lesson restore {lesson_id} <why this belongs back under review>"
+            )
+        elif row["status"] == "challenged":
+            lines.append(
+                f"If the Learning Curator has recommended archival: /lesson archive {lesson_id}"
+            )
         return PlainReply("\n".join(lines))
     except Exception as e:
         return f"could not read lesson `{lesson_id}`: `{e}`"
@@ -687,11 +695,12 @@ def _cmd_lesson_detail(lesson_id: str) -> str:
 
 
 def _cmd_lesson(args: list[str]) -> str:
-    """Stage a lesson creation/edit/archive; direct writes are forbidden."""
+    """Stage lesson management changes; direct writes are forbidden."""
     if not args:
         return (
             "usage: `/lesson <what the desk should remember>`\n"
-            "`/lesson show ID` · `/lesson edit ID <replacement>` · `/lesson archive ID`"
+            "`/lesson show ID` · `/lesson edit ID <replacement>` · `/lesson archive ID` · "
+            "`/lesson restore ID <reason>`"
         )
     action = args[0].lower()
     if action in {"show", "view"}:
@@ -708,6 +717,10 @@ def _cmd_lesson(args: list[str]) -> str:
             if len(args) != 2:
                 return "usage: `/lesson archive <lesson-id>`"
             return _desk_reply(store.propose_lesson_archive(args[1]))
+        if action == "restore":
+            if len(args) < 3:
+                return "usage: `/lesson restore <lesson-id> <why it belongs back under review>`"
+            return _desk_reply(store.propose_lesson_restore(args[1], " ".join(args[2:])))
         return _desk_reply(store.propose_lesson_create(" ".join(args)))
     except Exception as e:
         return f"could not stage the lesson change: `{e}`"
@@ -716,7 +729,7 @@ def _cmd_lesson(args: list[str]) -> str:
 def _cmd_lessons(args: list[str]) -> str:
     """Review lesson memory, or stage a status change for approval."""
     from trading.core.text import clip
-    from trading.memory.store import MemoryStore
+    from trading.memory.store import MemoryStore, is_operator_lesson_tags
 
     if args and args[0].lower() in ("harden", "soften"):
         if len(args) != 2:
@@ -732,13 +745,14 @@ def _cmd_lessons(args: list[str]) -> str:
         est = mem.lessons(status="established")
         cand = mem.lessons(status="candidate")
         challenged = mem.lessons(status="challenged")
-        if not est and not cand and not challenged:
+        archived = mem.lessons(status="retired")
+        if not est and not cand and not challenged and not archived:
             return PlainReply("No lessons yet. Use /lesson <statement> to propose the first one.")
 
         def _rows(rows: list[Any], limit: int) -> list[str]:
             out = []
             for r in rows[:limit]:
-                who = "operator" if "operator" in (r["tags"] or "") else "historian"
+                who = "operator" if is_operator_lesson_tags(r["tags"]) else "historian"
                 score = (
                     f" ({r['support']}/{r['contradict']})"
                     if r["support"] or r["contradict"]
@@ -757,8 +771,12 @@ def _cmd_lessons(args: list[str]) -> str:
         if challenged:
             lines.append(f"\nChallenged ({len(challenged)}):")
             lines.extend(_rows(challenged, 8))
+        if archived:
+            lines.append(f"\nArchived ({len(archived)}):")
+            lines.extend(_rows(archived, 5))
         lines.append(
-            "\n/lesson <text> proposes an addition · /lessons harden|soften ID proposes a status change"
+            "\n/lesson <text> proposes an addition · /lessons harden|soften ID proposes a status change · "
+            "/lesson restore ID <reason> stages a reversible archive restore"
         )
         return PlainReply("\n".join(lines))
     except Exception as e:
@@ -3131,6 +3149,14 @@ def _maybe_handle_desk_request(text: str) -> str | None:
     )
     if edit:
         return _desk_reply(_desk_store().propose_lesson_supersede(edit.group(1), edit.group(2)))
+    restore = re.search(
+        r"\brestore\s+(?:the\s+)?(?:archived\s+)?lesson\s+"
+        r"(ls-[A-Za-z0-9-]+)\s*(?:because|:)?\s+(.+)$",
+        compact,
+        re.I,
+    )
+    if restore:
+        return _desk_reply(_desk_store().propose_lesson_restore(restore.group(1), restore.group(2)))
     archive = re.search(
         r"\b(?:archive|retire)\s+(?:the\s+)?lesson\s+(ls-[A-Za-z0-9-]+)\b", compact, re.I
     )

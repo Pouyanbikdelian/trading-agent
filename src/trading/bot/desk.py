@@ -24,7 +24,7 @@ import yaml
 
 from trading.core.clock import Clock, UtcClock
 from trading.core.logging import logger
-from trading.memory.store import MemoryStore
+from trading.memory.store import MemoryStore, is_operator_lesson_tags
 
 _LOG = logger.bind(component="desk_copilot")
 
@@ -43,6 +43,8 @@ ChangeKind = Literal[
     "lesson_supersede",
     "lesson_status",
     "lesson_archive",
+    "lesson_curator_archive",
+    "lesson_restore",
 ]
 
 
@@ -243,6 +245,8 @@ class DeskProposal:
                 "lesson_supersede",
                 "lesson_status",
                 "lesson_archive",
+                "lesson_curator_archive",
+                "lesson_restore",
             }:
                 return None
             payload = raw.get("payload", {})
@@ -265,6 +269,8 @@ class DeskProposal:
                 },
                 "lesson_status": {"lesson_id", "old_status", "status"},
                 "lesson_archive": {"lesson_id", "statement"},
+                "lesson_curator_archive": {"lesson_id", "statement", "reason"},
+                "lesson_restore": {"lesson_id", "statement", "reason"},
             }
             if not required[kind].issubset(payload):
                 return None
@@ -472,7 +478,7 @@ class DeskChangeStore:
         mem = MemoryStore(self.state_dir / "memory")
         try:
             row = _lesson_snapshot(mem, lesson_id)
-            if row is None or "operator" not in row["tags"]:
+            if row is None or not is_operator_lesson_tags(row["tags"]):
                 return None
             return row
         finally:
@@ -528,15 +534,64 @@ class DeskChangeStore:
 
     def propose_lesson_archive(self, lesson_id: str) -> ChangeResult:
         old = self._operator_lesson(lesson_id)
-        if old is None or old["status"] == "retired":
-            return ChangeResult(None, f"`{lesson_id}` is not an active operator lesson.")
-        return ChangeResult(
-            self._stage(
-                "lesson_archive",
-                {"lesson_id": old["id"], "statement": old["statement"]},
-            ),
-            "",
-        )
+        if old is not None and old["status"] != "retired":
+            return ChangeResult(
+                self._stage(
+                    "lesson_archive",
+                    {"lesson_id": old["id"], "statement": old["statement"]},
+                ),
+                "",
+            )
+        # Historian lessons can be archived only when the deterministic
+        # Curator threshold says so.  This retains a human approval boundary
+        # even though no broker or order path is involved.
+        mem = MemoryStore(self.state_dir / "memory")
+        try:
+            recommendation = next(
+                (
+                    row
+                    for row in mem.curator_summary(limit=50)["archive_recommendations"]
+                    if row["id"] == lesson_id
+                ),
+                None,
+            )
+            if recommendation is None:
+                return ChangeResult(
+                    None,
+                    f"`{lesson_id}` is not an active operator lesson or a measured Curator archive recommendation.",
+                )
+            return ChangeResult(
+                self._stage(
+                    "lesson_curator_archive",
+                    {
+                        "lesson_id": lesson_id,
+                        "statement": str(recommendation["statement"]),
+                        "reason": str(recommendation["reason"]),
+                    },
+                ),
+                "",
+            )
+        finally:
+            mem.close()
+
+    def propose_lesson_restore(self, lesson_id: str, why: str) -> ChangeResult:
+        reason = " ".join(why.split())
+        if len(reason) < 10:
+            return ChangeResult(None, "Give a short reason for restoring this archived lesson.")
+        mem = MemoryStore(self.state_dir / "memory")
+        try:
+            row = _lesson_snapshot(mem, lesson_id)
+            if row is None or row["status"] != "retired":
+                return ChangeResult(None, f"`{lesson_id}` is not an archived lesson.")
+            return ChangeResult(
+                self._stage(
+                    "lesson_restore",
+                    {"lesson_id": row["id"], "statement": row["statement"], "reason": reason[:500]},
+                ),
+                "",
+            )
+        finally:
+            mem.close()
 
     def pending(self, proposal_id: str | None = None) -> DeskProposal | None:
         now = self.clock.now()
@@ -666,7 +721,10 @@ class DeskChangeStore:
         try:
             if proposal.kind == "lesson_create":
                 lid = mem.add_lesson(
-                    p["statement"], tags=f"operator {p['strength']}", status=p["status"]
+                    p["statement"],
+                    tags=f"operator {p['strength']}",
+                    status=p["status"],
+                    actor="operator",
                 )
                 return (
                     f"✅ Lesson `{lid}` added as *{p['status']}*.",
@@ -674,12 +732,22 @@ class DeskChangeStore:
                 )
             if proposal.kind == "lesson_supersede":
                 old = _lesson_snapshot(mem, p["lesson_id"])
-                if old is None or "operator" not in old["tags"] or old["status"] == "retired":
+                if (
+                    old is None
+                    or not is_operator_lesson_tags(old["tags"])
+                    or old["status"] == "retired"
+                ):
                     raise ValueError(f"`{p['lesson_id']}` is no longer an active operator lesson")
                 lid = mem.add_lesson(
-                    p["statement"], tags=f"operator {p['strength']}", status=p["status"]
+                    p["statement"],
+                    tags=f"operator {p['strength']}",
+                    status=p["status"],
+                    actor="operator",
                 )
-                mem.retire_lesson(p["lesson_id"], f"Superseded by {lid} via Telegram approval")
+                if not mem.retire_lesson(
+                    p["lesson_id"], f"Superseded by {lid} via Telegram approval", actor="operator"
+                ):
+                    raise ValueError(f"`{p['lesson_id']}` is no longer an active operator lesson")
                 return (
                     f"✅ Lesson `{p['lesson_id']}` superseded by `{lid}` ({p['status']}).",
                     {
@@ -691,7 +759,7 @@ class DeskChangeStore:
                 lesson_before = _lesson_snapshot(mem, p["lesson_id"])
                 if lesson_before is None or lesson_before["status"] == "retired":
                     raise ValueError(f"`{p['lesson_id']}` is no longer a live lesson")
-                if not mem.set_lesson_status(p["lesson_id"], p["status"]):
+                if not mem.set_lesson_status(p["lesson_id"], p["status"], actor="operator"):
                     raise ValueError(f"could not update `{p['lesson_id']}`")
                 return (
                     f"✅ Lesson `{p['lesson_id']}` is now *{p['status']}*.",
@@ -699,14 +767,61 @@ class DeskChangeStore:
                 )
             if proposal.kind == "lesson_archive":
                 old = _lesson_snapshot(mem, p["lesson_id"])
-                if old is None or "operator" not in old["tags"] or old["status"] == "retired":
+                if (
+                    old is None
+                    or not is_operator_lesson_tags(old["tags"])
+                    or old["status"] == "retired"
+                ):
                     raise ValueError(f"`{p['lesson_id']}` is no longer an active operator lesson")
-                mem.retire_lesson(p["lesson_id"], "Archived by operator via Telegram approval")
+                if not mem.retire_lesson(
+                    p["lesson_id"], "Archived by operator via Telegram approval", actor="operator"
+                ):
+                    raise ValueError(f"`{p['lesson_id']}` is no longer an active operator lesson")
                 return (
                     f"✅ Archived operator lesson `{p['lesson_id']}`; its history remains in memory.",
                     {
                         "old_value": {"id": old["id"], "statement": old["statement"]},
                         "new_value": "retired",
+                    },
+                )
+            if proposal.kind == "lesson_curator_archive":
+                old = _lesson_snapshot(mem, p["lesson_id"])
+                if old is None or old["status"] != "challenged":
+                    raise ValueError(f"`{p['lesson_id']}` is no longer a challenged lesson")
+                if not mem.archive_challenged_lesson(p["lesson_id"], p["reason"], actor="operator"):
+                    raise ValueError(
+                        f"`{p['lesson_id']}` no longer meets the measured Curator archive threshold"
+                    )
+                return (
+                    f"✅ Archived Curator lesson `{p['lesson_id']}` after measured contradictions. "
+                    "Its evidence and history remain in memory; restore requires a new approval.",
+                    {
+                        "old_value": {
+                            "id": old["id"],
+                            "statement": old["statement"],
+                            "status": old["status"],
+                        },
+                        "new_value": "retired",
+                        "reason": p["reason"],
+                    },
+                )
+            if proposal.kind == "lesson_restore":
+                old = _lesson_snapshot(mem, p["lesson_id"])
+                if old is None or old["status"] != "retired":
+                    raise ValueError(f"`{p['lesson_id']}` is no longer an archived lesson")
+                if not mem.restore_retired_lesson(p["lesson_id"], p["reason"], actor="operator"):
+                    raise ValueError(f"could not restore `{p['lesson_id']}`")
+                return (
+                    f"✅ Restored lesson `{p['lesson_id']}` as *candidate*. It remains out of agent "
+                    "context until fresh measured outcomes re-establish it.",
+                    {
+                        "old_value": {
+                            "id": old["id"],
+                            "statement": old["statement"],
+                            "status": old["status"],
+                        },
+                        "new_value": "candidate",
+                        "reason": p["reason"],
                     },
                 )
         finally:
@@ -748,8 +863,18 @@ def describe_proposal(proposal: DeskProposal) -> str:
         )
     elif proposal.kind == "lesson_status":
         body = f"Change lesson `{p['lesson_id']}` from {p['old_status']} to *{p['status']}*."
-    else:
+    elif proposal.kind == "lesson_archive":
         body = f"Archive operator lesson `{p['lesson_id']}`. Its historical card and audit trail remain."
+    elif proposal.kind == "lesson_curator_archive":
+        body = (
+            f"Archive challenged Curator lesson `{p['lesson_id']}` after its measured-evidence review:\n"
+            f"{p['reason']}\n\nThis does not trade or change a strategy; the lesson's card and evidence remain."
+        )
+    else:
+        body = (
+            f"Restore archived lesson `{p['lesson_id']}` as *candidate*:\n{p['reason']}\n\n"
+            "It remains out of agent context until fresh measured outcomes re-establish it."
+        )
     return (
         f"📋 Proposed desk change `{proposal.id}`\n{body}\n\n"
         "Tap Approve or Cancel. This proposal expires in 10 minutes."
