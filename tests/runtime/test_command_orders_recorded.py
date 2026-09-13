@@ -176,3 +176,101 @@ def test_every_order_submitting_command_is_covered() -> None:
     i_flag = src.index("needs_lock = cmd.type in _ORDER_SUBMITTING_COMMANDS")
     i_use = src.index("used = _recording(")
     assert i_flag < i_use
+
+
+class TestTheRowIsSettledOnTheBrokersAnswer:
+    """Saving the row was only half the job.
+
+    Until 2026-09-13 the recorder wrote PENDING and never touched the row
+    again, so every operator order stayed PENDING for life. PENDING means
+    "created locally, not sent" — a direct lie about an order the broker
+    had acknowledged, and one that left `/pending`, `/orders` and the
+    reconciliation matcher working from a false premise. Five such rows
+    from August 2026 were still open a month later.
+    """
+
+    @staticmethod
+    def _status(store: OrderStore, client_order_id: str = "cmd-UNH") -> str:
+        row = store.conn.execute(
+            "SELECT status FROM orders WHERE client_order_id = ?", (client_order_id,)
+        ).fetchone()
+        return str(row["status"])
+
+    def test_an_acknowledged_order_is_marked_submitted(self, tmp_path) -> None:
+        store = OrderStore(tmp_path / "orders.db")
+
+        _RecordingBroker(_Broker(), store).submit_order(_order())
+
+        assert self._status(store) == "submitted"
+
+    def test_a_refused_order_is_marked_rejected_and_still_raises(self, tmp_path) -> None:
+        """A row that can never fill must not masquerade as working."""
+        store = OrderStore(tmp_path / "orders.db")
+
+        class _Refuses:
+            def submit_order(self, order):
+                raise RuntimeError("insufficient margin")
+
+        rec = _RecordingBroker(_Refuses(), store)
+
+        with pytest.raises(RuntimeError, match="insufficient margin"):
+            rec.submit_order(_order())
+
+        assert self._status(store) == "rejected"
+
+    def test_the_brokers_own_id_is_kept_when_it_returns_one(self, tmp_path) -> None:
+        """Reconciliation matches executions by broker id; drop it and an
+        old row can never be tied back to its fill."""
+        store = OrderStore(tmp_path / "orders.db")
+
+        class _Acks:
+            def submit_order(self, order):
+                return SimpleNamespace(broker_order_id="ib-5512")
+
+        _RecordingBroker(_Acks(), store).submit_order(_order())
+
+        row = store.conn.execute(
+            "SELECT broker_order_id FROM orders WHERE client_order_id = 'cmd-UNH'"
+        ).fetchone()
+        assert row["broker_order_id"] == "ib-5512"
+
+    def test_a_settle_failure_never_blocks_the_trade(self, tmp_path) -> None:
+        inner = _Broker()
+
+        class _HalfBrokenStore:
+            def save_order(self, order): ...
+
+            def update_status(self, *a, **kw):
+                raise RuntimeError("db locked")
+
+        _RecordingBroker(inner, _HalfBrokenStore()).submit_order(_order())
+
+        assert len(inner.submitted) == 1
+
+    def test_an_unsaved_order_is_not_settled(self, tmp_path) -> None:
+        """No row was written, so there is nothing to update — and a blind
+        UPDATE would silently do nothing anyway."""
+        touched: list[str] = []
+
+        class _WriteOnlyFails:
+            def save_order(self, order):
+                raise RuntimeError("disk full")
+
+            def update_status(self, *a, **kw):
+                touched.append("update")
+
+        _RecordingBroker(_Broker(), _WriteOnlyFails()).submit_order(_order())
+
+        assert touched == []
+
+    def test_no_operator_order_is_left_claiming_it_was_never_sent(self, tmp_path) -> None:
+        """The property that matters: after a normal command, nothing in
+        the ledger still says PENDING."""
+        store = OrderStore(tmp_path / "orders.db")
+        rec = _RecordingBroker(_Broker(), store)
+
+        for sym in ("V", "MU", "AMD"):
+            rec.submit_order(_order(sym))
+
+        rows = store.conn.execute("SELECT status FROM orders").fetchall()
+        assert [r["status"] for r in rows] == ["submitted"] * 3

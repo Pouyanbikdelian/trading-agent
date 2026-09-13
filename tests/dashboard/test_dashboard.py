@@ -46,6 +46,13 @@ def test_build_summary_sections(populated_state) -> None:
     assert "context" in out and "generated_at" in out
 
 
+def test_dashboard_page_exposes_transaction_cost_ledger() -> None:
+    from trading.dashboard.app import _PAGE
+
+    assert 'id="lvCosts"' in _PAGE
+    assert "broker-recorded net commissions" in _PAGE
+
+
 def test_dashboard_exposes_learning_curator_health_and_audit(populated_state) -> None:
     state, data = populated_state
     mem = MemoryStore(state / "memory")

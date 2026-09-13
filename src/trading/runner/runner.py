@@ -274,6 +274,10 @@ class Runner:
         # the scheduled slot.  One async lock keeps that benign race from
         # issuing duplicate yfinance batches or racing the state artifact.
         self._market_watch_lock: asyncio.Lock | None = None
+        # The scheduled PM and /pm run share a decision file. Keep the full
+        # refresh/context/decision sequence together so an older run cannot
+        # overwrite a newer refusal or decision.
+        self._agent_pm_lock: asyncio.Lock | None = None
         # Deduplicate the operational warning emitted when a live process
         # starts/restarts after the narrow NYSE-open capture window.  The
         # safety block remains active; only the repeated Telegram noise is
@@ -1712,18 +1716,82 @@ class Runner:
             logger.bind(component="agents").exception("committee run failed")
 
     async def _run_agent_pm_async(self) -> None:
+        """Serialize scheduled and on-demand PM decisions over one fresh ladder."""
+        lock = getattr(self, "_agent_pm_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._agent_pm_lock = lock
+        if lock.locked():
+            logger.bind(component="agent_pm").info("PM already running; duplicate request skipped")
+            self.alerts.info(
+                "🧠 Agent PM is already refreshing candidates or preparing its decision."
+            )
+            return
+        async with lock:
+            await self._run_agent_pm_with_candidates()
+
+    async def _run_agent_pm_with_candidates(self) -> None:
         """Weekly agent PM — committee-driven SIMULATED sleeve. Reads a
         week of journaled rulings + calibration, makes one LLM call, and
         rebalances a virtual portfolio under state/agent_pm/. Never
-        touches IBKR or the order path; failures logged and swallowed."""
+        touches IBKR or the order path.
+
+        Refresh the mechanical ladder before gathering context. The weekly
+        cycle publishes its own snapshot *after* this job, which otherwise
+        left the PM reading last week's stale ladder every Friday.
+        """
+        from trading.agents.pm_signal import record_pm_refusal
+
+        # Withdraw the prior decision before any network work. A failed or
+        # interrupted refresh must not leave an earlier decision eligible.
+        try:
+            record_pm_refusal(settings.state_dir, "candidate refresh and PM decision in progress")
+        except Exception:
+            logger.bind(component="agent_pm").exception("could not withdraw the prior PM decision")
+            self.alerts.critical(
+                "Agent PM could not update its decision file; PM run stopped. "
+                "The previous decision may still be eligible — check state storage before cycling."
+            )
+            return
+
+        mem = None
+        # Set once ``run_agent_pm`` has written a usable decision. Everything
+        # after that point is presentation: the book read, the account lookup
+        # and the Telegram digest. Without this flag the catch-all below
+        # replaced a perfectly good weekly decision with a refusal whenever
+        # the digest raised — a formatting bug would have cost a trading week.
+        decision_written = False
         try:
             from trading.agents.context import build_context
             from trading.agents.pm import format_pm_digest, run_agent_pm
             from trading.memory.store import default_store
 
+            prep = await asyncio.to_thread(self.cycle.refresh_candidate_snapshot_for_pm)
+            if not prep.ok or prep.snapshot is None:
+                reason = f"candidate preparation failed: {prep.reason}"
+                record_pm_refusal(settings.state_dir, reason)
+                self.alerts.warning(
+                    f"🧠 Agent PM skipped: {reason}.\n"
+                    "Its previous decision was withdrawn. Retry `/pm run` after the data recovers."
+                )
+                return
+
             mem = default_store()
-            ctx = await asyncio.to_thread(build_context, settings.state_dir, settings.data_dir)
+            ctx = await asyncio.to_thread(
+                build_context,
+                settings.state_dir,
+                settings.data_dir,
+                include_candidate_ladder=False,
+            )
+            # Use the exact verified payload from this refresh. A parallel
+            # cycle can replace the shared snapshot file while context loads;
+            # neither that replacement nor an env-default fallback is this
+            # PM's prepared input.
+            ctx["candidate_ladder"] = prep.snapshot
             result = await asyncio.to_thread(run_agent_pm, ctx, mem, settings.state_dir)
+            decision_written = bool(result.get("ok"))
+            if not decision_written:
+                record_pm_refusal(settings.state_dir, str(result.get("reason") or "PM run failed"))
             # Pass the freshly-written book so the digest is self-contained:
             # one message showing what changed AND the resulting holdings
             # with units. Previously the book arrived separately, in share
@@ -1753,8 +1821,23 @@ class Runner:
                     "no account snapshot for the PM digest translation"
                 )
             self.alerts.info(format_pm_digest(result, book, account=account))
-        except Exception:
+        except Exception as e:
             logger.bind(component="agent_pm").exception("agent PM run failed")
+            if not decision_written:
+                with contextlib.suppress(Exception):
+                    record_pm_refusal(settings.state_dir, f"PM run failed: {type(e).__name__}: {e}")
+            self.alerts.warning(
+                f"🧠 Agent PM run failed: {type(e).__name__}: {e}"
+                + (
+                    "\n_The decision itself was written and stays eligible._"
+                    if decision_written
+                    else ""
+                )
+            )
+        finally:
+            if mem is not None:
+                with contextlib.suppress(Exception):
+                    mem.close()
 
     async def _mark_agent_pm_async(self) -> None:
         """Daily equity mark for the simulated PM sleeve. Silent on success."""

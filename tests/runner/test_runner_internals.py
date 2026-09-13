@@ -51,6 +51,195 @@ def _bare_runner(tmp_path: Path) -> Runner:
     return runner
 
 
+@pytest.mark.parametrize("on_demand", [False, True])
+def test_pm_refreshes_candidates_before_context_and_decision(
+    monkeypatch, tmp_path: Path, on_demand: bool
+) -> None:
+    """Friday's PM must see this refresh, not the previous Friday's file."""
+    from trading.agents import context, pm
+    from trading.agents.pm_signal import load_pm_signal, pm_decision_path
+    from trading.memory import store
+    from trading.runner.cycle import CandidateSnapshotPreparation
+
+    monkeypatch.setattr(
+        runner_module, "settings", settings.model_copy(update={"state_dir": tmp_path})
+    )
+    runner = _bare_runner(tmp_path)
+    calls = []
+    prepared = {"as_of": "2026-09-11", "ranked": [{"symbol": "AAPL"}], "age_days": 0}
+    old_path = pm_decision_path(tmp_path)
+    old_path.parent.mkdir(parents=True)
+    old_path.write_text(json.dumps({"ok": True, "weights": {"MSFT": 0.1}}))
+    memory = SimpleNamespace(close=lambda: calls.append("closed"))
+
+    def prepare():
+        calls.append("refresh")
+        # The previous positive decision is already withdrawn while work runs.
+        assert not load_pm_signal(tmp_path, sleeve_pct=0.1).ok
+        return CandidateSnapshotPreparation(True, "ok", "2026-09-11", prepared)
+
+    def build_context(state_dir, data_dir, *, include_candidate_ladder):
+        assert calls == ["refresh"]
+        assert state_dir == tmp_path
+        assert include_candidate_ladder is False
+        calls.append("context")
+        return {"positions": [], "candidate_ladder": {"source": "unrelated disk replacement"}}
+
+    def decide(ctx, mem, state_dir):
+        assert calls == ["refresh", "context"]
+        assert ctx["candidate_ladder"] is prepared
+        assert mem is memory and state_dir == tmp_path
+        calls.append("decision")
+        result = {
+            "ok": True,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "weights": {"AAPL": 0.1},
+            "candidate_ladder_stale": False,
+        }
+        old_path.write_text(json.dumps(result))
+        return result
+
+    runner.cycle = SimpleNamespace(refresh_candidate_snapshot_for_pm=prepare)
+    monkeypatch.setattr(context, "build_context", build_context)
+    monkeypatch.setattr(pm, "run_agent_pm", decide)
+    monkeypatch.setattr(pm, "format_pm_digest", lambda *a, **kw: "PM decision ready")
+    monkeypatch.setattr(store, "default_store", lambda: memory)
+    if on_demand:
+        flag = tmp_path / "agent_pm_now.flag"
+        flag.touch()
+        asyncio.run(runner._check_agent_pm_flag())
+        assert not flag.exists()
+    else:
+        asyncio.run(runner._run_agent_pm_async())
+
+    assert calls == ["refresh", "context", "decision", "closed"]
+    assert load_pm_signal(tmp_path, sleeve_pct=0.1).ok
+
+
+@pytest.mark.parametrize("raise_error", [False, True])
+def test_failed_candidate_prep_withdraws_previous_pm_decision(
+    monkeypatch, tmp_path: Path, raise_error: bool
+) -> None:
+    """A failed refresh must never let the previous positive decision survive."""
+    from trading.agents import context, pm
+    from trading.agents.pm_signal import load_pm_signal, pm_decision_path
+    from trading.runner.cycle import CandidateSnapshotPreparation
+
+    monkeypatch.setattr(
+        runner_module, "settings", settings.model_copy(update={"state_dir": tmp_path})
+    )
+    runner = _bare_runner(tmp_path)
+    path = pm_decision_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {"ok": True, "ts": datetime.now(timezone.utc).isoformat(), "weights": {"AAPL": 0.1}}
+        )
+    )
+    book = path.parent / "portfolio.json"
+    book.write_text('{"holdings":{"AAPL":10}}')
+    targets = path.parent / "last_targets.json"
+    targets.write_text('{"keys":["equity:AAPL"]}')
+    before = (book.read_bytes(), targets.read_bytes())
+    assert load_pm_signal(tmp_path, sleeve_pct=0.1).ok
+
+    def prepare():
+        if raise_error:
+            raise RuntimeError("price source unavailable")
+        return CandidateSnapshotPreparation(False, "last bar is 7 days old")
+
+    def forbidden(*a, **kw):
+        pytest.fail("failed candidate preparation must stop before context or PM execution")
+
+    runner.cycle = SimpleNamespace(refresh_candidate_snapshot_for_pm=prepare)
+    monkeypatch.setattr(context, "build_context", forbidden)
+    monkeypatch.setattr(pm, "run_agent_pm", forbidden)
+    asyncio.run(runner._run_agent_pm_async())
+
+    result = load_pm_signal(tmp_path, sleeve_pct=0.1)
+    assert not result.ok
+    assert ("price source unavailable" if raise_error else "7 days old") in result.reason
+    assert (book.read_bytes(), targets.read_bytes()) == before
+    assert runner.alerts.last_warning is not None
+
+
+@pytest.mark.parametrize("failing_step", ["digest", "alert"])
+def test_a_presentation_failure_never_withdraws_a_written_pm_decision(
+    monkeypatch, tmp_path: Path, failing_step: str
+) -> None:
+    """The digest is presentation. A decision already on disk must survive it.
+
+    The refusal recorder exists so a failed *preparation* cannot leave a
+    stale decision eligible. It used to sit in a bare ``except`` that also
+    covered the book read, the account lookup and the Telegram send — so a
+    formatting bug after a good PM run silently cost the whole trading week.
+    """
+    from trading.agents import context, pm
+    from trading.agents.pm_signal import load_pm_signal, pm_decision_path
+    from trading.memory import store
+    from trading.runner.cycle import CandidateSnapshotPreparation
+
+    monkeypatch.setattr(
+        runner_module, "settings", settings.model_copy(update={"state_dir": tmp_path})
+    )
+    runner = _bare_runner(tmp_path)
+    path = pm_decision_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    decision = {
+        "ok": True,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "weights": {"AAPL": 0.1},
+        "candidate_ladder_stale": False,
+    }
+
+    def decide(ctx, mem, state_dir):
+        path.write_text(json.dumps(decision))
+        return dict(decision)
+
+    def boom(*a, **kw):
+        raise RuntimeError("digest template is broken")
+
+    runner.cycle = SimpleNamespace(
+        refresh_candidate_snapshot_for_pm=lambda: CandidateSnapshotPreparation(
+            True, "ok", "2026-09-11", {"as_of": "2026-09-11", "age_days": 0}
+        )
+    )
+    monkeypatch.setattr(context, "build_context", lambda *a, **kw: {"positions": []})
+    monkeypatch.setattr(pm, "run_agent_pm", decide)
+    monkeypatch.setattr(store, "default_store", lambda: SimpleNamespace(close=lambda: None))
+    if failing_step == "digest":
+        monkeypatch.setattr(pm, "format_pm_digest", boom)
+    else:
+        monkeypatch.setattr(pm, "format_pm_digest", lambda *a, **kw: "ready")
+        monkeypatch.setattr(runner.alerts, "info", boom)
+
+    asyncio.run(runner._run_agent_pm_async())
+
+    result = load_pm_signal(tmp_path, sleeve_pct=0.1)
+    assert result.signal is not None, f"decision was withdrawn by a {failing_step} failure"
+    assert json.loads(path.read_text())["ok"] is True
+    assert runner.alerts.last_warning is not None
+    assert "stays eligible" in runner.alerts.last_warning
+
+
+def test_pm_duplicate_request_does_not_start_a_second_preparation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    runner = _bare_runner(tmp_path)
+
+    async def forbidden():
+        pytest.fail("a second PM job must not race the active decision")
+
+    monkeypatch.setattr(runner, "_run_agent_pm_with_candidates", forbidden)
+
+    async def run():
+        runner._agent_pm_lock = asyncio.Lock()
+        async with runner._agent_pm_lock:
+            await runner._run_agent_pm_async()
+
+    asyncio.run(run())
+
+
 class _CapturingScheduler:
     """Minimal scheduler seam for checking registration without a live loop."""
 

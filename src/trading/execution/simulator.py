@@ -176,6 +176,7 @@ class Simulator(Broker):
             quantity=order.quantity * side_mult,
             price=fill_price,
             commission=commission,
+            commission_currency=order.instrument.currency,
             venue=self.name,
         )
 

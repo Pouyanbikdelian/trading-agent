@@ -143,6 +143,26 @@ def test_save_and_load_fills(store: OrderStore, order: Order) -> None:
     assert rows[0].ts < rows[1].ts
 
 
+def test_save_and_load_fill_preserves_broker_commission_currency(
+    store: OrderStore, order: Order
+) -> None:
+    store.save_order(order)
+    fill = Fill(
+        order_id=order.client_order_id,
+        ts=datetime(2024, 1, 2, tzinfo=timezone.utc),
+        quantity=10,
+        price=100.0,
+        commission=0.35,
+        commission_currency="USD",
+        exec_id="ibkr-exec-1",
+    )
+
+    store.save_fill(fill, client_order_id=order.client_order_id)
+    loaded = store.load_fills(client_order_id=order.client_order_id)
+
+    assert loaded == [fill]
+
+
 def test_load_fills_since_filter(store: OrderStore, order: Order) -> None:
     store.save_order(order)
     early = Fill(

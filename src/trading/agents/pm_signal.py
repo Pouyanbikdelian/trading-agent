@@ -43,6 +43,7 @@ back in ``dropped`` for the caller to surface.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -52,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from trading.agents.pm import UNIVERSE as PM_ETF_SHELF
+from trading.core.clock import UtcClock
 from trading.core.logging import logger
 from trading.core.types import AssetClass, Instrument, Signal
 
@@ -120,6 +122,43 @@ class PMSignalResult:
 
 def pm_decision_path(state_dir: Path | str) -> Path:
     return Path(state_dir) / "agent_pm" / "last_run.json"
+
+
+def record_pm_refusal(
+    state_dir: Path | str,
+    reason: str,
+    *,
+    now: datetime | None = None,
+) -> Path:
+    """Persist a non-tradeable PM result when its input could not be prepared.
+
+    The execution bridge reads the *latest* PM decision.  If preparing the
+    authoritative candidate ladder fails, simply skipping the PM would leave
+    a previously valid decision eligible for the next cycle.  Replacing it
+    with an explicit failure makes that state fail closed instead.
+
+    This deliberately writes only the decision record: the simulated PM book
+    is historical research state and must not be changed merely because a new
+    decision was not possible.
+    """
+    path = pm_decision_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ok": False,
+        "ts": (now or UtcClock().now()).isoformat(),
+        "reason": reason,
+        "source": "runner_pm_preparation",
+    }
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=1)
+        os.replace(tmp, path)
+    except Exception:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+    return path
 
 
 def previous_targets_path(state_dir: Path | str) -> Path:

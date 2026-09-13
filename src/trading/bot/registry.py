@@ -64,7 +64,7 @@ REGISTRY: tuple[Spec, ...] = (
     Spec("/health", "broker, heartbeat, queue at a glance"),
     Spec("/positions", "open positions + weights"),
     Spec("/balances", "cash by currency, equity"),
-    Spec("/orders", "last 7d of orders, grouped"),
+    Spec("/orders", "last 7d of orders + everything still open; `resolve` retires dead rows"),
     Spec("/pending", "orders currently working", aliases=("/pending_orders", "/pending-orders")),
     Spec("/heartbeat", "age of the last cycle"),
     Spec("/report", "weekly report"),

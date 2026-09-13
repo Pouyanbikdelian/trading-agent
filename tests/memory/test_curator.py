@@ -176,14 +176,55 @@ def test_curator_run_is_persisted_for_dashboard_and_markdown_audit(tmp_path) -> 
                 "evidence_ids": [],
             }
         ],
-        ts=datetime(2026, 9, 4, 19, tzinfo=timezone.utc),
+        # Relative to now, deliberately. A pinned calendar date made this
+        # assertion rot: ``ok`` folds in a freshness check against
+        # ``_CURATOR_STALE_AFTER``, so the fixture silently aged past the
+        # window and the test began failing on a date rather than on a
+        # change. A test that fails because the calendar moved teaches
+        # nothing and trains you to ignore it.
+        ts=datetime.now(tz=timezone.utc) - timedelta(hours=1),
     )
 
     summary = mem.curator_summary()
     assert summary["last_run"]["id"] == run_id
     assert summary["last_run"]["ok"] is True
+    assert summary["last_run"]["fresh"] is True
     assert summary["recent_review_actions"][0]["lesson_id"] == lesson_id
     assert (mem.reviews_dir / f"{run_id}.md").exists()
+
+
+def test_a_curator_run_that_stopped_happening_is_reported_stale(tmp_path) -> None:
+    """The freshness half of ``ok`` — the part the rotted fixture above was
+    accidentally exercising, now asserted on purpose."""
+    mem = MemoryStore(tmp_path / "memory")
+    lesson_id = mem.add_lesson("A curator that stops running must not look healthy.")
+
+    mem.record_curator_run(
+        status="completed",
+        conditions={},
+        reviewed=1,
+        created=0,
+        voted=0,
+        vote_ok=True,
+        archive_recommendations=0,
+        actions=[
+            {
+                "lesson_id": lesson_id,
+                "rank": 1,
+                "action": "awaiting_evidence",
+                "before_status": "candidate",
+                "after_status": "candidate",
+                "reason": "No completed outcome linked yet.",
+                "evidence_ids": [],
+            }
+        ],
+        ts=datetime.now(tz=timezone.utc) - timedelta(days=30),
+    )
+
+    last_run = mem.curator_summary()["last_run"]
+    assert last_run["fresh"] is False
+    assert last_run["ok"] is False
+    assert last_run["health"] == "stale"
 
 
 def test_curator_run_rolls_back_when_its_markdown_audit_cannot_be_written(

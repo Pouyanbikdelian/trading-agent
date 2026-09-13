@@ -448,3 +448,153 @@ def test_missing_fundamentals_warns_sector_cap_disabled(
         lvl == "warning" and "sector cap" in msg.lower() and "not enforced" in msg.lower()
         for lvl, msg in alerts.sent
     )
+
+
+@pytest.fixture
+def pm_prep_cycle(tiny_universe_yaml, primed_cache, tmp_state, monkeypatch):
+    """The PM's input stage must remain independent of all execution state."""
+    from trading.core import config as config_module
+    from trading.runner import cycle as cycle_module
+
+    monkeypatch.setattr(
+        config_module,
+        "settings",
+        config_module.settings.model_copy(update={"state_dir": tmp_state}),
+    )
+    cfg = RunnerConfig(
+        universe=tiny_universe_yaml,
+        strategies=["top_k_momentum"],
+        strategy_params={"top_k_momentum": {"k": 1}},
+        freq="1D",
+        auto_refresh=True,
+        history_bars=250,
+    )
+    cycle, _, alerts = _make_cycle(cfg, primed_cache, tmp_state)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("PM candidate preparation entered the account/order path")
+
+    class _NoExecutionAccess:
+        def __getattr__(self, name):
+            pytest.fail(f"PM candidate preparation accessed execution member {name}")
+
+    for attribute in ("broker", "risk_manager", "order_store", "runner_store"):
+        monkeypatch.setattr(cycle, attribute, _NoExecutionAccess())
+    for method in ("_run_inner", "_fetch_account", "_request_cycle_approval", "_add_pm_targets"):
+        monkeypatch.setattr(cycle, method, forbidden)
+    monkeypatch.setattr(cycle_module, "execution_lock", forbidden)
+    return cycle, alerts
+
+
+def test_pm_candidate_prep_refreshes_week_old_prices_before_publishing(
+    pm_prep_cycle, primed_cache, tmp_state, monkeypatch
+) -> None:
+    """A weekly PM must rank newly fetched bars before its next trade cycle."""
+    from trading.agents.candidates import (
+        candidate_snapshot_path,
+        write_runner_candidate_snapshot,
+    )
+    from trading.runner.playbook import Playbook, PlaybookRule
+
+    cycle, alerts = pm_prep_cycle
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    last_week = today - pd.Timedelta(days=7)
+    monkeypatch.setattr(cycle, "_clock", lambda: today.to_pydatetime())
+    old_snapshot = {"as_of": str(last_week.date()), "ranked": [{"symbol": "OLD"}]}
+    write_runner_candidate_snapshot(tmp_state, old_snapshot)
+    refreshed_frames = {}
+    for symbol in ("TEST_A", "TEST_B"):
+        ins = Instrument(symbol=symbol, asset_class=AssetClass.EQUITY)
+        frame = primed_cache.read(ins, "1D")
+        frame.index = pd.date_range(end=last_week, periods=len(frame), freq="1D", name="ts")
+        primed_cache.write(ins, "1D", frame)
+        fresh = frame.tail(7).copy()
+        fresh.index = pd.date_range(end=today, periods=7, freq="1D", name="ts")
+        refreshed_frames[symbol] = fresh
+
+    fetched_symbols = set()
+
+    class _FreshSource:
+        name = "synthetic_refresh"
+
+        def get_bars(self, instrument, start, end, freq):
+            frame = refreshed_frames[instrument.symbol]
+            result = frame.loc[(frame.index >= start) & (frame.index <= end)]
+            if not result.empty:
+                fetched_symbols.add(instrument.symbol)
+            return result
+
+    monkeypatch.setattr(cycle, "source_factory", lambda _ins: _FreshSource())
+    # Verify the snapshot carries the active playbook's parameters, while
+    # preserving the transition notification for the actual trading cycle.
+    active_params = {"top_k_momentum": {"k": 2, "lookback": 126, "skip": 21, "rebalance": 63}}
+    cycle._playbook = Playbook(rules={"risk_on": PlaybookRule(strategy_params=active_params)})
+    cycle._regime_label_fn = lambda _ts: "risk_on"
+
+    result = cycle.refresh_candidate_snapshot_for_pm()
+
+    assert result.ok, result.reason
+    assert result.as_of == str(today.date())
+    assert fetched_symbols == {"TEST_A", "TEST_B"}
+    snapshot = json.loads(candidate_snapshot_path(tmp_state).read_text())
+    assert result.snapshot == snapshot
+    assert snapshot["as_of"] == result.as_of
+    assert snapshot["age_days"] == 0
+    assert "staleness_warning" not in snapshot
+    assert snapshot["strategy_params"] == active_params
+    assert snapshot["universe_size"] == 2
+    assert {row["symbol"] for row in snapshot["ranked"]} <= {"TEST_A", "TEST_B"}
+    assert cycle._last_regime is None
+    assert cycle._cycle_count == 0
+    assert alerts.sent == []
+    assert not (tmp_state / "heartbeat.json").exists()
+    assert not (tmp_state / cycle.APPROVAL_PENDING_FILE).exists()
+
+
+@pytest.mark.parametrize("age_days", [7, None])
+def test_pm_candidate_prep_preserves_snapshot_when_freshness_unverified(
+    pm_prep_cycle, tmp_state, monkeypatch, age_days
+) -> None:
+    """Rewriting cached bars must not turn a stale ladder into a fresh one."""
+    from trading.agents import candidates
+
+    cycle, alerts = pm_prep_cycle
+    old_snapshot = {"as_of": "2024-10-01", "ranked": [{"symbol": "OLD"}]}
+    path = candidates.write_runner_candidate_snapshot(tmp_state, old_snapshot)
+    original_bytes = path.read_bytes()
+    monkeypatch.setattr(candidates, "_age_days", lambda _last_bar: age_days)
+
+    result = cycle.refresh_candidate_snapshot_for_pm()
+
+    assert not result.ok
+    assert result.reason
+    assert result.snapshot is None
+    assert path.read_bytes() == original_bytes
+    assert alerts.sent == []
+
+
+def test_pm_candidate_prep_refuses_force_flatten_playbook(
+    pm_prep_cycle, tmp_state, monkeypatch
+) -> None:
+    from trading.agents.candidates import write_runner_candidate_snapshot
+    from trading.runner.playbook import Playbook, PlaybookRule
+
+    cycle, alerts = pm_prep_cycle
+    path = write_runner_candidate_snapshot(tmp_state, {"as_of": "prior snapshot"})
+    original_bytes = path.read_bytes()
+    cycle._playbook = Playbook(rules={"crisis": PlaybookRule(force_flatten=True)})
+    cycle._regime_label_fn = lambda _ts: "crisis"
+    monkeypatch.setattr(
+        cycle,
+        "_load_prices",
+        lambda *_args: pytest.fail("a flat-book playbook should stop before refreshing"),
+    )
+
+    result = cycle.refresh_candidate_snapshot_for_pm()
+
+    assert not result.ok
+    assert "flat book" in result.reason
+    assert result.snapshot is None
+    assert path.read_bytes() == original_bytes
+    assert cycle._last_regime is None
+    assert alerts.sent == []

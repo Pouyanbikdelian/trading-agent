@@ -1059,6 +1059,7 @@ class IbkrBroker(Broker):
         out: list[Fill] = []
         for f in raw:
             exec_ = f.execution
+            report = getattr(f, "commissionReport", None)
             ts = getattr(exec_, "time", None)
             if ts is None:
                 continue
@@ -1074,7 +1075,10 @@ class IbkrBroker(Broker):
                     ts=ts,
                     quantity=float(exec_.shares),
                     price=float(exec_.price),
-                    commission=float(getattr(f.commissionReport, "commission", 0.0) or 0.0),
+                    commission=float(getattr(report, "commission", 0.0) or 0.0),
+                    commission_currency=(
+                        str(getattr(report, "currency", "") or "").upper() or None
+                    ),
                     venue=getattr(exec_, "exchange", None),
                     # IBKR's own id for this execution. Reconciliation
                     # re-reads a window of fills every cycle by design, so

@@ -30,9 +30,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -111,6 +113,16 @@ class CycleReport(BaseModel):
     duration_ms: float = 0.0
 
 
+@dataclass(frozen=True)
+class CandidateSnapshotPreparation:
+    """Outcome of the PM's non-trading candidate-ladder refresh."""
+
+    ok: bool
+    reason: str
+    as_of: str | None = None
+    snapshot: dict[str, Any] | None = None
+
+
 def bought_symbols(target_weights: dict[str, float] | None) -> set[str]:
     """The names a signal actually wants held, as bare symbols.
 
@@ -177,6 +189,10 @@ class Cycle:
     #: execution lock, and one cycle must never persist another's PM view.
     _PM_TARGET_KEYS_METADATA: ClassVar[str] = "_pm_target_keys_to_persist"
 
+    #: Carries a bridge refusal through planning, so a zero-sleeve mechanical
+    #: book cannot misleadingly report that it is merely warming up.
+    _PM_BRIDGE_REFUSAL_REASON_METADATA: ClassVar[str] = "_pm_bridge_refusal_reason"
+
     def __init__(
         self,
         config: RunnerConfig,
@@ -209,6 +225,10 @@ class Cycle:
         self._regime_label_fn = regime_label_fn
         self._cycle_count = 0
         self._last_regime: str | None = None
+        # Scheduled and operator-triggered PM runs can arrive together. They
+        # share a candidate artifact, so serialize preparation rather than
+        # allowing an older refresh to win the final atomic replace.
+        self._pm_candidate_prep_lock = threading.Lock()
 
     # ------------------------------------------------------- public API
 
@@ -277,7 +297,9 @@ class Cycle:
 
     # -------------------------------------------------------- internals
 
-    def _effective_config(self, ts: datetime) -> tuple[RunnerConfig, bool]:
+    def _effective_config(
+        self, ts: datetime, *, announce_transition: bool = True
+    ) -> tuple[RunnerConfig, bool]:
         """Apply the playbook (if configured) to derive this cycle's config.
 
         Returns ``(cfg, force_flatten)``. If no playbook is wired or the
@@ -304,7 +326,7 @@ class Cycle:
         if rule is None:
             return self.config, False
 
-        if label != self._last_regime:
+        if label != self._last_regime and announce_transition:
             logger.bind(component="cycle").info(
                 f"regime transition: {self._last_regime} -> {label}"
             )
@@ -323,6 +345,105 @@ class Cycle:
         if rule.strategy_params:
             updates["strategy_params"] = dict(rule.strategy_params)
         return self.config.model_copy(update=updates), bool(rule.force_flatten)
+
+    def refresh_candidate_snapshot_for_pm(self) -> CandidateSnapshotPreparation:
+        """Refresh the PM's authoritative ladder without entering trading code.
+
+        The PM must decide from the same resolved playbook, screens, runtime
+        overrides, and price frame as the later cycle.  This intentionally
+        stops before account reads, risk evaluation, order storage, or broker
+        submission.  A PM's current picks are also excluded here: before the
+        PM has made this decision, adding its prior picks would make the
+        mechanical ladder circular.
+
+        Failure is returned rather than raised.  ``Runner`` persists that
+        failure as a non-tradeable PM decision, preventing an old otherwise
+        valid decision from surviving this refresh attempt.
+        """
+        with self._pm_candidate_prep_lock:
+            ts = self._clock()
+            try:
+                cfg, force_flatten = self._effective_config(ts, announce_transition=False)
+                if force_flatten:
+                    return CandidateSnapshotPreparation(
+                        False, "active playbook requires a flat book"
+                    )
+                if not cfg.strategies:
+                    return CandidateSnapshotPreparation(
+                        False, "no mechanical strategy is configured"
+                    )
+
+                instruments = load_universe(cfg.universe)
+                if cfg.screens is not None:
+                    instruments = self._apply_screens(instruments, cfg)
+                if not instruments:
+                    return CandidateSnapshotPreparation(
+                        False, f"no instruments available for {cfg.universe}"
+                    )
+
+                # Deliberately do not call _add_pm_targets(): it reads the
+                # previous PM decision, whereas this snapshot is the input to
+                # the next one. See the method docstring above.
+                prices = self._load_prices(instruments, ts)
+                if prices.empty or len(prices) < 2:
+                    return CandidateSnapshotPreparation(
+                        False, f"insufficient price history for {cfg.universe}"
+                    )
+
+                # A broker-free preparation cannot know which pins currently
+                # have positions. Passing None intentionally reserves every
+                # pin, the conservative preview behavior.
+                weights = self._generate_combined_weights(prices, cfg=cfg, position_symbols=None)
+                if cfg.vol_target is not None:
+                    weights = vol_target(
+                        weights,
+                        prices,
+                        target_vol=cfg.vol_target,
+                        lookback=cfg.vol_lookback,
+                        periods_per_year=cfg.periods_per_year,
+                        max_leverage=cfg.max_leverage,
+                    )
+                weights = self._apply_operator_mode(weights, prices, announce=False)
+                signal = self._weights_to_signal(weights, instruments, ts, cfg=cfg)
+                ranked, snapshot = self._candidate_snapshot_payload(
+                    prices,
+                    signal,
+                    cfg=cfg,
+                    position_symbols=None,
+                )
+                if not ranked or snapshot is None:
+                    return CandidateSnapshotPreparation(
+                        False, "mechanical strategy produced no rankable candidates"
+                    )
+
+                # Freshly writing old bars is not a refresh.  ``age_days``
+                # can be None if a malformed index defeated the helper, and
+                # that must fail closed too.
+                age_days = snapshot.get("age_days")
+                if (
+                    isinstance(age_days, bool)
+                    or not isinstance(age_days, int)
+                    or age_days < 0
+                    or snapshot.get("staleness_warning")
+                ):
+                    detail = (
+                        str(snapshot.get("staleness_warning"))
+                        if snapshot.get("staleness_warning")
+                        else f"candidate ladder freshness could not be verified (age_days={age_days!r})"
+                    )
+                    return CandidateSnapshotPreparation(False, detail)
+
+                from trading.agents.candidates import write_runner_candidate_snapshot
+
+                write_runner_candidate_snapshot(self._state_dir(), snapshot)
+                as_of = str(snapshot.get("as_of") or "") or None
+                logger.bind(component="cycle").info(
+                    f"PM candidate snapshot prepared: {len(ranked)} ranked name(s), as_of={as_of}"
+                )
+                return CandidateSnapshotPreparation(True, "ok", as_of=as_of, snapshot=snapshot)
+            except Exception as e:
+                logger.bind(component="cycle").exception("PM candidate snapshot preparation failed")
+                return CandidateSnapshotPreparation(False, f"{type(e).__name__}: {e}")
 
     def _working_orders(self) -> list[Any]:
         """Orders live at the broker right now, or [] if it cannot say.
@@ -905,21 +1026,7 @@ class Cycle:
         strategy_has_view = bool(signal.target_weights)
         rejections = [d for d in decisions if d.action == "reject"]
         if not orders and not strategy_has_view:
-            held = list(getattr(account, "positions", {}).keys())
-            self.alerts.info(
-                "📊 *Cycle plan: no orders*\n"
-                "Strategy emitted no target weights this cycle — "
-                "likely still in warm-up (insufficient price history) or "
-                "today isn't a rebalance bar.\n\n"
-                + (
-                    f"_Current positions ({len(held)}) are untouched: "
-                    f"`{', '.join(h.split(':')[-1] for h in held[:8])}`._\n"
-                    "Use `/flatten` to clear them, `/signal` to see what "
-                    "the strategy would pick once it has data."
-                    if held
-                    else "_Portfolio is flat; nothing to do._"
-                )
-            )
+            self._announce_no_orders(signal, account)
         elif not orders and rejections:
             # Strategy did decide, but the risk manager refused. Most common:
             # no-margin breach on a CHF-base account buying USD stocks
@@ -1952,6 +2059,53 @@ class Cycle:
             )
             return 1.0
 
+    def _announce_no_orders(self, signal: Any, account: Any) -> None:
+        """Explain a zero-order cycle without guessing at the cause.
+
+        A withheld PM and a strategy still in warm-up produce an identical
+        position report, so each needs its own sentence. On 2026-09-11 a
+        cycle whose PM had just been refused for a stale candidate ladder
+        still reported "likely still in warm-up" immediately below that
+        refusal: at ``STRATEGY_SLEEVE_PCT=0.0`` the mechanical book scales
+        to nothing, which is indistinguishable from having no view. The
+        operator was told the desk was warming up when it was actually
+        blocked.
+        """
+        held = [str(k) for k in (getattr(account, "positions", None) or {})]
+        held_note = (
+            f"_Current positions ({len(held)}) are untouched: "
+            f"`{', '.join(h.split(':')[-1] for h in held[:8])}`._"
+            if held
+            else "_Portfolio is flat; nothing to do._"
+        )
+        pm_refusal = (getattr(signal, "metadata", None) or {}).get(
+            self._PM_BRIDGE_REFUSAL_REASON_METADATA
+        )
+        if pm_refusal:
+            self.alerts.warning(
+                "📊 *Cycle plan: no orders*\n"
+                f"Agent PM was withheld: {pm_refusal}.\n"
+                "The mechanical sleeve has no executable targets at its configured size, "
+                "so the cycle intentionally did not manufacture a basket.\n\n"
+                f"{held_note}\n"
+                "_A fresh PM decision is required before a later cycle can propose "
+                "discretionary entries._"
+            )
+            return
+        self.alerts.info(
+            "📊 *Cycle plan: no orders*\n"
+            "Strategy emitted no target weights this cycle — "
+            "likely still in warm-up (insufficient price history) or "
+            "today isn't a rebalance bar.\n\n"
+            + (
+                f"{held_note}\n"
+                "Use `/flatten` to clear them, `/signal` to see what "
+                "the strategy would pick once it has data."
+                if held
+                else held_note
+            )
+        )
+
     def _merge_pm_signal(
         self,
         signal: Any,
@@ -2013,14 +2167,31 @@ class Cycle:
             if "disabled" not in result.reason:
                 logger.bind(component="cycle").warning(f"PM bridge: {result.reason}")
                 self.alerts.error(format_bridge_note(result))
+            # Stamp the refusal on the signal for the same reason the alert
+            # above fires: the PM was meant to reach the market and did not,
+            # so a later "no orders" message must say that rather than blame
+            # a warm-up. The off switch is excluded deliberately — for a
+            # mechanical-only desk the warm-up explanation is the true one.
+            metadata = dict(signal.metadata or {})
+            if "disabled" not in result.reason:
+                metadata[self._PM_BRIDGE_REFUSAL_REASON_METADATA] = result.reason
+                metadata["strategy_sleeve_pct"] = f"{strat:.4f}"
             if strat >= 1.0:
-                return signal
+                # Nothing to scale: the strategy already has the whole
+                # account. The refusal still rides along, and the off
+                # switch leaves the signal genuinely untouched.
+                if metadata == (signal.metadata or {}):
+                    return signal
+                return signal.model_copy(update={"metadata": metadata})
             # The strategy's own share still applies even when the PM does
             # not trade. Skipping this on the refusal path would hand the
             # whole account to a strategy the operator had deliberately
             # sized down.
             return signal.model_copy(
-                update={"target_weights": _scaled_strategy_targets(signal.target_weights, strat)}
+                update={
+                    "target_weights": _scaled_strategy_targets(signal.target_weights, strat),
+                    "metadata": metadata,
+                }
             )
 
         sleeve = result.sleeve_pct
@@ -2205,17 +2376,42 @@ class Cycle:
             return
         if not stale:
             return
-        lines = [
-            f"  `{o.instrument.symbol}` {o.side.value} {o.quantity:g} "
-            f"({status.value}, {(ts_start - o.created_at).days}d old)"
-            for o, status, _ in stale[:8]
-        ]
-        logger.bind(component="cycle").warning(f"{len(stale)} order(s) open past the stale window")
-        self.alerts.error(
-            f"⚠️ *{len(stale)} order(s) still open* — never reached a terminal state:\n"
-            + "\n".join(lines)
-            + "\n_Local position view may differ from the broker. Check /orders._"
+
+        def _line(row: tuple[Any, Any, Any]) -> str:
+            o, status, _ = row
+            return (
+                f"  `{o.instrument.symbol}` {o.side.value} {o.quantity:g} "
+                f"({status.value}, {(ts_start - o.created_at).days}d old)"
+            )
+
+        # Rows older than the reconciliation window are a different problem
+        # from rows inside it, and saying so is the whole point. Inside, the
+        # cycle is still fetching fills and the row may yet settle itself.
+        # Outside, the broker's execution history no longer reaches back
+        # that far, so no number of cycles will ever close it — which is
+        # exactly what happened to five August rows that alarmed on every
+        # cycle for a month while the message implied waiting would help.
+        floor = ts_start - self.RECONCILE_LOOKBACK
+        healing = [row for row in stale if row[0].created_at >= floor]
+        beyond = [row for row in stale if row[0].created_at < floor]
+        logger.bind(component="cycle").warning(
+            f"{len(stale)} order(s) open past the stale window "
+            f"({len(beyond)} beyond the reconciliation lookback)"
         )
+        parts = [f"⚠️ *{len(stale)} order(s) still open* — never reached a terminal state:"]
+        if healing:
+            parts.append("\n".join(_line(row) for row in healing[:8]))
+            parts.append("_Still inside the reconciliation window; these may settle on their own._")
+        if beyond:
+            parts.append("\n".join(_line(row) for row in beyond[:8]))
+            parts.append(
+                f"_The {len(beyond)} above predate the {self.RECONCILE_LOOKBACK.days}d "
+                "reconciliation window — no future cycle can settle them. Confirm at the "
+                "broker that nothing is working, then `/orders resolve` to retire them "
+                "without inventing a fill._"
+            )
+        parts.append("_Local position view may differ from the broker. Check `/orders`._")
+        self.alerts.error("\n".join(parts))
 
     # Per-instrument refresh hard ceiling. yfinance has no built-in timeout;
     # before this we silently hung for >5min on the sp500 universe, blowing
@@ -3445,22 +3641,10 @@ class Cycle:
         must never affect whether a risk-managed order is considered.
         """
         try:
-            ranked = self._compute_top_candidates(
-                prices, cfg=cfg, top_n=30, position_symbols=position_symbols
-            )
-            if not ranked:
-                return None
-            from trading.agents.candidates import (
-                build_runner_candidate_snapshot,
-                write_runner_candidate_snapshot,
-            )
+            from trading.agents.candidates import write_runner_candidate_snapshot
 
-            snapshot = build_runner_candidate_snapshot(
-                prices,
-                ranked=ranked,
-                selected=bought_symbols(signal.target_weights),
-                config=cfg,
-                generated_at=self._clock(),
+            ranked, snapshot = self._candidate_snapshot_payload(
+                prices, signal, cfg=cfg, position_symbols=position_symbols
             )
             if snapshot is not None:
                 write_runner_candidate_snapshot(self._state_dir(), snapshot)
@@ -3468,6 +3652,30 @@ class Cycle:
         except Exception:
             logger.bind(component="cycle").exception("candidate snapshot write failed")
             return None
+
+    def _candidate_snapshot_payload(
+        self,
+        prices: pd.DataFrame,
+        signal: Signal,
+        *,
+        cfg: RunnerConfig,
+        position_symbols: set[str] | None = None,
+    ) -> tuple[list[tuple[str, float]] | None, dict[str, Any] | None]:
+        """Share ranking construction without publishing an unverified PM input."""
+        from trading.agents.candidates import build_runner_candidate_snapshot
+
+        ranked = self._compute_top_candidates(
+            prices, cfg=cfg, top_n=30, position_symbols=position_symbols
+        )
+        if not ranked:
+            return None, None
+        return ranked, build_runner_candidate_snapshot(
+            prices,
+            ranked=ranked,
+            selected=bought_symbols(signal.target_weights),
+            config=cfg,
+            generated_at=self._clock(),
+        )
 
     def _entry_percentiles(self, prices: pd.DataFrame, window: int = 252) -> dict[str, float]:
         """Where each name sits in its 52-week range today, 0=low, 1=high.
@@ -3593,7 +3801,9 @@ class Cycle:
             )
         )
 
-    def _apply_operator_mode(self, weights: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+    def _apply_operator_mode(
+        self, weights: pd.DataFrame, prices: pd.DataFrame, *, announce: bool = True
+    ) -> pd.DataFrame:
         """Apply the operator-set mode from ``state/mode.json``.
 
         Default mode is NEUTRAL (pass-through) — this only reshapes
@@ -3612,10 +3822,11 @@ class Cycle:
         if state.mode in (Mode.BULL, Mode.NEUTRAL):
             return weights  # fast path — no reshape
         adjusted = apply_mode(weights, prices, state.mode)
-        self.alerts.info(
-            f"mode active: {state.mode.value} "
-            f"(set by {state.set_by} at {state.set_at[:19] if state.set_at else '?'})"
-        )
+        if announce:
+            self.alerts.info(
+                f"mode active: {state.mode.value} "
+                f"(set by {state.set_by} at {state.set_at[:19] if state.set_at else '?'})"
+            )
         return adjusted
 
     #: Fraction of its weight each name keeps under DEFENSE / BEAR, applied

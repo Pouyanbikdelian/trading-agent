@@ -1966,8 +1966,8 @@ def _cmd_cancel_order(args: list[str]) -> str:
     return _queue_command("cancel_order", {"client_order_id": matches[0]})
 
 
-def _cmd_orders() -> str:
-    r"""``/orders`` — recent orders from the local store, grouped by status.
+def _cmd_orders(args: list[str] | None = None) -> str | None:
+    r"""``/orders [resolve]`` — recent orders from the local store.
 
     Previously this iterated ``load_orders`` results as if each row were
     a flat ``Order``, but the store actually returns
@@ -1975,37 +1975,52 @@ def _cmd_orders() -> str:
     AttributeError. Now: properly unpacked, status shown, and pending
     orders surface at the top so the operator sees in-flight work first.
     """
+    if args and str(args[0]).lower() in ("resolve", "--resolve"):
+        # Irreversible and evidence-dependent, so it goes to the runner
+        # where the broker lives rather than being decided in the bot.
+        return _queue_command("resolve_orders", {})
+
+    now = datetime.now(tz=timezone.utc)
     try:
-        from trading.core.types import OrderStatus
         from trading.execution.store import OrderStore
 
         store = OrderStore(settings.state_dir / "orders.db")
         from datetime import timedelta
 
-        recent = store.load_orders(since=datetime.now(tz=timezone.utc) - timedelta(days=7))
+        recent = store.load_orders(since=now - timedelta(days=7))
+        # A non-terminal row is operationally live no matter how old it is,
+        # so it is never age-filtered. On 2026-09-11 the cycle warned about
+        # five orders open for 18-29 days and this command — the one that
+        # warning tells the operator to run — replied "no orders in the last
+        # 7 days". Both were true; together they hid the problem.
+        still_open = store.open_orders()
     except Exception as e:
         return f"could not read orders: {e}"
 
-    if not recent:
-        return "no orders in the last 7 days."
+    open_ids = {o.client_order_id for o, _st, _bid in still_open}
+    other = [(o, st, bid) for (o, st, bid) in recent if o.client_order_id not in open_ids]
 
-    pending_statuses = {OrderStatus.PENDING, OrderStatus.SUBMITTED}
-    pending: list[tuple[Any, OrderStatus, str | None]] = []
-    other: list[tuple[Any, OrderStatus, str | None]] = []
-    for o, st, bid in recent:
-        if st in pending_statuses:
-            pending.append((o, st, bid))
-        else:
-            other.append((o, st, bid))
+    if not still_open and not other:
+        return "no orders in the last 7 days, and nothing still open."
+
+    def _age(o: Any) -> str:
+        days = (now - o.created_at).days
+        return f", {days}d old" if days >= 1 else ""
 
     lines: list[str] = []
-    if pending:
-        lines.append(f"⏳ *In flight: {len(pending)} order(s)*")
-        for o, st, _bid in pending[-15:]:
+    if still_open:
+        lines.append(f"⏳ *In flight: {len(still_open)} order(s)*")
+        for o, st, _bid in still_open[-15:]:
             lines.append(
                 f"  `{o.client_order_id[:14]:<14}` "
                 f"{o.side.value} {o.quantity:g} {o.instrument.symbol} "
-                f"({o.order_type.value}) — {st.value}"
+                f"({o.order_type.value}) — {st.value}{_age(o)}"
+            )
+        stale = [o for o, _st, _bid in still_open if (now - o.created_at).days >= 7]
+        if stale:
+            lines.append(
+                f"_{len(stale)} of these predate the broker's execution history. "
+                "Check IBKR directly; `/orders resolve` retires them once you have._"
             )
         lines.append("")
     lines.append(f"*Recent (last 7d, {len(other)} order(s)):*")
@@ -2026,18 +2041,17 @@ def _cmd_pending_orders() -> str:
     SUBMITTED but not yet terminal.
     """
     try:
-        from trading.core.types import OrderStatus
         from trading.execution.store import OrderStore
 
         store = OrderStore(settings.state_dir / "orders.db")
-        from datetime import timedelta
 
-        recent = store.load_orders(since=datetime.now(tz=timezone.utc) - timedelta(days=2))
+        # No age window. "In flight" is a status, not a recency: the old
+        # two-day filter made an order that had been stuck for weeks — the
+        # only kind worth chasing — the one thing this command could not
+        # show.
+        in_flight = store.open_orders()
     except Exception as e:
         return f"could not read orders: {e}"
-
-    pending_statuses = {OrderStatus.PENDING, OrderStatus.SUBMITTED}
-    in_flight = [(o, st, bid) for (o, st, bid) in recent if st in pending_statuses]
     if not in_flight:
         return "✅ no orders currently in flight (per local store)."
 
@@ -2045,7 +2059,16 @@ def _cmd_pending_orders() -> str:
     now = datetime.now(tz=timezone.utc)
     for o, st, bid in in_flight:
         age_s = (now - o.created_at).total_seconds()
-        age_str = f"{age_s / 60:.0f}m" if age_s >= 60 else f"{age_s:.0f}s"
+        if age_s >= 86400:
+            # Weeks-old rows read as "41760m ago" before this, which is
+            # technically an age and practically unreadable.
+            age_str = f"{age_s / 86400:.0f}d"
+        elif age_s >= 3600:
+            age_str = f"{age_s / 3600:.0f}h"
+        elif age_s >= 60:
+            age_str = f"{age_s / 60:.0f}m"
+        else:
+            age_str = f"{age_s:.0f}s"
         bid_str = f" broker={bid}" if bid else ""
         lines.append(
             f"  `{o.client_order_id[:14]:<14}` {st.value} {age_str} ago — "
@@ -3329,7 +3352,7 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
     if cmd == "/flatten":
         return _cmd_flatten()
     if cmd == "/orders":
-        return _cmd_orders()
+        return _cmd_orders(args)
     if cmd in ("/pending", "/pending_orders", "/pending-orders"):
         return _cmd_pending_orders()
     if cmd == "/cancel_order":

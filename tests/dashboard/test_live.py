@@ -14,6 +14,7 @@ from trading.dashboard.live import (
     daily_pnl_bars,
     fills_with_symbols,
     realized_by_symbol,
+    transaction_cost_summary,
 )
 
 # ------------------------------------------------------------ fixtures
@@ -102,6 +103,73 @@ def test_realized_by_symbol_round_trip(tmp_path: Path) -> None:
 
 def test_realized_missing_db_is_empty(tmp_path: Path) -> None:
     assert fills_with_symbols(tmp_path / "nope.db") == []
+
+
+# ------------------------------------------------------- transaction costs
+
+
+def test_legacy_ledger_keeps_missing_commission_currency_explicit(tmp_path: Path) -> None:
+    """The pre-currency schema remains readable but cannot be relabelled USD."""
+    db = tmp_path / "orders.db"
+    _mk_orders_db(db, [("NVDA", "BUY", 1_704_067_200.0, 10, 100.0, 1.25)])
+
+    fills = fills_with_symbols(db)
+
+    assert fills[0]["commission"] == 1.25
+    assert fills[0]["commission_currency"] is None
+
+
+def test_transaction_cost_summary_keeps_currencies_and_legacy_rows_separate() -> None:
+    jan_legacy = datetime(2026, 1, 2, tzinfo=timezone.utc).timestamp()
+    jan_buy = datetime(2026, 1, 12, tzinfo=timezone.utc).timestamp()
+    jan_sell = datetime(2026, 1, 20, tzinfo=timezone.utc).timestamp()
+    feb = datetime(2026, 2, 3, tzinfo=timezone.utc).timestamp()
+    feb_rebate = datetime(2026, 2, 6, tzinfo=timezone.utc).timestamp()
+    summary = transaction_cost_summary(
+        [
+            {"ts": jan_legacy, "commission": 9.99, "commission_currency": None},
+            {"ts": jan_buy, "commission": 1.25, "commission_currency": "USD"},
+            {"ts": jan_sell, "commission": 0.75, "commission_currency": "usd"},
+            {"ts": feb, "commission": 2.0, "commission_currency": "CHF"},
+            {"ts": feb_rebate, "commission": -0.25, "commission_currency": "USD"},
+        ]
+    )
+
+    assert summary["recorded_from"] == "2026-01-02"
+    assert summary["currency_verified_from"] == "2026-01-12"
+    assert summary["legacy_execution_count"] == 1
+    assert summary["legacy_nonzero_commission_count"] == 1
+    assert summary["totals"] == [
+        {"currency": "CHF", "amount": 2.0},
+        {"currency": "USD", "amount": 1.75},
+    ]
+    assert summary["months"] == [
+        {
+            "month": "2026-01",
+            "fees": [{"currency": "USD", "amount": 2.0}],
+            "cumulative": [{"currency": "USD", "amount": 2.0}],
+        },
+        {
+            "month": "2026-02",
+            "fees": [
+                {"currency": "CHF", "amount": 2.0},
+                {"currency": "USD", "amount": -0.25},
+            ],
+            "cumulative": [
+                {"currency": "CHF", "amount": 2.0},
+                {"currency": "USD", "amount": 1.75},
+            ],
+        },
+    ]
+
+
+def test_transaction_cost_summary_empty_ledger_has_no_coverage() -> None:
+    summary = transaction_cost_summary([])
+
+    assert summary["recorded_execution_count"] == 0
+    assert summary["recorded_from"] is None
+    assert summary["totals"] == []
+    assert summary["months"] == []
 
 
 # ------------------------------------------------------------ fx / curves

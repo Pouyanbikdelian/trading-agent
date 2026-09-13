@@ -378,6 +378,8 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  .hl .src{color:var(--mut);font-size:11px}
  .dot{display:inline-block;width:8px;height:8px;border-radius:99px;margin-right:6px}
  .ev{display:flex;justify-content:space-between;margin:4px 0;font-size:12.5px}
+ .costblock{padding:12px 0;border-bottom:1px solid var(--edge)}.costblock:last-child{border-bottom:none;padding-bottom:0}
+ .costmeta{font-size:12px;line-height:1.45;color:var(--mut);margin:8px 0}.costtotal{font-size:17px;font-weight:650;font-variant-numeric:tabular-nums}
  .ok{color:var(--up)}.stale{color:var(--warn)}
  .interp{margin-top:10px;font-size:12.5px;line-height:1.45;color:var(--mut);
   border-left:3px solid var(--edge);padding:2px 0 2px 10px}
@@ -440,6 +442,9 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
   <div id="lvRaceNote" class="muted" style="font-size:11.5px;margin-top:8px"></div></div>
  <div class="card big"><h2>Daily PnL · USD <span class="muted" id="lvPnlLbl" style="text-transform:none;letter-spacing:0"></span></h2>
   <canvas id="lvPnl" height="72"></canvas></div>
+ <div class="card big"><h2>Transaction costs
+  <span class="muted" style="text-transform:none;letter-spacing:0">— broker-recorded net commissions, kept in their original currency</span></h2>
+  <div id="lvCosts"></div></div>
  <div class="card"><h2>Today's attribution <span class="muted" style="text-transform:none;letter-spacing:0">— which position hurt (or carried) today</span></h2>
   <div id="lvAttr"></div></div>
  <div class="card"><h2>Account & FX</h2><div id="lvAcct"></div></div>
@@ -609,19 +614,28 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
 
  // ---- LIVE TAB
  (()=>{
-  const lv=d.live||{};const sleeves=lv.sleeves||[];
+ const lv=d.live||{};const sleeves=lv.sleeves||[];
   const money=(x,d2=0)=>x==null?'–':'$'+Number(x).toLocaleString(undefined,{maximumFractionDigits:d2});
   const signed=(x)=>x==null?'–':(x>=0?'+':'−')+'$'+Math.abs(x).toLocaleString(undefined,{maximumFractionDigits:0});
+  const commission=(x,c)=>{
+   const n=Number(x)||0,sign=n<0?'−':'';
+   return sign+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+' '+c;
+  };
+  const commissionTotals=xs=>(xs||[]).length?
+   xs.map(x=>commission(x.amount,x.currency)).join(' · '):'–';
   // Sleeve cards: equity, day move, realized / unrealized / fees.
   document.getElementById('lvCards').innerHTML=sleeves.map(s=>{
    const c=s.curve_usd||[];
    // Server-side flow-adjusted return when available (capital injections
    // into the paper account otherwise read as +990% "performance").
    const incep=s.return_pct!=null?s.return_pct/100:(c.length>1?(c[c.length-1].v/c[0].v-1):null);
+   const costs=s.transaction_costs||{};
+   const costCaption=costs.currency_verified_execution_count?
+    commissionTotals(costs.totals):'not yet currency-verified';
    const net=(s.realized_usd!=null&&s.unrealized_usd!=null)?
     `<div class="ev"><span>realized</span><span class="${s.realized_usd>=0?'pos':'neg'}">${signed(s.realized_usd)}</span></div>
      <div class="ev"><span>unrealized</span><span class="${s.unrealized_usd>=0?'pos':'neg'}">${signed(s.unrealized_usd)}</span></div>
-     <div class="ev"><span>fees paid</span><span class="muted">${money(s.fees_usd,2)}</span></div>`:
+     <div class="ev"><span>recorded commissions</span><span class="muted">${costCaption}</span></div>`:
     `<div class="ev"><span>vs SPY (same window)</span><span class="muted">${s.spy_return_pct!=null?s.spy_return_pct.toFixed(1)+'%':'–'}</span></div>`;
    return `<div class="card"><h2>${s.label}${s.currency!=='USD'?` <span class="muted" style="text-transform:none">(${s.currency} book → USD)</span>`:''}</h2>
     <span class="tile"><b>${money(s.equity_usd)}</b><br><span class="muted">equity USD</span></span>
@@ -629,6 +643,27 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
     <span class="tile"><b class="${(incep||0)>=0?'pos':'neg'}">${incep==null?'–':pct(incep,1)}</b><br><span class="muted">since incep.</span></span>
     <div style="margin-top:8px">${net}</div></div>`;
   }).join('')||'<div class="card"><span class="muted">no sleeve data yet</span></div>';
+
+  // Commission is a native-currency cash flow.  Never roll CHF and USD
+  // together or translate a historical fee at today's FX rate: both make
+  // a convenient total, neither makes an accurate one.
+  document.getElementById('lvCosts').innerHTML=sleeves.filter(s=>s.transaction_costs).map(s=>{
+   const c=s.transaction_costs;
+   if(!c.recorded_execution_count){
+    return `<div class="costblock"><b>${s.label}</b><div class="costmeta">No recorded executions yet. Cost coverage begins with the first broker-reconciled fill; this dashboard does not import IBKR account history.</div></div>`;
+   }
+   const recorded=`Local execution ledger: ${c.recorded_from} → ${c.recorded_through} (${c.recorded_execution_count} execution${c.recorded_execution_count===1?'':'s'}).`;
+   const verified=c.currency_verified_execution_count?
+    `Currency-verified commissions: ${c.currency_verified_from} → ${c.currency_verified_through} (${c.currency_verified_execution_count} execution${c.currency_verified_execution_count===1?'':'s'}).`:
+    'No currency-verified commission records yet.';
+   const legacy=c.legacy_execution_count?
+    `<div class="costmeta warn">${c.legacy_execution_count} legacy execution${c.legacy_execution_count===1?'':'s'} lack a stored commission currency${c.legacy_nonzero_commission_count?`; ${c.legacy_nonzero_commission_count} carry a non-zero recorded amount`:''}. They are excluded from the totals below rather than guessed.</div>`:'';
+   const rows=(c.months||[]).map(m=>`<tr><td>${m.month}</td><td>${commissionTotals(m.fees)}</td><td>${commissionTotals(m.cumulative)}</td></tr>`).join('');
+   const table=rows?`<table style="margin-top:10px"><tr><th>month · UTC</th><th>net commission</th><th>cumulative</th></tr>${rows}</table>`:
+    '<div class="costmeta">No monthly native-currency total is available yet.</div>';
+   return `<div class="costblock"><div class="ev"><b>${s.label}</b><span class="costtotal">${commissionTotals(c.totals)}</span></div>
+    <div class="costmeta">${recorded}<br>${verified}<br>Positive values are costs; negative values are broker rebates.</div>${legacy}${table}</div>`;
+  }).join('')||'<span class="muted">No broker-backed execution ledger is available for transaction-cost reporting.</span>';
 
   // Sleeve race, through the shared rebase (common window, zero-base
   // guard). Live and paper are separate series by construction — the

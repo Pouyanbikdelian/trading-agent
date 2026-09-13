@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,6 +26,7 @@ from trading.core.types import (
     AssetClass,
     Instrument,
     Order,
+    OrderStatus,
     OrderType,
     Position,
     Side,
@@ -459,14 +460,76 @@ class _RecordingBroker:
             return converter(*args, **kwargs)
 
     def _record_and_submit(self, order: Any) -> Any:
+        """Save PENDING, submit, then settle the row on the broker's answer.
+
+        The save-then-submit order is deliberate and matches
+        ``Cycle.force_flatten_orders``: an order that was sent and then lost
+        to a crash is worse than a PENDING row with no fill.
+
+        What was missing until 2026-09-13 is the second half. This wrote the
+        PENDING row and never touched it again, so every operator order ever
+        placed through ``/buy``, ``/sell``, ``/close`` or ``/flatten`` stayed
+        PENDING for life. Those rows sit in ``OPEN_STATUSES`` forever, which
+        meant they widened the reconciliation window, tripped the stale-order
+        alarm on every cycle, and — once past the lookback — could never be
+        settled by any amount of reconciliation. Five of them from August
+        2026 were still alarming a month later with no broker order behind
+        them.
+
+        Bookkeeping still never blocks or masks a trade: a store failure is
+        logged, and the broker's own exception always propagates.
+        """
+        recorded = False
         if self._store is not None:
             try:
                 self._store.save_order(order)
+                recorded = True
             except Exception as e:  # never block a trade on bookkeeping
                 logger.bind(component="command_processor").exception(
                     f"could not record {getattr(order, 'client_order_id', '?')} to the ledger: {e}"
                 )
-        return self._inner.submit_order(order)
+        try:
+            result = self._inner.submit_order(order)
+        except Exception:
+            # The broker refused or could not be reached. Either way this
+            # row will never fill, so retire it rather than leaving a
+            # phantom open order behind. The original error still raises.
+            self._settle(order, OrderStatus.REJECTED, recorded=recorded)
+            raise
+        self._settle(order, OrderStatus.SUBMITTED, recorded=recorded, result=result)
+        return result
+
+    def _settle(
+        self,
+        order: Any,
+        status: OrderStatus,
+        *,
+        recorded: bool,
+        result: Any = None,
+    ) -> None:
+        """Move the saved row off PENDING. Never raises."""
+        if self._store is None or not recorded:
+            return
+        client_order_id = getattr(order, "client_order_id", None)
+        if client_order_id is None:
+            return
+        # Keep the broker's own id when the adapter hands one back; that is
+        # what lets a later reconciliation match this row to an execution.
+        broker_order_id = None
+        for candidate in (result, order):
+            raw = getattr(candidate, "broker_order_id", None) or getattr(
+                candidate, "order_id", None
+            )
+            if raw not in (None, ""):
+                broker_order_id = str(raw)
+                break
+        try:
+            self._store.update_status(client_order_id, status, broker_order_id)
+        except Exception as e:
+            logger.bind(component="command_processor").exception(
+                f"could not mark {client_order_id} as {status.value}: {e}. "
+                "The ledger row stays PENDING and will show as a stale open order."
+            )
 
 
 def _recording(
@@ -826,6 +889,93 @@ def _h_cancel_order(cmd: Command, broker: Broker) -> dict[str, Any]:
     return {"client_order_id": coid, "cancelled": True}
 
 
+#: An order younger than this can still be settled by ordinary
+#: reconciliation, so resolving it would destroy information. Mirrors
+#: ``Cycle.RECONCILE_LOOKBACK``; keep the two in step.
+RESOLVE_MIN_AGE_DAYS = 14.0
+
+
+def _h_resolve_orders(cmd: Command, broker: Broker) -> dict[str, Any]:
+    """Retire ledger rows whose outcome can no longer be established.
+
+    A broker's execution history is finite. IBKR keeps days; by 2026-09-11
+    five rows from 13 and 24 August were still ``pending`` locally, with no
+    matching order or position at the broker and no way left to ask what
+    had happened to them. Every cycle warned about them, ``/orders`` hid
+    them behind a 7-day window, and reconciliation's 14-day lookback could
+    no longer reach them. They were unfixable by waiting.
+
+    The temptation is to mark them filled or cancelled. Both are claims
+    about the past that nobody can support, and a trading ledger that
+    contains one invented outcome is worth less than one that admits a gap.
+    So this writes ``UNRECONCILED`` and an audit note instead.
+
+    Two safeguards, because this is irreversible:
+
+    * The broker's working-order view is fetched FIRST and a failure
+      propagates untouched. No evidence, no resolution.
+    * Anything the broker still recognises — by our id, by its own id, or
+      by symbol and side — is skipped. A false skip merely leaves the row
+      alarming; a false resolution silences a live order.
+    """
+    from trading.core.config import settings as _s
+    from trading.execution.store import OrderStore
+
+    requested_age = float(cmd.args.get("older_than_days", RESOLVE_MIN_AGE_DAYS))
+    age_days = max(requested_age, RESOLVE_MIN_AGE_DAYS)
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - timedelta(days=age_days)
+
+    # Evidence first. A raise here fails the command with nothing written,
+    # which is the correct outcome when the broker cannot be consulted.
+    working = list(broker.get_open_orders() or [])
+    working_ids = {str(o.client_order_id) for o in working}
+    working_legs = {(o.instrument.symbol.upper(), o.side.value) for o in working}
+
+    store = OrderStore(Path(_s.state_dir) / "orders.db")
+    try:
+        resolved: list[str] = []
+        skipped: list[str] = []
+        for order, _status, broker_order_id in store.open_orders():
+            if order.created_at >= cutoff:
+                continue
+            leg = (order.instrument.symbol.upper(), order.side.value)
+            if (
+                order.client_order_id in working_ids
+                or (broker_order_id or "\x00") in working_ids
+                or leg in working_legs
+            ):
+                skipped.append(f"{order.instrument.symbol} ({order.client_order_id[:14]})")
+                continue
+            store.mark_unreconciled(
+                order.client_order_id,
+                note=(
+                    f"resolved by {cmd.requested_by} at {now.isoformat()}: "
+                    f"{len(working)} order(s) working at the broker, none matching this row. "
+                    f"Created {(now - order.created_at).days}d ago, past the "
+                    f"{age_days:g}d reconciliation window. "
+                    "True outcome unknown — this is NOT a fill or a cancellation."
+                ),
+                at=now,
+            )
+            resolved.append(f"{order.instrument.symbol} ({order.client_order_id[:14]})")
+        logger.bind(component="command_processor").warning(
+            f"resolved {len(resolved)} unreconcilable order row(s); skipped {len(skipped)} "
+            f"still recognised by the broker"
+        )
+        return {
+            "resolved": resolved,
+            "skipped": skipped,
+            "n_resolved": len(resolved),
+            "n_skipped": len(skipped),
+            "broker_working": len(working),
+            "older_than_days": age_days,
+        }
+    finally:
+        with contextlib.suppress(Exception):
+            store.close()
+
+
 def _h_fx_convert(cmd: Command, broker: Broker) -> dict[str, Any]:
     from_ccy = str(cmd.args["from_ccy"]).upper()
     to_ccy = str(cmd.args["to_ccy"]).upper()
@@ -920,6 +1070,7 @@ _HANDLERS = {
     CommandType.CLOSE: _h_close,
     CommandType.FLATTEN: _h_flatten,
     CommandType.CANCEL_ORDER: _h_cancel_order,
+    CommandType.RESOLVE_ORDERS: _h_resolve_orders,
     CommandType.FX_CONVERT: _h_fx_convert,
     CommandType.REFRESH_DATA: _h_refresh_data,
     CommandType.RECONNECT_BROKER: _h_reconnect_broker,
@@ -960,6 +1111,27 @@ def _format_success(cmd: Command, result: dict[str, Any] | str | None) -> str:
         return msg
     if cmd.type == CommandType.CANCEL_ORDER:
         return f"✅ `{cmd_id}` Cancel order `{result['client_order_id']}` submitted"  # type: ignore[index]
+    if cmd.type == CommandType.RESOLVE_ORDERS:
+        r = result if isinstance(result, dict) else {}
+        n = int(r.get("n_resolved", 0))
+        working = int(r.get("broker_working", 0))
+        if not n:
+            return (
+                f"✅ `{cmd_id}` Nothing to resolve — no ledger row is both open and "
+                f"older than {float(r.get('older_than_days', 0)):g}d "
+                f"({working} order(s) working at the broker)."
+            )
+        lines = [
+            f"🧾 `{cmd_id}` Marked {n} order(s) *unreconciled* "
+            f"(broker had {working} working, none matching):",
+            *(f"  `{name}`" for name in list(r.get("resolved", []))[:10]),
+            "_Their true outcome is unknown and was NOT guessed. "
+            "They no longer alarm and no longer widen the reconciliation window._",
+        ]
+        skipped = list(r.get("skipped", []))
+        if skipped:
+            lines.append(f"⚠️ Left alone — still recognised by the broker: {', '.join(skipped[:6])}")
+        return "\n".join(lines)
     if cmd.type == CommandType.FX_CONVERT:
         return (
             f"✅ `{cmd_id}` FX: spending {result['from_amount']:g} {result['from_ccy']} "  # type: ignore[index]

@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS orders (
     tif                 TEXT NOT NULL,
     created_at          REAL NOT NULL,
     status              TEXT NOT NULL,
-    broker_order_id     TEXT
+    broker_order_id     TEXT,
+    resolution_note     TEXT,
+    resolved_at         REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_status     ON orders(status);
@@ -65,6 +67,7 @@ CREATE TABLE IF NOT EXISTS fills (
     quantity        REAL NOT NULL,
     price           REAL NOT NULL,
     commission      REAL NOT NULL DEFAULT 0,
+    commission_currency TEXT,
     venue           TEXT
 );
 
@@ -76,9 +79,15 @@ CREATE INDEX IF NOT EXISTS idx_fills_ts       ON fills(ts);
 #: so without an identity column every pass re-inserted the same
 #: executions. Applied after _SCHEMA because it must repair existing rows
 #: before the UNIQUE index can be created.
-_FILLS_DEDUPE_MIGRATION = (
+_APPEND_ONLY_MIGRATIONS = (
     "ALTER TABLE fills ADD COLUMN exec_id TEXT",
     "ALTER TABLE fills ADD COLUMN dedupe_key TEXT",
+    "ALTER TABLE fills ADD COLUMN commission_currency TEXT",
+    # Why an order stopped being reconcilable, and when that was decided.
+    # An audit trail is the price of retiring a row whose true outcome is
+    # unknown; without it "unreconciled" would be just another guess.
+    "ALTER TABLE orders ADD COLUMN resolution_note TEXT",
+    "ALTER TABLE orders ADD COLUMN resolved_at REAL",
 )
 
 
@@ -147,8 +156,9 @@ class OrderStore:
 
         Three steps, all idempotent:
 
-        1. Add ``exec_id`` / ``dedupe_key`` if missing (append-only ALTER,
-           per this module's migration rule).
+        1. Add ``exec_id`` / ``dedupe_key`` / ``commission_currency``, and
+           the orders table's ``resolution_note`` / ``resolved_at``, if
+           missing (append-only ALTER, per this module's migration rule).
         2. Backfill ``dedupe_key`` for existing rows from the composite.
         3. Delete exact duplicates, keeping the lowest ``id``, then create
            the UNIQUE index.
@@ -166,7 +176,7 @@ class OrderStore:
 
         from trading.core.logging import logger as _logger
 
-        for stmt in _FILLS_DEDUPE_MIGRATION:
+        for stmt in _APPEND_ONLY_MIGRATIONS:
             # Already present on a migrated DB — SQLite has no
             # ADD COLUMN IF NOT EXISTS.
             with contextlib.suppress(sqlite3.OperationalError):
@@ -307,6 +317,63 @@ class OrderStore:
             return None
         return datetime.fromtimestamp(float(row["t"]), tz=timezone.utc)
 
+    def mark_unreconciled(
+        self,
+        client_order_id: str,
+        *,
+        note: str,
+        at: datetime | None = None,
+    ) -> None:
+        """Retire a row whose outcome can no longer be established.
+
+        Deliberately never called automatically. The broker's execution
+        history is finite, so a row that outlives it can never be settled —
+        but "we stopped being able to check" is not the same claim as
+        "filled" or "cancelled", and the ledger must not blur the two. The
+        caller is responsible for having confirmed the broker has no such
+        order working; ``note`` records what that confirmation was.
+        """
+        self.conn.execute(
+            "UPDATE orders SET status = ?, resolution_note = ?, resolved_at = ? "
+            "WHERE client_order_id = ?",
+            (
+                OrderStatus.UNRECONCILED.value,
+                note,
+                _ts_to_epoch(at or datetime.now(tz=timezone.utc)),
+                client_order_id,
+            ),
+        )
+
+    def resolution_note(self, client_order_id: str) -> tuple[str | None, datetime | None]:
+        """The audit trail behind an ``unreconciled`` row."""
+        row = self.conn.execute(
+            "SELECT resolution_note, resolved_at FROM orders WHERE client_order_id = ?",
+            (client_order_id,),
+        ).fetchone()
+        if row is None:
+            return None, None
+        at = row["resolved_at"]
+        return row["resolution_note"], (
+            datetime.fromtimestamp(float(at), tz=timezone.utc) if at is not None else None
+        )
+
+    def open_orders(self) -> list[tuple[Order, OrderStatus, str | None]]:
+        """Every still-open order, whatever its age, oldest first.
+
+        Age-windowed reads are wrong for non-terminal rows. ``/orders`` and
+        ``/pending`` each filtered by ``created_at`` (7 and 2 days), so on
+        2026-09-11 the cycle warned about five orders open for 18-29 days
+        and ``/orders`` — the command that warning tells the operator to
+        run — answered "no orders in the last 7 days". Both statements were
+        true; together they were useless.
+        """
+        placeholders = ",".join("?" * len(self.OPEN_STATUSES))
+        rows = self.conn.execute(
+            f"SELECT * FROM orders WHERE status IN ({placeholders}) ORDER BY created_at ASC",
+            [s.value for s in self.OPEN_STATUSES],
+        ).fetchall()
+        return [self._row_to_order(r) for r in rows]
+
     def open_orders_older_than(
         self, cutoff: datetime
     ) -> list[tuple[Order, OrderStatus, str | None]]:
@@ -379,18 +446,28 @@ class OrderStore:
         #
         # Plain INSERT OR IGNORE would freeze the zero and under-report
         # fees forever. (The pre-dedupe code captured the commission by
-        # accident, as a second duplicate row.) Updating only UPWARDS
-        # keeps it monotonic: a later pass that has lost the report
-        # cannot erase a fee we already recorded.
+        # accident, as a second duplicate row.) A real commission report is
+        # identifiable by its currency, so it is authoritative even when
+        # it carries a rebate (a negative commission). A later cache read
+        # with no report must not erase it.
         self.conn.execute(
             """
             INSERT INTO fills
-                (order_id, ts, quantity, price, commission, venue, exec_id, dedupe_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (order_id, ts, quantity, price, commission, commission_currency,
+                 venue, exec_id, dedupe_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(dedupe_key) DO UPDATE SET
-                commission = excluded.commission,
-                exec_id    = COALESCE(fills.exec_id, excluded.exec_id)
-            WHERE excluded.commission > fills.commission
+                commission = CASE
+                    WHEN excluded.commission_currency IS NOT NULL THEN excluded.commission
+                    WHEN excluded.commission > fills.commission THEN excluded.commission
+                    ELSE fills.commission
+                END,
+                commission_currency = COALESCE(
+                    excluded.commission_currency, fills.commission_currency
+                ),
+                exec_id = COALESCE(fills.exec_id, excluded.exec_id)
+            WHERE excluded.commission_currency IS NOT NULL
+               OR excluded.commission > fills.commission
             """,
             (
                 client_order_id,
@@ -398,6 +475,7 @@ class OrderStore:
                 fill.quantity,
                 fill.price,
                 fill.commission,
+                fill.commission_currency,
                 fill.venue,
                 fill.exec_id,
                 self._fill_dedupe_key(fill, client_order_id),
@@ -467,7 +545,9 @@ class OrderStore:
                 quantity=r["quantity"],
                 price=r["price"],
                 commission=r["commission"],
+                commission_currency=r["commission_currency"],
                 venue=r["venue"],
+                exec_id=r["exec_id"],
             )
             for r in rows
         ]

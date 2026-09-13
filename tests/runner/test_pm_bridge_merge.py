@@ -25,12 +25,16 @@ class _Alerts:
     def __init__(self) -> None:
         self.info_msgs: list[str] = []
         self.error_msgs: list[str] = []
+        self.warning_msgs: list[str] = []
 
     def info(self, m: str) -> None:
         self.info_msgs.append(m)
 
     def error(self, m: str) -> None:
         self.error_msgs.append(m)
+
+    def warning(self, m: str) -> None:
+        self.warning_msgs.append(m)
 
 
 class _Cycle:
@@ -45,8 +49,10 @@ class _Cycle:
     from trading.runner.cycle import Cycle as _Real
 
     _PM_TARGET_KEYS_METADATA = _Real._PM_TARGET_KEYS_METADATA
+    _PM_BRIDGE_REFUSAL_REASON_METADATA = _Real._PM_BRIDGE_REFUSAL_REASON_METADATA
 
     _merge_pm_signal = _Real._merge_pm_signal
+    _announce_no_orders = _Real._announce_no_orders
     _add_pm_targets = _Real._add_pm_targets
     _mode_scale = _Real._mode_scale
     _pm_mode_scale = _Real._pm_mode_scale
@@ -215,6 +221,8 @@ class TestRefusalStillRespectsTheStrategySleeve:
             strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW
         )
         assert out.target_weights == {}
+        assert out.metadata[cycle._PM_BRIDGE_REFUSAL_REASON_METADATA] == "PM decision 96.0h old"
+        assert out.metadata["strategy_sleeve_pct"] == "0.0000"
         assert any("96.0h" in m for m in cycle.alerts.error_msgs)
 
 
@@ -236,7 +244,10 @@ class TestDisabledAndRefusals:
 
         out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
 
-        assert out is base
+        assert out.target_weights == base.target_weights
+        assert out.metadata[cycle._PM_BRIDGE_REFUSAL_REASON_METADATA] == (
+            "PM decision 96.0h old, limit 6h"
+        )
         assert any("96.0h" in m for m in cycle.alerts.error_msgs)
 
     def test_the_bridge_raising_does_not_take_the_cycle_down(self, cycle, monkeypatch) -> None:
@@ -694,3 +705,97 @@ class TestNoOpinionNeverMeansLiquidate:
 
         assert out.target_weights["equity:AAPL"] == pytest.approx(0.2)
         assert out.target_weights["equity:AMD"] == 0.0
+
+
+class TestTheNoOrderMessageNamesTheRealCause:
+    """2026-09-11, production. The PM was refused for a stale candidate
+    ladder and the cycle, two lines later, told the operator the strategy
+    was "likely still in warm-up". At ``STRATEGY_SLEEVE_PCT=0.0`` the
+    mechanical book scales to nothing, which is indistinguishable from
+    having no view — so the desk reported a data problem it did not have
+    and hid the block it did.
+    """
+
+    @staticmethod
+    def _account(*keys: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(positions=dict.fromkeys(keys, object()))
+
+    def test_a_withheld_pm_is_named_instead_of_blamed_on_warm_up(self, cycle) -> None:
+        signal = Signal(
+            ts=NOW,
+            strategy="top_k_momentum",
+            target_weights={},
+            metadata={
+                cycle._PM_BRIDGE_REFUSAL_REASON_METADATA: (
+                    "PM candidate snapshot is stale — not trading discretionary entries"
+                )
+            },
+        )
+
+        cycle._announce_no_orders(signal, self._account())
+
+        assert cycle.alerts.info_msgs == []
+        (msg,) = cycle.alerts.warning_msgs
+        assert "Agent PM was withheld" in msg
+        assert "PM candidate snapshot is stale" in msg
+        assert "warm-up" not in msg
+
+    def test_held_positions_are_still_reported_as_untouched(self, cycle) -> None:
+        """A withheld PM must not imply the book was liquidated."""
+        signal = Signal(
+            ts=NOW,
+            strategy="top_k_momentum",
+            target_weights={},
+            metadata={cycle._PM_BRIDGE_REFUSAL_REASON_METADATA: "PM decision 96.0h old"},
+        )
+
+        cycle._announce_no_orders(signal, self._account("equity:NVDA", "equity:GLD"))
+
+        (msg,) = cycle.alerts.warning_msgs
+        assert "Current positions (2) are untouched" in msg
+        assert "NVDA" in msg and "GLD" in msg
+
+    def test_a_genuine_warm_up_still_reads_as_a_warm_up(self, cycle) -> None:
+        signal = Signal(ts=NOW, strategy="top_k_momentum", target_weights={})
+
+        cycle._announce_no_orders(signal, self._account())
+
+        assert cycle.alerts.warning_msgs == []
+        (msg,) = cycle.alerts.info_msgs
+        assert "warm-up" in msg
+        assert "Portfolio is flat" in msg
+
+    def test_the_off_switch_is_not_reported_as_a_block(self, cycle, monkeypatch) -> None:
+        """A mechanical-only desk has no PM to withhold; warm-up is the
+        true explanation there and must survive."""
+        patch_bridge(monkeypatch, make_result(None, reason="PM bridge disabled (…)"))
+        out = cycle._merge_pm_signal(
+            Signal(ts=NOW, strategy="top_k_momentum", target_weights={}),
+            instruments_by_key={},
+            ts=NOW,
+        )
+
+        cycle._announce_no_orders(out, self._account())
+
+        assert cycle.alerts.warning_msgs == []
+        assert "warm-up" in cycle.alerts.info_msgs[0]
+
+    def test_the_september_incident_end_to_end(self, cycle, monkeypatch) -> None:
+        """Refused bridge + benchmark-only strategy = no orders, said honestly."""
+        patch_strategy_sleeve(monkeypatch, 0.0)
+        patch_bridge(
+            monkeypatch,
+            make_result(None, reason="PM candidate snapshot is stale"),
+        )
+
+        out = cycle._merge_pm_signal(
+            strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW
+        )
+        assert out.target_weights == {}
+        cycle._announce_no_orders(out, self._account("equity:NVDA"))
+
+        (msg,) = cycle.alerts.warning_msgs
+        assert "Agent PM was withheld: PM candidate snapshot is stale" in msg
+        assert "warm-up" not in msg

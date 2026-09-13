@@ -72,6 +72,20 @@ class OrderStatus(StrEnum):
     FILLED = "filled"
     CANCELLED = "cancelled"
     REJECTED = "rejected"
+    #: The row never reached a confirmed outcome and no longer can. A
+    #: broker's execution history is finite (IBKR keeps days, not months),
+    #: so an order that fell out of the reconciliation window can never be
+    #: settled by any amount of retrying — it simply alarms forever.
+    #:
+    #: This is deliberately NOT "filled" or "cancelled". Those are claims
+    #: about what happened, and on 2026-09-11 five August rows existed whose
+    #: true outcome was genuinely unknowable: IBKR no longer listed them and
+    #: no position remained. Writing a guess into the ledger would have been
+    #: worse than the alarm. This status records exactly what is known —
+    #: that we stopped being able to find out — and is only ever set by an
+    #: explicit operator resolution that first confirmed the broker has no
+    #: such order working.
+    UNRECONCILED = "unreconciled"
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +197,11 @@ class Fill(BaseModel):
     quantity: float
     price: float
     commission: float = 0.0
+    # The broker reports a commission in its own settlement currency.  Do
+    # not infer this from the account or the instrument: a multi-currency
+    # account can legitimately charge either.  ``None`` marks legacy rows
+    # written before the ledger started retaining the broker's currency.
+    commission_currency: str | None = None
     venue: str | None = None
     #: The broker's own execution id (IBKR ``execution.execId``). The only
     #: thing that distinguishes one execution from another: reconciliation

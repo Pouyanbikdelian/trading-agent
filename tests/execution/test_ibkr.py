@@ -391,16 +391,17 @@ def test_get_fills_filters_by_since(broker: IbkrBroker, fake_ib: _FakeIb) -> Non
     )
     fill1 = SimpleNamespace(
         execution=exec1,
-        commissionReport=SimpleNamespace(commission=0.1),
+        commissionReport=SimpleNamespace(commission=0.1, currency="USD"),
     )
     fill2 = SimpleNamespace(
         execution=exec2,
-        commissionReport=SimpleNamespace(commission=0.1),
+        commissionReport=SimpleNamespace(commission=0.1, currency="CHF"),
     )
     fake_ib._fills = [fill1, fill2]
     out = broker.get_fills(since=datetime(2024, 1, 2, tzinfo=timezone.utc))
     assert len(out) == 1
     assert out[0].order_id == "ref-2"
+    assert out[0].commission_currency == "CHF"
 
 
 def test_disconnect_safe_to_call_twice(broker: IbkrBroker) -> None:

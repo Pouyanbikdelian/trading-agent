@@ -1,4 +1,4 @@
-"""Live-tab data: per-sleeve PnL, USD-converted curves, daily attribution.
+"""Live-tab data: PnL, transaction costs, USD curves, daily attribution.
 
 Everything here is read-only and defensive — the dashboard must render
 even when a sleeve has no data yet. SQLite files are opened in
@@ -21,6 +21,7 @@ intraday series.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,16 +46,26 @@ def _ro_conn(path: Path) -> sqlite3.Connection | None:
 
 
 def fills_with_symbols(orders_db: Path) -> list[dict[str, Any]]:
-    """Every fill joined to its order's symbol and side, oldest first."""
+    """Every fill joined to its order's symbol and side, oldest first.
+
+    Older ledgers did not retain IBKR's commission currency.  A dashboard
+    update must keep reading those files, but the missing currency remains
+    explicit instead of being guessed from an instrument or account.
+    """
     conn = _ro_conn(orders_db)
     if conn is None:
         return []
     try:
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(fills)").fetchall()}
+        commission_currency = (
+            "f.commission_currency" if "commission_currency" in columns else "NULL"
+        )
         rows = conn.execute(
-            """SELECT f.ts, f.quantity, f.price, f.commission,
-                      o.side, o.instrument_json
-               FROM fills f JOIN orders o ON o.client_order_id = f.order_id
-               ORDER BY f.ts ASC"""
+            f"""SELECT f.ts, f.quantity, f.price, f.commission,
+                       {commission_currency} AS commission_currency,
+                       o.side, o.instrument_json
+                FROM fills f JOIN orders o ON o.client_order_id = f.order_id
+                ORDER BY f.ts ASC"""
         ).fetchall()
     except sqlite3.Error as e:
         # A brand-new live ledger is a zero-byte file with no schema until
@@ -72,6 +83,12 @@ def fills_with_symbols(orders_db: Path) -> list[dict[str, Any]]:
             sym = json.loads(r["instrument_json"]).get("symbol", "?")
         except Exception:
             sym = "?"
+        currency: str | None = str(r["commission_currency"] or "").upper()
+        # ISO-like three-letter codes are the only values that can be
+        # aggregated honestly. ``BASE`` and a missing legacy value are both
+        # deliberately unknown here.
+        if currency is None or len(currency) != 3 or not currency.isalpha():
+            currency = None
         out.append(
             {
                 "ts": float(r["ts"]),
@@ -79,10 +96,93 @@ def fills_with_symbols(orders_db: Path) -> list[dict[str, Any]]:
                 "qty": float(r["quantity"]),
                 "price": float(r["price"]),
                 "commission": float(r["commission"] or 0.0),
+                "commission_currency": currency,
                 "side": str(r["side"]).upper(),
             }
         )
     return out
+
+
+def transaction_cost_summary(fills: list[dict[str, Any]]) -> dict[str, Any]:
+    """Broker-recorded commission costs, grouped without inventing FX.
+
+    A brokerage commission is a native-currency cash flow.  Adding CHF and
+    USD fees together, or converting them at today's rate, would make a
+    convenient but false lifetime total.  This summary therefore reports a
+    running total for each broker-reported currency and quarantines legacy
+    rows whose currency was not persisted.  It is a ledger-coverage view,
+    not an IBKR historical-statement import.
+    """
+
+    def _date(ts: float | None) -> str | None:
+        if ts is None:
+            return None
+        return datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+
+    def _currency_totals(values: dict[str, float]) -> list[dict[str, Any]]:
+        return [
+            {"currency": currency, "amount": round(values[currency], 2)}
+            for currency in sorted(values)
+        ]
+
+    timestamps: list[float] = []
+    verified_timestamps: list[float] = []
+    monthly: dict[str, dict[str, float]] = {}
+    totals: dict[str, float] = {}
+    legacy_execution_count = 0
+    legacy_nonzero_commission_count = 0
+
+    for fill in fills:
+        try:
+            ts = float(fill["ts"])
+            commission = float(fill.get("commission", 0.0) or 0.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(ts) or not math.isfinite(commission):
+            continue
+        timestamps.append(ts)
+        currency = fill.get("commission_currency")
+        if not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha():
+            legacy_execution_count += 1
+            if commission != 0.0:
+                legacy_nonzero_commission_count += 1
+            continue
+
+        currency = currency.upper()
+        verified_timestamps.append(ts)
+        month = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m")
+        by_currency = monthly.setdefault(month, {})
+        by_currency[currency] = by_currency.get(currency, 0.0) + commission
+        totals[currency] = totals.get(currency, 0.0) + commission
+
+    running: dict[str, float] = {}
+    months: list[dict[str, Any]] = []
+    for month in sorted(monthly):
+        values = monthly[month]
+        for currency, amount in values.items():
+            running[currency] = running.get(currency, 0.0) + amount
+        months.append(
+            {
+                "month": month,
+                "fees": _currency_totals(values),
+                "cumulative": _currency_totals(running),
+            }
+        )
+
+    return {
+        "recorded_execution_count": len(timestamps),
+        "recorded_from": _date(min(timestamps)) if timestamps else None,
+        "recorded_through": _date(max(timestamps)) if timestamps else None,
+        "currency_verified_execution_count": len(verified_timestamps),
+        "currency_verified_from": _date(min(verified_timestamps)) if verified_timestamps else None,
+        "currency_verified_through": _date(max(verified_timestamps))
+        if verified_timestamps
+        else None,
+        "legacy_execution_count": legacy_execution_count,
+        "legacy_nonzero_commission_count": legacy_nonzero_commission_count,
+        "totals": _currency_totals(totals),
+        "months": months,
+    }
 
 
 def realized_by_symbol(fills: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
@@ -342,7 +442,6 @@ def _momentum_sleeve(state_dir: Path, fx: dict[str, float], label: str) -> dict[
     fills = fills_with_symbols(state_dir / "orders.db")
     per_symbol = realized_by_symbol(fills)
     realized = round(sum(v["realized"] for v in per_symbol.values()), 2)
-    fees = round(sum(v["fees"] for v in per_symbol.values()), 2)
     unrealized = round(sum(p.unrealized_pnl for p in (snap.positions if snap else {}).values()), 2)
     bars = daily_pnl_bars(points_usd)
 
@@ -383,7 +482,7 @@ def _momentum_sleeve(state_dir: Path, fx: dict[str, float], label: str) -> dict[
         "day_pnl_usd": day_pnl,
         "realized_usd": to_usd(realized),
         "unrealized_usd": to_usd(unrealized),
-        "fees_usd": to_usd(fees),
+        "transaction_costs": transaction_cost_summary(fills),
         "attribution_today": attribution,
         "attributed_usd": attributed,
         "fx_translation_usd": fx_translation,
@@ -421,7 +520,7 @@ def _pm_sleeve(state_dir: Path) -> dict[str, Any] | None:
         "day_pnl_usd": bars[-1]["v"] if bars else None,
         "realized_usd": None,  # virtual book — no fill ledger
         "unrealized_usd": round(perf["equity"] - base, 2) if perf.get("equity") and base else None,
-        "fees_usd": None,
+        "transaction_costs": None,
         "return_pct": perf.get("return_pct"),
         "spy_return_pct": perf.get("spy_return_pct"),
         "attribution_today": [],

@@ -65,6 +65,11 @@ class CommandType(str, Enum):
     CLOSE = "close"
     FLATTEN = "flatten"
     CANCEL_ORDER = "cancel_order"
+    # Retire local order rows the broker can no longer account for. Touches
+    # the ledger only — it never sends, cancels or amends anything — but it
+    # needs the broker's working-order view as evidence, so it is queued
+    # like any other broker-dependent command rather than run in the bot.
+    RESOLVE_ORDERS = "resolve_orders"
     FX_CONVERT = "fx_convert"
     REFRESH_DATA = "refresh_data"
     RECONNECT_BROKER = "reconnect_broker"

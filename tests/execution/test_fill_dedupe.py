@@ -313,3 +313,22 @@ class TestLateArrivingCommissions:
         row = store.conn.execute("SELECT commission FROM fills").fetchone()
         assert row[0] == 2.0
         assert _count(store) == 1
+
+    def test_reported_currency_makes_a_rebate_authoritative(self, tmp_path):
+        """A real IBKR report can contain a negative exchange rebate.
+
+        The initial cache observation has neither a commission report nor a
+        currency.  Once IBKR supplies both, retain its signed amount rather
+        than treating only positive values as possible transaction costs.
+        """
+        store = OrderStore(tmp_path / "orders.db")
+        _order(store)
+
+        store.save_fill(_fill(exec_id="e1", commission=0.0), client_order_id="o-1")
+        store.save_fill(
+            _fill(exec_id="e1", commission=-0.15, commission_currency="USD"),
+            client_order_id="o-1",
+        )
+
+        row = store.conn.execute("SELECT commission, commission_currency FROM fills").fetchone()
+        assert tuple(row) == (-0.15, "USD")
