@@ -210,12 +210,21 @@ Order of operations:
 ## Phase 13 — continuous learning (added 2026-07-30)
 
 Full argument in **docs/LEARNING_ARCHITECTURE.md**. Advisory only.
-Item 1 is built; the rest are specced and independently abandonable.
+Items 1-2 are built; the rest are specced and independently abandonable.
 
 - [x] **Shadow book / counterfactual ledger.** `shadow` table, ladder
       write point in `cycle.py`, nightly leg grading in `runner.py`,
       `/edge [5|21|63]` in Telegram. Remaining write points not yet
       wired: committee passes, risk/cap cuts, operator mandates.
+- [x] **Learning Curator + lesson lifecycle** (built 2026-09-06).
+      `candidate -> established -> challenged -> retired`, nothing ever
+      deleted. Twice-weekly evidence-gated pass in `agents/historian.py`
+      ranking on measured outcomes only; exact-content candidate dedupe;
+      operator lessons protected from machine archiving; archive of a
+      challenged lesson is a recommendation a human must accept.
+      Each pass persisted immutably to `curator_runs` / `curator_actions`.
+      Restore path (`desk.propose_lesson_restore`) returns a lesson to
+      `candidate`, never straight to `established`.
 - [ ] **Regime fingerprint, promoted out of `cycle.py`.** A first cut
       lives in `Cycle._regime_fingerprint` (vol bucket, dispersion,
       breadth) purely so shadow rows are sliceable from day one. Move it

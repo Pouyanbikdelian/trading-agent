@@ -2,8 +2,15 @@
 
 *Drafted 2026-07-30 from Yan's brief: "learn continuously from decisions,
 like a real trader — including the ideas we didn't act on; recognise when
-a setting we've seen before comes back." Status: proposal. Nothing here is
-built. Advisory layer only — none of it touches the order path.*
+a setting we've seen before comes back." Advisory layer only — none of it
+touches the order path.*
+
+*Status, updated 2026-09-06: no longer purely a proposal. §1 (shadow book)
+is built, and the lesson lifecycle below it — the **Learning Curator** —
+was built 2026-09-06. See "What is actually built" at the end of this
+document; the sections in between remain the design argument, kept because
+the reasoning is why the built parts look the way they do. `TODO.md`
+Phase 13 tracks what is still outstanding.*
 
 ---
 
@@ -281,3 +288,77 @@ one or two parts of the current process have no edge, and the value is in
 switching those off. That is a good outcome and it should be framed as
 the expected one, so that a negative result does not get rationalised
 away when it arrives.
+
+
+---
+
+## What is actually built (2026-09-06)
+
+### The lesson lifecycle
+
+```
+candidate ──promote──> established ──challenge──> challenged ──archive──> retired
+    ^                                                                         │
+    └──────────────────────── restore (to candidate only) ────────────────────┘
+```
+
+Nothing is ever deleted. A retired lesson keeps its card, its evidence and
+its archive reason; the journal keeps who did it and why.
+
+- **Only `established` lessons reach agent context.** A candidate is a
+  hypothesis the desk is carrying, not a belief it acts on.
+- **Restoration never reinstates a belief.** `restore_retired_lesson`
+  returns a lesson to `candidate` and clears `last_reviewed_ts`, so a
+  previously-archived idea has to re-earn establishment on fresh measured
+  outcomes. This is deliberate: the cheap failure mode for a learning
+  system is re-adopting an idea because it feels familiar.
+- **Operator-stated lessons are protected** from machine archiving
+  (`_is_operator_lesson`). The machine may argue with Yan; it may not
+  quietly delete his view.
+
+### The Learning Curator
+
+`agents/historian.py::run_historian` — one twice-weekly, evidence-gated
+pass. It is advisory and has no path to strategy, risk or broker state.
+
+Each pass:
+
+1. Reviews existing lessons against **measured** outcomes only. Review
+   notes are not evidence; a lesson supported by nothing but earlier
+   reviews cannot outrank one supported by graded predictions.
+2. Proposes new candidates, rejecting any whose statement normalises to
+   one already on file (`_lesson_fingerprint` — exact-content dedupe for
+   retries, deliberately *not* semantic clustering).
+3. Promotes, challenges, and **recommends** archiving challenged machine
+   lessons. It does not archive them itself.
+4. Persists the whole pass immutably to `curator_runs` and
+   `curator_actions`.
+
+### Why the run tables exist
+
+The `lessons` table answers *what does the desk believe now*. It cannot
+answer *what did the curator see, rank, defer or recommend on a particular
+Friday* — and without that second question the desk cannot audit its own
+learning, only its conclusions. `curator_runs` records status
+(`completed|degraded|failed`), the regime conditions, the counts and the
+vote outcome; `curator_actions` records one row per lesson touched, with
+before/after status and the evidence ids behind it.
+
+A `degraded` or `failed` run is recorded, not swallowed — the same
+"reports attempts, not achievements" rule that the silent-failure sweep
+was written for.
+
+### Operator surface
+
+- `/lesson restore <id> <why>` — via `desk.propose_lesson_restore`,
+  approval-gated like every other desk change.
+- Archive recommendations surface in the historian digest and require a
+  human to act on them.
+
+### What this does *not* fix
+
+The curator manages the **quality** of the lesson book. It does nothing
+for the **breadth of ideas** reaching the committee — the candidate
+ladder, the news feed and the prompt budget are separate problems, audited
+2026-09-04 and still open. A perfectly curated lesson book attached to a
+narrow idea supply still produces the same recommendations every week.
