@@ -474,8 +474,21 @@ class Cycle:
         if _settings.is_live_armed():
             from trading.runtime.nyse_session import current_nyse_session_label
 
+            # MANAGED scope, like every other live risk call. The runner's
+            # continuous monitor already judges the managed view, and its
+            # own comment spells out why the two must agree: "if the monitor
+            # judged the whole account while the cycle sized the managed
+            # slice, the baselines would be re-stamped every sixty seconds
+            # as the scope flipped back and forth, and neither kill switch
+            # would mean anything."
+            #
+            # This path passed the raw account, so a force_flatten regime on
+            # a desk with pinned positions drove `_reconcile_baseline_scope`
+            # to re-stamp both baselines to the whole-account equity. Only
+            # the evaluation is converted: what gets flattened below is
+            # deliberately unchanged.
             session_risk = self.risk_manager.evaluate_session_risk(
-                account,
+                self._as_managed_account(account, announce=False),
                 session_label=current_nyse_session_label(account.ts),
             )
             if session_risk.action != "allow":

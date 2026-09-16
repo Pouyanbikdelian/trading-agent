@@ -176,6 +176,7 @@ def reset_equity_baseline(
     observed_at: datetime,
     reason: str,
     actor: str,
+    scope: str | None = None,
     max_snapshot_age_s: float = 900.0,
     now: datetime | None = None,
 ) -> tuple[HaltState, HaltState]:
@@ -198,10 +199,24 @@ def reset_equity_baseline(
     ``/resume`` — two separate acts, because "I accept this loss" and
     "start trading again" are two separate judgements.
 
+    ``scope`` names which book ``equity`` describes — ``"managed"`` for the
+    desk's slice with pinned positions removed, ``"account"`` for the whole
+    account. It must agree with the stored ``baseline_scope``, because these
+    baselines are only meaningful against the book they were measured from.
+
+    That check exists because of 2026-09-14. The caller computed the desk
+    figure correctly for display and then passed the *account* figure to this
+    function. On a desk with CHF 38k of pinned positions that stamped 83,773
+    as the daily open of a book worth 45,578 — an instant, permanent -45.6%
+    against a -0.6% limit. The switch halted, ``/resume`` re-halted within the
+    minute, and re-running the reset wrote the same wrong number again. A
+    number in the wrong scope is not a smaller error than a number in the
+    wrong currency, and it is now refused the same way.
+
     Refuses (raising :class:`BaselineResetError`, writing nothing) on a
-    non-positive equity, a missing currency, a currency that disagrees
-    with the stored baseline, or a snapshot too old to describe the
-    account now. Returns ``(before, after)`` so the caller can show the
+    non-positive equity, a missing currency, a currency or scope that
+    disagrees with the stored baseline, or a snapshot too old to describe
+    the account now. Returns ``(before, after)`` so the caller can show the
     operator exactly what changed.
     """
     if equity <= 0:
@@ -237,6 +252,20 @@ def reset_equity_baseline(
                 f"stored baseline is in {stored_currency} but the account reports "
                 f"{normalized_currency}; resolve that before resetting"
             )
+        if scope is not None:
+            requested_scope = str(scope or "").strip().lower() or "account"
+            # A state written before ``baseline_scope`` existed is
+            # account-scoped by construction — the managed view is what
+            # introduced the field — so treat None as "account" rather than
+            # as a mismatch.
+            stored_scope = str(before.baseline_scope or "account").strip().lower()
+            if requested_scope != stored_scope:
+                raise BaselineResetError(
+                    f"the kill switches measure the {stored_scope} book but this "
+                    f"reset describes the {requested_scope} book. Stamping "
+                    f"{equity:,.2f} {normalized_currency} against a different book "
+                    "would manufacture a drawdown that never happened"
+                )
         # The provenance fields exist to stop an *accidental* mid-session
         # baseline — a restart at noon relabelling a loss as a new day.
         # This is the opposite case: the operator looked at the loss and

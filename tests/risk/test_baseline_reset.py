@@ -362,3 +362,101 @@ class TestTheRunnerAdoptsAResetWrittenByTheBot:
 
         assert runner_side.is_halted() is True
         assert runner_side.state.equity_high_watermark == before
+
+
+class TestTheResetMustDescribeTheBookTheSwitchesMeasure:
+    """2026-09-14, live. The desk pinned seven positions with `/hold`, so the
+    kill switches measured the MANAGED book — CHF 45,578 — while the account
+    itself held CHF 83,773. `/baseline reset` computed the desk figure
+    correctly for display and then handed the ACCOUNT figure to this
+    function.
+
+    The result was a daily open of 83,773 on a book worth 45,578: an instant
+    -45.59% against a -0.60% limit, permanent, and immune to the very command
+    meant to clear a lockout — every re-run stamped the same wrong number.
+
+    A number in the wrong scope is not a lesser error than one in the wrong
+    currency, and it is refused the same way.
+    """
+
+    DESK = 45_577.83
+    ACCOUNT = 83_772.99
+
+    def _managed_lockout(self, state_dir: Path) -> None:
+        write_halt_state(
+            state_dir,
+            HaltState(
+                halted=True,
+                reason="drawdown breaches limit",
+                halted_at=IN_SESSION,
+                equity_high_watermark=45_608.82,
+                daily_equity_open=45_534.40,
+                last_day=SESSION,
+                daily_baseline_session=SESSION,
+                daily_baseline_captured_at=IN_SESSION,
+                daily_baseline_source="snapshot_refresh",
+                daily_baseline_currency="CHF",
+                baseline_scope="managed",
+            ),
+        )
+
+    def test_the_account_figure_is_refused_against_a_managed_baseline(self, tmp_path: Path) -> None:
+        """The exact call that locked the desk."""
+        self._managed_lockout(tmp_path)
+
+        with pytest.raises(BaselineResetError) as exc:
+            _reset(tmp_path, equity=self.ACCOUNT, scope="account")
+
+        assert "managed" in str(exc.value) and "account" in str(exc.value)
+
+    def test_a_refused_scope_writes_nothing_at_all(self, tmp_path: Path) -> None:
+        """A partial write here is worse than no write: it is the lockout."""
+        self._managed_lockout(tmp_path)
+        before = read_halt_state(tmp_path)
+
+        with pytest.raises(BaselineResetError):
+            _reset(tmp_path, equity=self.ACCOUNT, scope="account")
+
+        after = read_halt_state(tmp_path)
+        assert after.equity_high_watermark == before.equity_high_watermark
+        assert after.daily_equity_open == before.daily_equity_open
+        assert after.daily_baseline_source == "snapshot_refresh"
+
+    def test_the_desk_figure_is_accepted(self, tmp_path: Path) -> None:
+        """What the caller should have passed all along."""
+        self._managed_lockout(tmp_path)
+
+        _before, after = _reset(tmp_path, equity=self.DESK, scope="managed")
+
+        assert after.equity_high_watermark == self.DESK
+        assert after.daily_equity_open == self.DESK
+        assert after.baseline_scope == "managed"
+
+    def test_the_mistake_is_refused_in_the_other_direction_too(self, tmp_path: Path) -> None:
+        """An account-scoped desk must not be re-stamped with a desk slice —
+        that manufactures a windfall rather than a loss, and silently
+        loosens both switches."""
+        _drawn_down(tmp_path)  # account-scoped: baseline_scope is unset
+
+        with pytest.raises(BaselineResetError):
+            _reset(tmp_path, equity=self.DESK, scope="managed")
+
+    def test_an_unset_stored_scope_counts_as_account(self, tmp_path: Path) -> None:
+        """States written before `baseline_scope` existed are account-scoped
+        by construction — the managed view is what introduced the field — so
+        None must not read as a mismatch."""
+        _drawn_down(tmp_path)
+        assert read_halt_state(tmp_path).baseline_scope is None
+
+        _before, after = _reset(tmp_path, equity=86_087.26, scope="account")
+
+        assert after.daily_equity_open == 86_087.26
+
+    def test_a_caller_that_names_no_scope_is_unchanged(self, tmp_path: Path) -> None:
+        """Backwards compatible: research and test callers that never knew
+        about scope keep working."""
+        _drawn_down(tmp_path)
+
+        _before, after = _reset(tmp_path, equity=86_087.26)
+
+        assert after.daily_equity_open == 86_087.26

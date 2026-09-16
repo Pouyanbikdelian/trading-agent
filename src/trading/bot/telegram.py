@@ -1285,11 +1285,17 @@ def _cmd_baseline(args: list[str]) -> str:
     try:
         before, after = reset_equity_baseline(
             settings.state_dir,
-            equity=equity,
+            # The DESK's equity, not the account's. `desk_equity` equals
+            # `equity` whenever nothing is pinned, and on 2026-09-14 passing
+            # `equity` here stamped the whole account (83,773) as the daily
+            # open of a book worth 45,578 — a permanent -45.6% against a
+            # -0.6% limit, and a lockout this very command exists to end.
+            equity=desk_equity,
             currency=ccy,
             observed_at=snap.ts,
             reason=reason,
             actor="telegram",
+            scope=str(getattr(state, "baseline_scope", "") or "account"),
         )
     except BaselineResetError as e:
         return f"❌ baseline reset refused — {e}"
@@ -1300,8 +1306,8 @@ def _cmd_baseline(args: list[str]) -> str:
     lines = [
         "📐 *BASELINE RESET*",
         f"reason: `{reason}`",
-        f"high-water mark: `{before.equity_high_watermark:,.2f}` → `{equity:,.2f} {ccy}`",
-        f"daily open: `{before.daily_equity_open:,.2f}` → `{equity:,.2f} {ccy}`",
+        f"high-water mark: `{before.equity_high_watermark:,.2f}` → `{desk_equity:,.2f} {ccy}`",
+        f"daily open: `{before.daily_equity_open:,.2f}` → `{desk_equity:,.2f} {ccy}`",
         "",
         "Recorded in `state/baseline_resets.jsonl`.",
     ]
