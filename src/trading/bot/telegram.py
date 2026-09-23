@@ -122,6 +122,10 @@ HELP_TEXT = (
     "/baseline \\[reset] — show or re-stamp the kill-switch high-water mark\n"
     "/reconnect — bounce the broker connection\n"
     "/gateway stop|start|status — release your IBKR session so you can trade by hand in TWS or mobile; stop also halts\n"
+    "\n*Money in / out* (so returns are not distorted)\n"
+    "/deposit AMOUNT \\[CCY] \\[YYYY-MM-DD] — record money you added\n"
+    "/withdraw AMOUNT \\[CCY] \\[YYYY-MM-DD] — record money you took out\n"
+    "/flows — list recorded deposits and withdrawals\n"
 )
 
 
@@ -1372,6 +1376,83 @@ def _cmd_resume() -> str:
         f"Tap Confirm or reply `/confirm {staged.token}` within 5 min.",
         command_confirm_keyboard(staged.token),
     )
+
+
+def _cmd_flow(args: list[str], sign: int) -> str:
+    """``/deposit`` / ``/withdraw``: state a capital flow once, by hand.
+
+    Returns on the dashboard used to treat only >25% daily jumps as
+    deposits, so a ~3% top-up read as profit (runtime/capital_flows.py).
+    """
+    from datetime import date as _date
+
+    from trading.runtime.capital_flows import record_flow
+
+    word = "deposit" if sign > 0 else "withdraw"
+    usage = (
+        f"usage: `/{word} AMOUNT [CCY] [YYYY-MM-DD] [note]` — e.g. `/{word} 3000 CHF 2026-08-20`"
+    )
+    if not args:
+        return usage
+    try:
+        amount = float(args[0].replace(",", "").replace("'", ""))
+    except ValueError:
+        return f"❌ `{args[0]}` is not an amount. " + usage
+    if amount <= 0:
+        return "❌ give a positive amount; the command says the direction. " + usage
+    rest = list(args[1:])
+    snap = _latest_snapshot_or_none()
+    ccy = str(getattr(snap, "base_currency", "") or "CHF").upper()
+    if rest and len(rest[0]) == 3 and rest[0].isalpha():
+        ccy = rest.pop(0).upper()
+    day = datetime.now(tz=timezone.utc).date()
+    if rest:
+        try:
+            day = _date.fromisoformat(rest[0])
+            rest.pop(0)
+        except ValueError:
+            pass
+    try:
+        flow = record_flow(
+            settings.state_dir,
+            amount=sign * amount,
+            currency=ccy,
+            day=day,
+            note=" ".join(rest),
+            recorded_by="telegram",
+        )
+    except ValueError as e:
+        return f"❌ {e}"
+    return (
+        f"✅ recorded {'deposit' if sign > 0 else 'withdrawal'} of "
+        f"{amount:,.2f} {flow.currency} on {flow.day.isoformat()}.\n"
+        "The dashboard now treats it as capital, not performance. "
+        "A mistake is fixed with an opposite entry; `/flows` lists them."
+    )
+
+
+def _cmd_flows() -> str:
+    from trading.runtime.capital_flows import load_flows
+
+    try:
+        flows = load_flows(settings.state_dir)
+    except Exception as e:
+        return f"❌ capital_flows.json unreadable: {e}"
+    if not flows:
+        return (
+            "no deposits or withdrawals recorded. If you ever added or removed money, "
+            "`/deposit AMOUNT CCY YYYY-MM-DD` — otherwise returns count it as profit or loss."
+        )
+    totals: dict[str, float] = {}
+    lines = ["💶 *Capital flows*"]
+    for f in flows:
+        totals[f.currency] = totals.get(f.currency, 0.0) + f.amount
+        lines.append(
+            f"`{f.day.isoformat()}` {'+' if f.amount > 0 else '−'}{abs(f.amount):,.2f} {f.currency}"
+            + (f" — {f.note}" if f.note else "")
+        )
+    lines.append("net: " + ", ".join(f"{v:+,.2f} {k}" for k, v in totals.items()))
+    return "\n".join(lines)
 
 
 def _halt_fingerprint() -> str:
@@ -3640,6 +3721,12 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_resume()
     if cmd == "/baseline":
         return _cmd_baseline(args)
+    if cmd == "/deposit":
+        return _cmd_flow(args, +1)
+    if cmd == "/withdraw":
+        return _cmd_flow(args, -1)
+    if cmd == "/flows":
+        return _cmd_flows()
     # --- cycle approval (only meaningful when REQUIRE_CYCLE_APPROVAL=true) ---
     if cmd == "/approve":
         return _cmd_approve(args)

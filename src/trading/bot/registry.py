@@ -242,6 +242,20 @@ REGISTRY: tuple[Spec, ...] = (
         example="/halt bad data",
     ),
     Spec("/resume", "clear the halt, reset the failure counter (asks to confirm)"),
+    # --- capital flows (returns treat these as capital, not profit)
+    Spec(
+        "/deposit",
+        "record money you added, so it is not counted as profit",
+        usage="/deposit AMOUNT [CCY] [YYYY-MM-DD] [note]",
+        example="/deposit 3000 CHF 2026-08-20 top-up",
+    ),
+    Spec(
+        "/withdraw",
+        "record money you took out, so it is not counted as a loss",
+        usage="/withdraw AMOUNT [CCY] [YYYY-MM-DD] [note]",
+        example="/withdraw 1500 CHF 2026-09-01",
+    ),
+    Spec("/flows", "list recorded deposits and withdrawals"),
 )
 
 

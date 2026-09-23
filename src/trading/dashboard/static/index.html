@@ -133,6 +133,12 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 .ev i.s{background:var(--up)}.ev i.c{background:var(--down)}
 .statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px}
 .stat .v{font:500 20px var(--mono)}.stat .l{font:600 10.5px var(--display);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.read{margin-top:10px;padding:8px 10px;border-left:2px solid var(--ice);background:rgba(124,196,255,.05);border-radius:0 6px 6px 0;font-size:13px;color:var(--text-2);line-height:1.5}
+.read b{color:var(--text);font-weight:600}
+.read::before{content:"READ";font:600 10px var(--display);letter-spacing:.14em;color:var(--ice);margin-right:8px}
+.brief{font-size:14.5px;line-height:1.65;color:var(--text-2)}
+.brief b{color:var(--text)}
+.verdict{font:600 10.5px var(--display);letter-spacing:.08em;text-transform:uppercase}
 .banner{display:none;margin:12px auto 0;max-width:1480px;padding-inline:20px}
 .banner div{border:1px solid rgba(255,77,109,.45);background:rgba(255,77,109,.08);color:var(--text);border-radius:8px;padding:8px 12px;font-size:13px}
 .slider{width:100%;accent-color:var(--ice)}
@@ -162,10 +168,11 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 <!-- ================= COCKPIT ================= -->
 <section class="tab on" id="tab-cockpit">
  <div class="grid">
+  <div class="panel c12"><h2>Briefing <span class="sub">what the numbers below add up to</span></h2><div class="brief" id="brief"></div></div>
   <div class="panel kpi c3"><div class="label">Account NetLiq <span class="envlbl">paper</span></div><div class="value" id="kAcct">–</div><div class="delta" id="kAcctD"></div><div class="spark" id="kAcctSpark"></div></div>
   <div class="panel kpi c3"><div class="label">Desk book · managed</div><div class="value" id="kDesk">–</div><div class="delta" id="kDeskD"></div></div>
   <div class="panel kpi c3"><div class="label">Cash</div><div class="value" id="kCash">–</div><div class="delta" id="kCashD"></div></div>
-  <div class="panel kpi c3"><div class="label">Since start · flow-adjusted</div><div class="value" id="kRet">–</div><div class="delta" id="kRetD"></div></div>
+  <div class="panel kpi c3"><div class="label">P&amp;L vs money put in</div><div class="value" id="kRet">–</div><div class="delta" id="kRetD"></div></div>
 
   <div class="panel c8">
    <h2>Kill switches <span class="sub" id="ksSub"></span></h2>
@@ -175,6 +182,7 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
     <div class="c4"><div class="chart gauge" id="gGross"></div></div>
    </div>
    <div class="note" id="ksNote"></div>
+   <div class="read" id="rdKs"></div>
   </div>
   <div class="panel c4">
    <h2>Needs attention</h2>
@@ -185,6 +193,7 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <h2>Equity (<span class="envlbl">paper</span>) <span class="sub" id="eqret"></span>
     <span class="right" id="eqRanges"></span></h2>
    <div class="chart tall" id="eqChart"></div>
+   <div class="read" id="rdEq"></div>
   </div>
   <div class="panel c4">
    <h2>Coming up <span class="sub">server-computed, New York time</span></h2>
@@ -195,6 +204,7 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <h2>Cycle history <span class="sub">last 16 runs · bar height = orders sent</span></h2>
    <div class="ribbon" id="ribbon"></div>
    <div class="legend"><span><i style="background:var(--up)"></i>traded</span><span><i style="background:var(--ice-dim)"></i>no orders needed</span><span><i style="background:var(--warn)"></i>halted / review only</span><span><i style="background:var(--crit)"></i>error</span><span><i style="background:var(--violet)"></i>skipped (lock)</span></div>
+   <div class="read" id="rdCyc"></div>
   </div>
   <div class="panel c4">
    <h2>Costs <span class="sub">broker-recorded net commissions</span></h2>
@@ -209,6 +219,7 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
   <div class="panel c7">
    <h2>Holdings <span class="sub">click a row to chart it · pinned = yours, never traded by the desk</span></h2>
    <div class="tscroll"><table class="t" id="holdT"></table></div>
+   <div class="read" id="rdHold"></div>
   </div>
   <div class="panel c5">
    <h2>Allocation <span class="sub" id="allocSub"></span></h2>
@@ -220,6 +231,7 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <div id="cmpPick" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
    <div class="chart tall" id="cmpChart"></div>
    <div class="note" id="tickNote"></div>
+   <div class="read" id="rdCmp"></div>
   </div>
 
   <div class="panel c6">
@@ -231,16 +243,12 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <div id="pmBox"></div>
   </div>
 
-  <div class="panel c6">
+  <div class="panel c12">
    <h2>Strategy race · USD, normalized to 100</h2>
-   <div class="note" style="margin:-4px 0 6px">every series rebased on the SAME day and flow-adjusted (a deposit is not a return); the account line is the whole NetLiq, not a strategy sleeve</div>
+   <div class="note" style="margin:-4px 0 6px">every series rebased on the SAME day; stated deposits and withdrawals removed (a deposit is not a return); the account line is the whole NetLiq, not a strategy sleeve</div>
    <div class="chart" id="raceChart"></div><div class="empty" id="raceEmpty" hidden></div>
    <div class="note" id="raceNote"></div>
-  </div>
-  <div class="panel c6">
-   <h2>Sleeve race <span class="sub">live sleeves vs SPY, USD</span></h2>
-   <div class="chart" id="sleeveChart"></div>
-   <div class="note" id="lvRaceNote"></div>
+   <div class="read" id="rdRace"></div>
   </div>
  </div>
 </section>
@@ -252,12 +260,13 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <h2>Market temperature <span class="sub">preview of the cash dial — informational, nothing trades on it yet</span></h2>
    <div class="tempwrap">
     <div class="chart gauge" id="tempGauge" style="height:200px"></div>
-    <div><div id="tempComps"></div><div class="note" id="tempNote"></div></div>
+    <div><div id="tempComps"></div><div class="read" id="tempNote"></div></div>
    </div>
   </div>
   <div class="panel c8">
    <h2>SPY vs its 200-day <span class="sub">one year</span></h2>
    <div class="chart" id="spyChart"></div>
+   <div class="read" id="rdSpy"></div>
   </div>
   <div class="panel c4">
    <h2>Regime <span class="sub" id="regSub"></span></h2>
@@ -268,11 +277,12 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <h2>Sector rotation <span class="sub">relative strength vs relative momentum · drag to replay</span><span class="right" id="rrgTrail"></span></h2>
    <div class="chart tall" id="rrgChart"></div>
    <input type="range" class="slider" id="rrgSlider" aria-label="Rotation replay date">
-   <div class="note" id="rrgNote"></div>
+   <div class="read" id="rrgNote"></div>
   </div>
   <div class="panel c4">
    <h2>Sector leadership <span class="sub">vs SPY, percentage points</span></h2>
    <div class="chart tall" id="heatChart"></div>
+   <div class="read" id="rdHeat"></div>
   </div>
 
   <div class="panel c12">
@@ -294,33 +304,38 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <div class="hero"><div class="big num" id="skillBig">–</div><div class="say" id="skillSay"></div></div>
   </div>
   <div class="panel c7">
-   <h2>Skill by voice <span class="sub">1 − Brier ÷ 0.25 · 0 = coin flip · dot = last 30 days</span></h2>
-   <div class="chart tall" id="skillChart"></div>
+   <h2>Scorecard by voice <span class="sub">every graded forecast, all time</span></h2>
+   <div class="tscroll"><table class="t" id="skillT"></table></div>
+   <div class="note">Skill = 1 − Brier ÷ 0.25. 0 means no better than always saying 50%; negative means the confidence is actively misleading. "Overconfident by" = how sure the voice said it was minus how often it was right.</div>
   </div>
   <div class="panel c5">
    <h2>Calibration <span class="sub">stated confidence vs how often it came true</span></h2>
    <div class="chart tall" id="relChart"></div>
+   <div class="read" id="rdRel"></div>
   </div>
 
   <div class="panel c7">
    <h2>Committee <span class="sub" id="comSub"></span></h2>
    <div id="comBox"></div>
    <div class="chart short" id="postureChart"></div>
+   <div class="read" id="rdCom"></div>
   </div>
   <div class="panel c5">
    <h2>Does selection add edge? <span class="sub">picks minus passes, excess vs SPY</span></h2>
    <div class="tscroll"><table class="t" id="edgeT"></table></div>
-   <div class="note">A spread on fewer than ~30 names is an anecdote, not evidence.</div>
+   <div class="read" id="rdEdge"></div>
   </div>
 
   <div class="panel c7">
    <h2>What the system believes <span class="sub" id="lessonSub"></span></h2>
    <div id="lessonBox"></div>
+   <div class="read" id="rdLes"></div>
   </div>
   <div class="panel c5">
    <h2>LLM usage <span class="sub">last 7 days</span></h2>
    <div class="statgrid" id="llmStats"></div>
    <div class="chart short" id="llmChart"></div>
+   <div class="read" id="rdLlm"></div>
    <div class="note" id="curatorNote"></div>
   </div>
  </div>
@@ -417,13 +432,36 @@ const rebaseNote=(id,r,extra)=>{
  if(extra)bits.push(extra);
  el.textContent=bits.join(' · ');};
 const rebasedLines=(id,r)=>{const c=chart(id);if(!c)return;
- c.setOption(base({legend:{top:0,textStyle:{color:C['text-2'],fontSize:11},icon:'roundRect',itemWidth:10,itemHeight:4},grid:{left:44,right:14,top:30,bottom:56},
+ c.setOption(base({tooltip:Object.assign({},TT,{valueFormatter:(v)=>v==null?'–':Number(v).toFixed(1)}),legend:{top:0,textStyle:{color:C['text-2'],fontSize:11},icon:'roundRect',itemWidth:10,itemHeight:4},grid:{left:44,right:14,top:30,bottom:56},
   xAxis:Object.assign({type:'category',data:r.dates,boundaryGap:false},AX),
   yAxis:Object.assign({type:'value',scale:true},AX),
   dataZoom:[{type:'inside'},{type:'slider',height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(124,196,255,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
   series:r.sets.map(s=>({name:s.label,type:'line',showSymbol:false,connectNulls:true,data:s.data,
    lineStyle:{width:s.label==='SPY'?1.2:1.8,color:s.borderColor,type:(s.borderDash||[]).length?'dashed':'solid'},itemStyle:{color:s.borderColor},
    markLine:{silent:true,symbol:'none',lineStyle:{color:C.faint,type:'dotted'},label:{show:false},data:[{yAxis:100}]}}))}),true);};
+// Capital flows stated with /deposit and /withdraw (runtime/capital_flows).
+// The FLOW_THRESHOLD guard above only catches >25% jumps; a 3% top-up used
+// to be read as a 3% gain. Stated flows are removed on their own day:
+// each day's ratio becomes (v_t − flow_t) / v_{t−1}.
+const flowMap=()=>{const m={};((D.equity||{}).days||[]).forEach(d=>{if(d.flow)m[d.t]=d.flow;});return m;};
+const withoutFlows=(pts,flows,scale)=>{if(!pts||!pts.length)return [];const out=[{t:pts[0].t,v:pts[0].v}];
+ for(let i=1;i<pts.length;i++){const f=(flows[pts[i].t]||0)*(scale?scale(pts[i].t):1);const a=pts[i-1].v;
+  out.push({t:pts[i].t,v:a>0?out[i-1].v*(pts[i].v-f)/a:out[i-1].v});}return out;};
+const money=(x,ccy,d=0)=>x==null||!isFinite(x)?'–':num(x,d)+(ccy?' '+ccy:'');
+const kfmt=(x)=>x==null||!isFinite(x)?'–':(Math.abs(x)>=1000?(x/1000).toFixed(1)+'k':num(x));
+// Everything the equity panels need, from one place.
+function book(){
+ const E=D.equity||{};const ccy=E.currency||(D.risk||{}).currency||D.equity_currency||'';
+ const days=(E.days&&E.days.length?E.days:(D.equity_curve||[]).map(p=>({t:p.t,account:+p.v,desk:null,net_flows:0,flow:null})));
+ if(!days.length)return {days:[],ccy};
+ const f0=days[0].net_flows||0;
+ const rows=days.map(d=>Object.assign({},d,{contributed:days[0].account+((d.net_flows||0)-f0)}));
+ const last=rows[rows.length-1];
+ const twrPts=flowAdjustedCurve(withoutFlows(rows.map(d=>({t:d.t,v:d.account})),flowMap()));
+ const twr=twrPts.length>1?twrPts[twrPts.length-1].v/100-1:null;
+ const peak=Math.max(...twrPts.map(p=>p.v));const dd=twrPts.length?twrPts[twrPts.length-1].v/peak-1:null;
+ return {days:rows,ccy,last,pnl:last.account-last.contributed,pnlPct:last.contributed>0?last.account/last.contributed-1:null,twr,dd,
+  deposits:(E.flows||[]).length,candidates:E.flow_candidates||[],note:E.note||''};}
 const RANGES=[['1m',31],['3m',92],['6m',183],['ytd','ytd'],['1y',366],['all',null]];
 const cutFor=(r)=>{const now=new Date();if(r==='ytd')return new Date(now.getFullYear(),0,1).toISOString().slice(0,10);
  const d=(RANGES.find(x=>x[0]===r)||[])[1];if(!d)return null;return new Date(now.getTime()-d*864e5).toISOString().slice(0,10);};
@@ -476,26 +514,36 @@ function nyseSession(){
 
 // ------------------------------------------------------------------ cockpit
 function renderCockpit(){
- const risk=D.risk||{},ctx=D.context||{},acct=ctx.account||{};
- const ccy=risk.currency||acct.base_currency||D.equity_currency||'';
- const daily=(D.equity_curve||[]).map(p=>({t:p.t,v:+p.v}));
+ const risk=D.risk||{},ctx=D.context||{},acct=ctx.account||{};const B=book();const ccy=B.ccy;
  const acctEq=risk.account_equity??acct.equity;
  $('kAcct').innerHTML=acctEq==null?'–':`${num(acctEq)}<small>${esc(ccy)}</small>`;
- const today=(D.equity_today||[]);
- const prevClose=daily.length?daily[daily.length-1].v:null;
+ const today=(D.equity_today||[]);const prevClose=B.last?B.last.account:null;
  const lastIntra=today.length?+today[today.length-1].v:null;
  const dayChg=(prevClose&&lastIntra)?lastIntra/prevClose-1:null;
  $('kAcctD').innerHTML=dayChg==null?'<span class="muted">no intraday marks yet</span>':`<span class="${cls(dayChg)}">${pct(dayChg,2)}</span> <span class="muted">today</span>`;
- $('kAcctSpark').innerHTML=spark(daily.slice(-90).map(p=>p.v),260,34,C.ice);
+ $('kAcctSpark').innerHTML=spark(B.days.slice(-90).map(p=>p.account),260,34,C.ice);
  $('kDesk').innerHTML=risk.desk_equity==null?'–':`${num(risk.desk_equity)}<small>${esc(ccy)}</small>`;
  const pinned=(risk.pinned||[]);
  $('kDeskD').innerHTML=pinned.length?`<span class="muted">excludes ${pinned.length} pinned: ${esc(pinned.slice(0,5).join(', '))}${pinned.length>5?'…':''}</span>`:'<span class="muted">no pinned holdings</span>';
  $('kCash').innerHTML=risk.cash_pct==null?'–':pctU(risk.cash_pct,1);
  $('kCashD').innerHTML=acct.cash!=null?`<span class="muted">${num(acct.cash)} ${esc(ccy)} of the account</span>`:'';
- const ret=flowAdjusted(daily);
- $('kRet').innerHTML=ret==null?'–':`<span class="${cls(ret)}">${pct(ret,2)}</span>`;
- $('kRetD').innerHTML=daily.length?`<span class="muted">since ${esc(daily[0].t)} · deposits excluded</span>`:'';
- renderGauges();renderAttention();renderEquity();renderSchedule();renderRibbon();renderCosts();
+ $('kRet').innerHTML=B.pnl==null?'–':`<span class="${cls(B.pnl)}">${B.pnl>=0?'+':'−'}${num(Math.abs(B.pnl))}</span><small>${esc(ccy)}</small>`;
+ $('kRetD').innerHTML=B.last?`<span class="${cls(B.pnlPct)}">${pct(B.pnlPct,1)}</span> <span class="muted">on ${num(B.last.contributed)} put in · time-weighted ${pct(B.twr,1)}</span>`:'';
+ renderGauges();renderAttention();renderEquity();renderSchedule();renderRibbon();renderCosts();renderBrief();
+}
+function renderBrief(){
+ const st=D.status||{},r=D.risk||{},B=book(),cyc=D.cycles||[],pos=D.positions||[],ccy=B.ccy;
+ const out=[];
+ const next=(D.schedule||[]).find(j=>j.key==='cycle');
+ if(st.halted)out.push(`The desk is <b>halted</b> (${esc(stripMd(st.halt_reason)||'no reason recorded')}): nothing new trades until you <b>/resume</b>.`);
+ else out.push(`The desk is <b>running</b>${next?`; next cycle <b>${esc(fmtNY(next.at))} New York</b>`:''}${st.require_approval?' and it will wait for your approval':''}.`);
+ if(B.last)out.push(`Your account is <b>${money(B.last.account,ccy)}</b>, ${B.pnl>=0?'up':'down'} <b>${money(Math.abs(B.pnl),ccy)}</b> (${pct(B.pnlPct,1)}) against the <b>${money(B.last.contributed,ccy)}</b> put in${B.deposits?'':' — no deposits recorded; if you added money, record it with /deposit'}.`);
+ const pinnedVal=pos.filter(p=>p.pinned).reduce((s,p)=>s+(p.value_base||0),0);const deskPos=pos.filter(p=>!p.pinned);
+ if(r.desk_equity!=null)out.push(`The system manages <b>${money(r.desk_equity,ccy)}</b>${deskPos.length?` across ${deskPos.length} position${deskPos.length>1?'s':''}`:' — all cash'}; ${pos.length-deskPos.length} pinned holding${pos.length-deskPos.length===1?' is':'s are'} yours (${money(pinnedVal,ccy)}) and never traded by it.`);
+ const lastTrade=cyc.find(c=>(c.orders||0)>0);const since=lastTrade?cyc.indexOf(lastTrade):cyc.length;
+ if(cyc.length)out.push(lastTrade?`Last cycle that traded: <b>${esc(fmtNY(lastTrade.t,{weekday:undefined,day:'2-digit',month:'short',hour:undefined,minute:undefined}))}</b>${since?`, ${since} cycle${since>1?'s':''} ago`:''}.`:'No recorded cycle has traded yet.');
+ if(B.candidates.length)out.push(`<b>${B.candidates.length}</b> day${B.candidates.length>1?'s look':' looks'} like an unrecorded deposit or withdrawal — see Needs attention.`);
+ $('brief').innerHTML=out.join(' ');
 }
 function gauge(id,title,valueFrac,limitFrac,display,sub){
  const c=chart(id);if(!c)return;
@@ -517,7 +565,17 @@ function renderGauges(){
  if(r.hwm)bits.push(`peak ${num(r.hwm)} ${esc(r.currency||'')}`);
  if(r.baseline_session)bits.push(`day open captured ${esc(r.baseline_session)}`);
  $('ksSub').innerHTML=bits.join(' · ');
- $('ksNote').innerHTML=r.note?`<span class="warn">⚠ ${esc(r.note)}</span>`:(r.same_book?'<span class="muted">Measured on the desk book, exactly as the risk manager does. Arc = share of the limit used.</span>':'');
+ $('ksNote').innerHTML=r.note?`<span class="warn">⚠ ${esc(r.note)}</span>`:'';
+ const used=(v,l)=>v==null||!l?null:Math.abs(Math.min(0,v))/l;
+ const u1=used(r.drawdown_pct,L.max_drawdown_pct),u2=used(r.day_pct,L.max_daily_loss_pct);
+ let t;
+ if(r.note)t='The switches cannot measure the desk right now, so the risk manager keeps new cycles review-only until the baseline is fixed (<b>/baseline</b>).';
+ else if(u1==null)t='No valid baseline yet — the first NYSE open after a restart stamps it.';
+ else{const worst=Math.max(u1||0,u2||0);
+  t=`The desk is ${pct(r.drawdown_pct,1)} from its peak (${pctU(u1,0)} of the ${pctU(L.max_drawdown_pct,0)} halt) and ${pct(r.day_pct,2)} today (${pctU(u2,0)} of the ${pctU(L.max_daily_loss_pct,1)} daily halt). `+
+   (worst>=.8?'<b>Close to a halt.</b>':worst>=.5?'<b>Over half-way to a halt</b> — watch it.':'Plenty of room.')+
+   (r.gross_exposure!=null?` Invested ${pctU(r.gross_exposure,0)} of the desk.`:'');}
+ $('rdKs').innerHTML=t+' <span class="faint">Measured on the desk book, as the risk manager measures it; your pinned holdings are excluded.</span>';
 }
 function renderAttention(){
  const items=[];const st=D.status||{},w=D.watch||{},p=D.pending||{},ops=D.ops||{},ctx=D.context||{},risk=D.risk||{};
@@ -525,6 +583,7 @@ function renderAttention(){
  (w.findings||[]).forEach(f=>items.push([f.level==='critical'?'crit':'warn',stripMd(f.message).split('.')[0],stripMd(f.message).split('.').slice(1).join('.').trim()]));
  if(p.approval)items.push(['crit','Basket waiting for approval',`${(p.approval.orders||[]).length} orders · deploy ${pctU(p.approval.deploy_pct,0)}${p.approval.defensive?' · reduce-only':''} — /approve or /reject in Telegram`]);
  if(p.staged)items.push(['warn','Command waiting for /confirm',`${p.staged.summary} · expires ${fmtNY(p.staged.expires_at,{weekday:undefined})} NY`]);
+ book().candidates.slice(-3).forEach(c=>items.push(['warn',`Possible ${c.amount>0?'deposit':'withdrawal'} on ${c.t}: ${c.amount>0?'+':'−'}${num(Math.abs(c.amount))} ${c.currency}`,`cash and equity jumped together (not a trade). If real: /${c.amount>0?'deposit':'withdraw'} ${Math.abs(Math.round(c.amount))} ${c.currency} ${c.t}`]));
  const stale=(p.open_orders||[]).filter(o=>o.age_days>=3);
  if(stale.length)items.push(['warn',`${stale.length} order(s) open 3+ days`,stale.slice(0,4).map(o=>`${o.side} ${o.symbol} (${o.age_days}d)`).join(', ')]);
  if((w.reconcile_attention||[]).length)items.push(['warn','Ledger rows the broker cannot confirm',(w.reconcile_attention||[]).slice(0,4).join(', ')+' — `/orders resolve` after checking the statement']);
@@ -538,19 +597,33 @@ function renderAttention(){
 }
 function renderEquity(){
  rangeButtons('eqRanges',UI.eqRange,(r)=>{UI.eqRange=r;renderEquity();});
- const cut=cutFor(UI.eqRange);
- const daily=(D.equity_curve||[]).filter(p=>!cut||p.t>=cut).map(p=>({t:p.t,v:+p.v}));
- const ret=flowAdjusted(daily);
- $('eqret').innerHTML=ret==null?'':`<span class="${ret>=0?'pos':'neg'}">${pct(ret,2)}</span> flow-adjusted`;
+ const B=book();const cut=cutFor(UI.eqRange);const ccy=B.ccy;
+ const rows=B.days.filter(p=>!cut||p.t>=cut);
+ const twrP=flowAdjustedCurve(withoutFlows(rows.map(d=>({t:d.t,v:d.account})),flowMap()));
+ const ret=twrP.length>1?twrP[twrP.length-1].v/100-1:null;
+ $('eqret').innerHTML=ret==null?'':`<span class="${ret>=0?'pos':'neg'}">${pct(ret,2)}</span> time-weighted, deposits removed`;
  const c=chart('eqChart');if(!c)return;
- if(daily.length<2){c.clear();c.setOption({title:{text:'Not enough daily closes yet',left:'center',top:'middle',textStyle:{color:C.muted,fontSize:13,fontWeight:400}}});return;}
- const col=(ret??0)>=0?C.up:C.down;
- c.setOption(base({grid:{left:64,right:16,top:16,bottom:56},
-  xAxis:Object.assign({type:'category',data:daily.map(p=>p.t),boundaryGap:false},AX),
-  yAxis:Object.assign({type:'value',scale:true},AX),
+ if(rows.length<2){c.clear();c.setOption({title:{text:'Not enough daily closes yet',left:'center',top:'middle',textStyle:{color:C.muted,fontSize:13,fontWeight:400}}});$('rdEq').textContent='';return;}
+ const hasDesk=rows.some(r=>r.desk!=null);const col=(B.pnl??0)>=0?C.up:C.down;
+ c.setOption(base({legend:{top:0,textStyle:{color:C['text-2'],fontSize:11},icon:'roundRect',itemWidth:10,itemHeight:4},
+  tooltip:Object.assign({},TT,{valueFormatter:(v)=>money(v,ccy)}),grid:{left:64,right:16,top:30,bottom:56},
+  xAxis:Object.assign({type:'category',data:rows.map(p=>p.t),boundaryGap:false},AX),
+  yAxis:Object.assign({type:'value',scale:true,name:ccy,nameTextStyle:{color:C.muted,fontSize:10}},AX,{axisLabel:{color:C.muted,fontSize:10,fontFamily:'IBM Plex Mono',formatter:(v)=>kfmt(v)}}),
+  axisPointer:{label:{formatter:(p)=>p.axisDimension==='y'?kfmt(p.value):p.value}},
   dataZoom:[{type:'inside'},{type:'slider',height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(124,196,255,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
-  series:[{type:'line',name:'NetLiq',showSymbol:false,data:daily.map(p=>p.v),lineStyle:{width:2,color:col},itemStyle:{color:col},
-   areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:col+'55'},{offset:1,color:col+'00'}])}}]}),true);
+  series:[{type:'line',name:'Account NetLiq',showSymbol:false,data:rows.map(p=>p.account),lineStyle:{width:2,color:col},itemStyle:{color:col},
+    areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:col+'40'},{offset:1,color:col+'00'}])}},
+   {type:'line',name:'Money put in',step:'end',showSymbol:false,data:rows.map(p=>+p.contributed.toFixed(2)),lineStyle:{width:1.2,color:C.muted,type:'dashed'},itemStyle:{color:C.muted}}]
+   .concat(hasDesk?[{type:'line',name:'Desk book (ex-pinned)',showSymbol:false,data:rows.map(p=>p.desk),lineStyle:{width:1.6,color:C.ice},itemStyle:{color:C.ice}}]:[])}),true);
+ const first=rows[0],last=rows[rows.length-1];const hi=Math.max(...rows.map(r=>r.account));
+ const flowsIn=last.contributed-first.contributed;
+ $('rdEq').innerHTML=`From ${esc(first.t)} the account went ${money(first.account,ccy)} → <b>${money(last.account,ccy)}</b>`+
+  (flowsIn?`, of which <b>${flowsIn>0?'+':'−'}${money(Math.abs(flowsIn),ccy)}</b> was money you ${flowsIn>0?'added':'withdrew'}`:'')+
+  `. Performance after removing that: <b>${pct(ret,1)}</b>. `+(last.account/hi-1>-.005?'It is at its high for this window. ':`It is ${pctU(1-last.account/hi,1)} below its high in this window. `)+
+  `The gap between the green line and the dashed line is your profit or loss.`+
+  (hasDesk?` The blue line is what the system manages; the rest is your pinned holdings.`:'')+
+  (B.candidates.length?` <span class="warn">${B.candidates.length} unrecorded jump${B.candidates.length>1?'s':''} may be deposits — until recorded they count as performance.</span>`:'')+
+  (B.note?` <span class="warn">${esc(B.note)}</span>`:'');
 }
 function renderSchedule(){
  const s=D.schedule||[];
@@ -558,11 +631,17 @@ function renderSchedule(){
 }
 function renderRibbon(){
  const cyc=(D.cycles||[]).slice().reverse();
- if(!cyc.length){$('ribbon').innerHTML='<div class="empty" style="width:100%">no cycles recorded yet</div>';return;}
+ if(!cyc.length){$('ribbon').innerHTML='<div class="empty" style="width:100%">no cycles recorded yet</div>';$('rdCyc').textContent='';return;}
  const mx=Math.max(1,...cyc.map(c=>c.orders||0));
  $('ribbon').innerHTML=cyc.map(c=>{const h=10+Math.round(44*(c.orders||0)/mx);
   const tip=`${fmtNY(c.t,{day:'2-digit',month:'short'})} NY · ${c.status} · ${c.orders} orders, ${c.fills} fills${c.error?' · '+stripMd(c.error).slice(0,120):''}`;
   return `<div class="cyc ${esc(c.status)}" title="${esc(tip)}"><div class="bar" style="height:${h}px"></div><span>${esc(new Date(c.t).toISOString().slice(5,10))}</span></div>`;}).join('');
+ const n=cyc.length,count=(k)=>cyc.filter(c=>c.status===k).length;
+ const blocked=count('halted')+count('halted_review')+count('error')+count('skipped_locked');
+ const lastTrade=[...cyc].reverse().find(c=>(c.orders||0)>0);
+ $('rdCyc').innerHTML=`Of the last ${n} cycles, <b>${count('ok')}</b> traded, ${count('no_orders')} decided nothing needed changing, and <b>${blocked}</b> could not trade (halted, review-only or error).`+
+  (lastTrade?` Last trade: ${esc(new Date(lastTrade.t).toISOString().slice(0,10))}.`:' None traded.')+
+  (blocked>=n/2?' <b>The desk has mostly been unable to act</b> — that is a system problem, not a market call.':'');
 }
 function renderCosts(){
  const sl=((D.live||{}).sleeves||[]);const s=sl.find(x=>x.transaction_costs)||{};const tc=s.transaction_costs||{};
@@ -595,7 +674,13 @@ function renderPortfolio(){
    <td>${spark(tickerSeries(r.symbol).map(p=>+p.v),96,24,(retOver(tickerSeries(r.symbol),60)??0)>=0?C.up:C.down)}</td></tr>`).join(''):`<tr><td colspan="7" class="empty">no positions</td></tr>`)+'</tbody>';
  $('holdT').querySelectorAll('th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(k==='spark')return;UI.holdDir=UI.holdSort===k?-UI.holdDir:-1;UI.holdSort=k;renderPortfolio();});
  $('holdT').querySelectorAll('tr.clickable').forEach(tr=>tr.onclick=()=>{toggleCmp(tr.dataset.sym,true);});
- renderAlloc(rows);renderCompare();renderWatch();renderPM();renderRace();renderSleeves();
+ const tot=rows.reduce((s2,r)=>s2+(r.value_base||0),0);const pinN=rows.filter(r=>r.pinned).length;
+ const big=rows.slice().sort((a,b)=>(b.weight||0)-(a.weight||0))[0];
+ const best=rows.slice().sort((a,b)=>(b.unrealized_pct??-9)-(a.unrealized_pct??-9))[0],worst=rows.slice().sort((a,b)=>(a.unrealized_pct??9)-(b.unrealized_pct??9))[0];
+ const nearStop=rows.filter(r=>r.stop_distance_pct!=null&&r.stop_distance_pct<.05);
+ $('rdHold').innerHTML=rows.length?`${rows.length} positions worth ${money(tot,ccy)}; <b>${pinN}</b> pinned (yours, never traded by the desk). Largest: <b>${esc(big.symbol)}</b> at ${pctU(big.weight,1)} of the account. Best open P&L ${esc(best.symbol)} ${pct(best.unrealized_pct,0)}, worst ${esc(worst.symbol)} ${pct(worst.unrealized_pct,0)}.`+
+  (nearStop.length?` <span class="warn">Within 5% of a trailing stop: ${esc(nearStop.map(r=>r.symbol).join(', '))}.</span>`:' No position is near a trailing stop.'):'No positions.';
+ renderAlloc(rows);renderCompare();renderWatch();renderPM();renderRace();
 }
 function renderAlloc(rows){
  const r=D.risk||{};const bySec={};let tot=0;
@@ -624,6 +709,10 @@ function renderCompare(){
  const r=rebase100(series);
  rebaseNote('tickNote',r,'solid = held, dashed = watchlist; wheel or drag the bar below to zoom');
  rebasedLines('cmpChart',r);
+ const endV=r.sets.map(x=>({l:x.label,v:[...x.data].reverse().find(v=>v!=null)})).filter(x=>x.v!=null).sort((a,b)=>b.v-a.v);
+ const spyE=endV.find(x=>x.l==='SPY');
+ $('rdCmp').innerHTML=endV.length?`Since ${esc(r.start||'')}: best <b>${esc(endV[0].l)}</b> ${pct(endV[0].v/100-1,1)}, worst <b>${esc(endV[endV.length-1].l)}</b> ${pct(endV[endV.length-1].v/100-1,1)}`+
+  (spyE?`; SPY ${pct(spyE.v/100-1,1)}. ${endV.filter(x=>x.l!=='SPY'&&x.v>spyE.v).length} of ${endV.length-1} beat the index.`:'.'):'Pick symbols above.';
 }
 function renderWatch(){
  const u=cmpUniverse();const rows=u.wl.map(s=>{const pts=tickerSeries(s);const v=pts.map(p=>+p.v);const hi=v.length?Math.max(...v):null;
@@ -650,7 +739,11 @@ function renderRace(){
   .map(h=>({t:String(h.t).slice(0,10),v:+h.equity,spy:h.spy?+h.spy:null}))
   .filter(h=>h.t<todayISO);
  const daily=(D.equity_curve||[]).map(p=>({t:p.t,v:+p.v}));
- const acct=((D.equity_curve_usd||[]).length?D.equity_curve_usd:daily).map(p=>({t:p.t,v:+p.v}));
+ const usd=(D.equity_curve_usd||[]).length?D.equity_curve_usd:daily;
+ // Stated flows are in the base currency; scale them into USD with the
+ // same day's conversion the curve itself used.
+ const baseBy={},usdBy={};daily.forEach(p=>baseBy[p.t]=p.v);usd.forEach(p=>usdBy[p.t]=+p.v);
+ const acct=withoutFlows(usd.map(p=>({t:p.t,v:+p.v})),flowMap(),(t)=>baseBy[t]>0&&usdBy[t]?usdBy[t]/baseBy[t]:1);
  const pm=pmH;
  const spy=pmH.filter(h=>h.spy!=null).map(h=>({t:h.t,v:h.spy}));
  const ccy=D.equity_usd_ok===false?(D.equity_currency||'USD'):'USD';
@@ -666,13 +759,10 @@ function renderRace(){
  rebaseNote('raceNote',ok?r:null,(acct.length&&D.equity_usd_ok===false)?
   '⚠ USDCHF unavailable — the '+ccy+' account line is UNCONVERTED, so FX moves show as performance':'');
  if(ok)rebasedLines('raceChart',r);
-}
-function renderSleeves(){
- const lv=D.live||{};const sl=(lv.sleeves||[]);
- const spy=(lv.spy||[]).map(p=>({t:String(p.t).slice(0,10),v:+p.v}));
- const r=rebase100(sl.map((s,i)=>({label:s.label,pts:flowAdjustedCurve((s.curve_usd||[]).map(p=>({t:String(p.t).slice(0,10),v:+p.v}))),color:[C.ice,C.violet,C.teal][i%3]})).concat([{label:'SPY',pts:spy,color:C.muted}]));
- rebaseNote('lvRaceNote',r,lv.fx_ok===false?'⚠ FX series unavailable — curves shown UNCONVERTED':'');
- rebasedLines('sleeveChart',r);
+ const endOf=(lbl)=>{const x=r.sets.find(z=>z.label.startsWith(lbl));if(!x)return null;const v=[...x.data].reverse().find(y=>y!=null);return v==null?null:v/100-1;};
+ const a=endOf('account'),p=endOf('agent PM'),sp=endOf('SPY');
+ $('rdRace').innerHTML=ok?`Since ${esc(r.start)}: your account <b>${pct(a,1)}</b>, the PM simulation <b>${pct(p,1)}</b>, SPY <b>${pct(sp,1)}</b> (all in USD). `+
+  `<b>The PM line is a paper simulation</b>: it fills at the decision-time price with fractional shares and a flat 0.10% cost, no spread, no FX, no taxes, and it keeps trading while the real desk is halted — so it will look better than any real account. Treat a lead of a few percent over a few months as noise.`:'';
 }
 
 // ------------------------------------------------------------------- market
@@ -694,15 +784,24 @@ function renderTemp(){
  const bits=[];
  if(m.days_since_high!=null)bits.push(`${m.days_since_high} trading days since the high`);
  if(m.stabilised!=null)bits.push(m.stabilised?'selling has stabilised (no new 20-day low this week, VIX curve in contango)':'not stabilised yet — new lows or an inverted VIX curve');
- bits.push('Your rule: more cash when stretched at highs, fully invested once a sell-off stabilises. Levels will be set on the honest backtest.');
- $('tempNote').textContent=bits.join(' · ');
+ const lbl=m.label||'';
+ const advice={Stretched:'Under your rule this is a <b>hold more cash</b> environment: prices are extended and a pullback is more likely to be a buying chance than a disaster.',
+  Warm:'Above-average extension. Your rule would <b>not add</b> here and would keep new buys small.',
+  Neutral:'Nothing stretched, nothing discounted — normal sizing.',
+  Discount:'Prices are marked down. Your rule says <b>buy once it stabilises</b>'+(m.stabilised?' — and it has.':', which it has not yet: wait for the selling to stop.')};
+ $('tempNote').innerHTML=(t==null?'No readings yet.':`<b>${esc(lbl)}</b> (${t>=0?'+':''}${t.toFixed(2)} on a −1 to +1 scale). `+(advice[lbl]||''))+
+  (bits.length?' <span class="faint">'+esc(bits.join(' · '))+'.</span>':'')+' <span class="faint">Informational only — nothing trades on this yet; levels will come from the backtest.</span>';
 }
 function renderSpy(){
  const s=(D.market||{}).spy_series||[];const c=chart('spyChart');if(!c)return;
  if(s.length<210){c.clear();c.setOption({title:{text:'SPY history not cached',left:'center',top:'middle',textStyle:{color:C.muted,fontSize:13,fontWeight:400}}});return;}
  const v=s.map(p=>p.v);const ma=v.map((_,i)=>i<199?null:+(v.slice(i-199,i+1).reduce((a,b)=>a+b,0)/200).toFixed(2));
  const from=Math.max(0,s.length-252);
+ const m=D.market||{};
+ $('rdSpy').innerHTML=`SPY is <b>${pct(m.spy_vs_200d,1)}</b> ${m.spy_vs_200d>=0?'above':'below'} its 200-day average and ${(m.drawdown_from_high??-1)>-.005?'at its high':pctU(-m.drawdown_from_high,1)+' below its high'}. `+
+  (m.spy_vs_200d>.1?'More than 10% above is historically stretched; the trend is strong but the cushion to the average is large.':m.spy_vs_200d>0?'Above the average: an intact uptrend.':'Below the average: the long-term trend is broken.');
  c.setOption(base({legend:{top:0,right:0,textStyle:{color:C['text-2'],fontSize:11}},grid:{left:48,right:12,top:28,bottom:28},
+  tooltip:Object.assign({},TT,{valueFormatter:(v)=>v==null?'–':Number(v).toFixed(2)}),
   xAxis:Object.assign({type:'category',data:s.slice(from).map(p=>p.t),boundaryGap:false},AX),yAxis:Object.assign({type:'value',scale:true},AX),
   series:[{name:'SPY',type:'line',showSymbol:false,data:v.slice(from),lineStyle:{width:1.8,color:C.ice},areaStyle:{color:'rgba(124,196,255,.08)'}},
    {name:'200-day',type:'line',showSymbol:false,data:ma.slice(from),lineStyle:{width:1.2,color:C.warn,type:'dashed'}}]}),true);
@@ -742,8 +841,11 @@ function renderRRG(){
  c.setOption({backgroundColor:'transparent',animationDurationUpdate:250,tooltip:{trigger:'item',backgroundColor:C.panel,borderColor:C['line-2'],textStyle:{color:C.text,fontSize:12}},grid:{left:44,right:36,top:16,bottom:34},
   xAxis:Object.assign({type:'value',min:+xr[0].toFixed(1),max:+xr[1].toFixed(1),name:'relative strength →',nameLocation:'middle',nameGap:22,nameTextStyle:{color:C.muted,fontSize:10}},AX),
   yAxis:Object.assign({type:'value',min:+yr[0].toFixed(1),max:+yr[1].toFixed(1),name:'momentum',nameTextStyle:{color:C.muted,fontSize:10}},AX),series},true);
- const lead=secs.filter(s=>s.quadrant==='leading').map(s=>s.sym);
- $('rrgNote').textContent=`as of ${at}`+(lead.length?` · leading now: ${lead.join(', ')}`:'')+((D.rotation||{}).alerts||[]).slice(0,2).map(a=>' · '+stripMd(a.msg)).join('');
+ const inQ=(k)=>secs.filter(s=>s.quadrant===k).map(s=>s.sym);
+ $('rrgNote').innerHTML=`As of ${esc(at)} — <b>leading</b> (strong and gaining): ${esc(inQ('leading').join(', ')||'none')}; <b>weakening</b> (strong, losing momentum): ${esc(inQ('weakening').join(', ')||'none')}; `+
+  `<b>lagging</b>: ${esc(inQ('lagging').join(', ')||'none')}; <b>improving</b> (weak, gaining): ${esc(inQ('improving').join(', ')||'none')}. `+
+  `Sectors normally circle <b>clockwise</b> — improving → leading → weakening → lagging → improving. A tail hooking back the other way (e.g. weakening straight back to leading) is a real, common event: renewed buying before the rotation completed.`+
+  ((D.rotation||{}).alerts||[]).slice(0,2).map(a=>' '+esc(stripMd(a.msg))+'.').join('');
 }
 function renderHeat(){
  const secs=((D.rotation||{}).sectors||[]).slice().sort((a,b)=>(b.rel_3m??0)-(a.rel_3m??0));const c=chart('heatChart');if(!c)return;
@@ -755,6 +857,10 @@ function renderHeat(){
   yAxis:{type:'category',data:secs.map(s=>s.sym),inverse:true,axisLine:{show:false},axisTick:{show:false},axisLabel:{color:C['text-2'],fontFamily:'IBM Plex Mono'}},
   visualMap:{show:false,min:-mx,max:mx,inRange:{color:[C.down,'#1b2542',C.up]}},
   series:[{type:'heatmap',data,label:{show:true,color:C.text,fontSize:11,fontFamily:'IBM Plex Mono',formatter:(p)=>(p.value[2]>=0?'+':'')+p.value[2]},itemStyle:{borderColor:C.panel,borderWidth:3,borderRadius:4}}]},true);
+ const top=secs.slice(0,3).map(s=>s.sym),bot=secs.slice(-3).map(s=>s.sym);
+ const turning=secs.filter(s=>(s.rel_1m??0)>0&&(s.rel_3m??0)<0).map(s=>s.sym),fading=secs.filter(s=>(s.rel_1m??0)<0&&(s.rel_3m??0)>0).map(s=>s.sym);
+ $('rdHeat').innerHTML=`Over 3 months <b>${esc(top.join(', '))}</b> led and <b>${esc(bot.join(', '))}</b> trailed SPY. `+
+  (turning.length?`Turning up this month after a weak quarter: <b>${esc(turning.join(', '))}</b>. `:'')+(fading.length?`Fading this month after a strong quarter: <b>${esc(fading.join(', '))}</b>.`:'');
 }
 function renderMacro(){
  const mw=D.market_watch||{};const h=(mw.history||[]).slice(-260);const L=mw.latest||{};
@@ -780,33 +886,38 @@ function renderAgents(){
  const A=D.agents||{};const ag=(A.agents||[]);
  const sk=A.overall_skill;
  $('skillBig').innerHTML=sk==null?'–':`<span class="${cls(sk)}">${(sk>=0?'+':'')+(100*sk).toFixed(0)}%</span>`;
+ const n=ag.reduce((s,a)=>s+a.n,0)||1;const conf=ag.reduce((s,a)=>s+a.mean_confidence*a.n,0)/n,hit=ag.reduce((s,a)=>s+a.hit_rate*a.n,0)/n;
  const best=ag[0],worst=ag[ag.length-1];
  $('skillSay').innerHTML=sk==null?'No graded predictions yet.':
-  (sk<0?`<b>Not yet.</b> Across ${num(A.graded)} graded forecasts the committee scores <b>worse than always saying 50%</b>. `:`<b>Slightly.</b> Across ${num(A.graded)} graded forecasts the committee beats a coin flip. `)+
-  (best?`Best voice: <b>${esc(best.agent)}</b> (${(100*best.skill).toFixed(0)}%). Weakest: <b>${esc(worst.agent)}</b> (${(100*worst.skill).toFixed(0)}%). `:'')+
-  (ag.length?`Average stated confidence ${pctU(ag.reduce((s,a)=>s+a.mean_confidence*a.n,0)/Math.max(1,ag.reduce((s,a)=>s+a.n,0)),0)} vs hit rate ${pctU(ag.reduce((s,a)=>s+a.hit_rate*a.n,0)/Math.max(1,ag.reduce((s,a)=>s+a.n,0)),0)} — that gap is overconfidence. `:'')+
-  `${num(A.open)} forecasts open, ${num(A.due_7d)} due this week.`;
- const c=chart('skillChart');
- if(c){const names=ag.map(a=>a.agent).reverse();const byName={};ag.forEach(a=>byName[a.agent]=a);
-  c.setOption(base({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},backgroundColor:C.panel,borderColor:C['line-2'],textStyle:{color:C.text,fontSize:12},
-    formatter:(ps)=>{const a=byName[ps[0].name];return `<b>${esc(a.agent)}</b><br>skill ${(100*a.skill).toFixed(1)}% · n ${a.n}<br>hit rate ${pctU(a.hit_rate,0)} at ${pctU(a.mean_confidence,0)} confidence<br>Brier ${a.brier.toFixed(3)} (coin flip 0.250)`+(a.recent_skill!=null?`<br>last 30d ${(100*a.recent_skill).toFixed(1)}% (n ${a.recent_n})`:'');}},
-   grid:{left:96,right:24,top:10,bottom:28},
-   xAxis:Object.assign({type:'value',axisLabel:{color:C.muted,fontFamily:'IBM Plex Mono',fontSize:10,formatter:(v)=>(100*v).toFixed(0)+'%'}},AX,{axisLabel:{color:C.muted,fontSize:10,formatter:(v)=>(100*v).toFixed(0)+'%'}}),
-   yAxis:{type:'category',data:names,axisLine:{show:false},axisTick:{show:false},axisLabel:{color:C['text-2'],fontFamily:'IBM Plex Mono',fontSize:11}},
-   series:[{type:'bar',data:names.map(n=>{const v=byName[n].skill;return {value:+v.toFixed(3),itemStyle:{color:v>=0?C.up:C.down,borderRadius:v>=0?[0,4,4,0]:[4,0,0,4]}};}),barWidth:12,
-     markLine:{silent:true,symbol:'none',lineStyle:{color:C.text,type:'solid',width:1},label:{show:true,formatter:'coin flip',color:C.muted,fontSize:10,position:'end'},data:[{xAxis:0}]}},
-    {type:'scatter',data:names.map(n=>byName[n].recent_skill==null?null:+byName[n].recent_skill.toFixed(3)),symbolSize:8,itemStyle:{color:C.text,borderColor:C.panel,borderWidth:2}}]}),true);}
- const rc=chart('relChart');const bins=A.bins||[];
- if(rc)rc.setOption(base({tooltip:{trigger:'item',backgroundColor:C.panel,borderColor:C['line-2'],textStyle:{color:C.text,fontSize:12},formatter:(p)=>p.seriesName==='bins'?`said ${pctU(p.value[0],0)} → right ${pctU(p.value[1],0)} of the time<br>n ${p.value[2]}`:''},
+  (sk<0?`<b>No.</b> Across ${num(A.graded)} graded forecasts the committee would have scored better by <b>always saying 50%</b>. `:`<b>A little.</b> Across ${num(A.graded)} graded forecasts the committee beats a coin flip. `)+
+  `The voices say they are about <b>${pctU(conf,0)}</b> sure; they are right <b>${pctU(hit,0)}</b> of the time. `+
+  (best?`Closest to useful: ${esc(best.agent.replace('_',' '))}. Least: ${esc(worst.agent.replace('_',' '))}. `:'')+
+  `<b>What it means for you:</b> their confidence numbers should not size positions. Today the PM is told to allocate 5% whenever creative or scout is 70%+ sure — that rule leans on the signal this page shows is unreliable. ${num(A.open)} forecasts open, ${num(A.due_7d)} due this week.`;
+ const verdict=(a)=>a.n<20?['muted','too few']:a.skill>=.05?['pos','adds information']:a.skill>-.05?['muted','coin flip']:['neg','worse than a coin flip'];
+ const mx=Math.max(.01,...ag.map(a=>Math.abs(a.skill)));
+ $('skillT').innerHTML='<thead><tr><th>Voice</th><th>Forecasts</th><th>Right</th><th>Said sure</th><th>Overconfident by</th><th>Skill</th><th>Last 30 days</th><th>Verdict</th></tr></thead><tbody>'+
+  (ag.length?ag.map(a=>{const [vc,vt]=verdict(a);
+   return `<tr><td style="font-family:var(--sans)">${esc(a.agent.replace('_',' '))}</td><td>${a.n}</td><td>${pctU(a.hit_rate,0)}</td><td>${pctU(a.mean_confidence,0)}</td>`+
+    `<td class="${a.overconfidence>.1?'neg':''}">${(a.overconfidence>=0?'+':'')+(100*a.overconfidence).toFixed(0)} pts</td>`+
+    `<td class="${cls(a.skill)}"><span class="wbar" style="width:${Math.round(40*Math.abs(a.skill)/mx)}px;background:${a.skill>=0?'var(--up)':'var(--down)'}"></span>${(a.skill>=0?'+':'')+(100*a.skill).toFixed(0)}%</td>`+
+    `<td class="${cls(a.recent_skill)}">${a.recent_skill==null?'–':(a.recent_skill>=0?'+':'')+(100*a.recent_skill).toFixed(0)+'%'} <span class="faint">${a.recent_n?'n '+a.recent_n:''}</span></td>`+
+    `<td><span class="verdict ${vc}">${vt}</span></td></tr>`;}).join(''):'<tr><td colspan="8" class="empty">no graded forecasts yet</td></tr>')+'</tbody>';
+ const rc=chart('relChart');const bins=(A.bins||[]);const shown=bins.filter(b=>b.n>=15),hidden=bins.filter(b=>b.n<15);
+ if(rc)rc.setOption(base({tooltip:{trigger:'item',backgroundColor:C.panel,borderColor:C['line-2'],textStyle:{color:C.text,fontSize:12},formatter:(p)=>p.seriesName==='bins'?`said ${pctU(p.value[0],0)} sure → right ${pctU(p.value[1],0)} of the time<br>${p.value[2]} forecasts`:''},
   grid:{left:44,right:16,top:14,bottom:40},
-  xAxis:Object.assign({type:'value',min:.45,max:1,name:'stated confidence',nameLocation:'middle',nameGap:26,nameTextStyle:{color:C.muted,fontSize:10}},AX,{axisLabel:{color:C.muted,fontSize:10,formatter:(v)=>(100*v).toFixed(0)+'%'}}),
-  yAxis:Object.assign({type:'value',min:0,max:1},AX,{axisLabel:{color:C.muted,fontSize:10,formatter:(v)=>(100*v).toFixed(0)+'%'}}),
-  series:[{name:'perfect',type:'line',data:[[.45,.45],[1,1]],showSymbol:false,lineStyle:{color:C.faint,type:'dashed'},silent:true},
-   {name:'coin',type:'line',data:[[.45,.5],[1,.5]],showSymbol:false,lineStyle:{color:C['line-2']},silent:true},
-   {name:'bins',type:'scatter',data:bins.map(b=>[+b.mean_confidence.toFixed(3),+b.hit_rate.toFixed(3),b.n]),symbolSize:(v)=>Math.max(8,Math.min(34,Math.sqrt(v[2])*3.2)),
-    itemStyle:{color:C.warn,opacity:.85,shadowBlur:10,shadowColor:C.warn}},
-   {name:'curve',type:'line',data:bins.map(b=>[+b.mean_confidence.toFixed(3),+b.hit_rate.toFixed(3)]),showSymbol:false,lineStyle:{color:C.warn,width:1.4},silent:true}],
-  graphic:[{type:'text',right:18,top:18,style:{text:'below the dashed line = overconfident',fill:C.muted,fontSize:10}}]}),true);
+  xAxis:Object.assign({type:'value',min:.45,max:1,name:'how sure the voices said they were',nameLocation:'middle',nameGap:26,nameTextStyle:{color:C.muted,fontSize:10}},AX,{axisLabel:{color:C.muted,fontSize:10,formatter:(v)=>(100*v).toFixed(0)+'%'}}),
+  yAxis:Object.assign({type:'value',min:0,max:1,name:'how often right',nameTextStyle:{color:C.muted,fontSize:10}},AX,{axisLabel:{color:C.muted,fontSize:10,formatter:(v)=>(100*v).toFixed(0)+'%'}}),
+  series:[{name:'perfect',type:'line',data:[[.45,.45],[1,1]],showSymbol:false,lineStyle:{color:C.faint,type:'dashed'},silent:true,endLabel:{show:true,formatter:'honest',color:C.muted,fontSize:10}},
+   {name:'coin',type:'line',data:[[.45,.5],[1,.5]],showSymbol:false,lineStyle:{color:C['line-2']},silent:true,endLabel:{show:true,formatter:'coin flip',color:C.muted,fontSize:10}},
+   {name:'bins',type:'scatter',data:shown.map(b=>[+b.mean_confidence.toFixed(3),+b.hit_rate.toFixed(3),b.n]),symbolSize:(v)=>Math.max(10,Math.min(34,Math.sqrt(v[2])*2.6)),
+    label:{show:true,formatter:(p)=>'n '+p.value[2],position:'bottom',color:C.muted,fontSize:10,fontFamily:'IBM Plex Mono'},itemStyle:{color:C.warn,opacity:.85,shadowBlur:10,shadowColor:C.warn}},
+   {name:'curve',type:'line',data:shown.map(b=>[+b.mean_confidence.toFixed(3),+b.hit_rate.toFixed(3)]),showSymbol:false,lineStyle:{color:C.warn,width:1.4},silent:true}]}),true);
+ const mid=shown.find(b=>b.lo===.6)||shown[0];
+ $('rdRel').innerHTML=shown.length?`Each dot groups forecasts by how sure the voice said it was. An honest forecaster sits on the dashed line. `+
+  (mid?`When the voices said <b>${pctU(mid.lo,0)}–${pctU(mid.hi,0)}</b> sure, they were right <b>${pctU(mid.hit_rate,0)}</b> of the time. `:'')+
+  (shown.every(b=>b.hit_rate<b.mean_confidence)?'Every group sits <b>below</b> the line — overconfident at every level. ':'')+
+  (shown.length>1&&Math.abs(shown[shown.length-1].hit_rate-shown[0].hit_rate)<.08?'Higher stated confidence does <b>not</b> mean more often right: the confidence number carries no information yet.':'')+
+  (hidden.length?` <span class="faint">Hidden: ${hidden.map(b=>pctU(b.lo,0)+'+').join(', ')} (fewer than 15 forecasts — too few to read).</span>`:''):'Not enough graded forecasts yet.';
  renderCommittee();renderEdge();renderLessons();renderLLM();
 }
 function renderCommittee(){
@@ -821,6 +932,10 @@ function renderCommittee(){
     return `<div class="voice"><div class="n">${esc(n.replace('_',' '))}</div><div class="s"><span class="${col}">${arrow}</span> ${esc(pr.subject||'')} <span class="faint">${pr.horizon_days?pr.horizon_days+'d':''}</span></div><div class="p">${esc(t.stance||'')} · ${pr.confidence!=null?pctU(pr.confidence,0):'–'} sure</div></div>`;}).join('')}</div>`+
    ((cm.unavailable_agents||[]).length?`<div class="note warn">missing voices: ${esc(cm.unavailable_agents.join(', '))}</div>`:'');}
  const h=D.committee_history||[];const c=chart('postureChart');
+ const pc=(k)=>h.filter(x=>x.posture===k).length;
+ $('rdCom').innerHTML=cm.ok?`Latest ruling: <b>${esc(String((cm.ruling||{}).posture||'neutral').replace('_',' '))}</b>. Over the last ${h.length} meetings: ${pc('risk_on')} risk-on, ${pc('neutral')} neutral, ${pc('risk_off')} risk-off. `+
+  (cm.disagreement_index>=1?'Disagreement 1.0 means at least one voice was bullish and one bearish — the committee was split.':'')+
+  ' <span class="faint">The committee advises; its posture does not move money by itself.</span>':'';
  if(c){const map={risk_off:-1,neutral:0,risk_on:1};
   c.setOption(base({grid:{left:60,right:12,top:12,bottom:24},xAxis:Object.assign({type:'category',data:h.map(x=>String(x.t).slice(0,10)),boundaryGap:false},AX),
    yAxis:Object.assign({type:'value',min:-1,max:1,interval:1},AX,{axisLabel:{color:C.muted,fontSize:10,formatter:(v)=>({'-1':'risk-off','0':'neutral','1':'risk-on'})[v]}}),
@@ -828,6 +943,9 @@ function renderCommittee(){
 }
 function renderEdge(){
  const e=D.edge||{};const rows=(e.by_origin_21d||[]);const r5={};(e.by_origin_5d||[]).forEach(x=>r5[x.origin]=x);
+ const tot=rows.reduce((s2,x)=>s2+x.n_taken+x.n_passed,0);
+ $('rdEdge').innerHTML=rows.length?`Positive spread = the names picked beat the names passed over. `+rows.slice(0,2).map(x=>`${esc(String(x.origin).replace(/_/g,' '))}: ${pct(x.spread,1)} over 21 days on ${x.n_taken} picks`).join('; ')+'. '+
+  (tot<30?'<b>Far too few names to conclude anything</b> — this needs months.':''):'Nothing graded yet: a pick needs 5 and 21 trading days to be scored.';
  $('edgeT').innerHTML='<thead><tr><th>Who picked</th><th>5d spread</th><th>21d spread</th><th>n picked / passed</th></tr></thead><tbody>'+
   (rows.length?rows.map(x=>{const f=r5[x.origin]||{};return `<tr><td style="font-family:var(--sans)">${esc(String(x.origin).replace(/_/g,' '))}</td><td class="${cls(f.spread)}">${pct(f.spread,2)}</td><td class="${cls(x.spread)}">${pct(x.spread,2)}</td><td class="faint">${x.n_taken} / ${x.n_passed}</td></tr>`;}).join(''):'<tr><td colspan="4" class="empty">no graded shadow picks yet</td></tr>')+'</tbody>';
 }
@@ -838,6 +956,9 @@ function renderLessons(){
   const boxes=[];for(let i=0;i<Math.max(need,l.measured_support+l.measured_contradict);i++)boxes.push(i<l.measured_support?'<i class="s"></i>':i<l.measured_support+l.measured_contradict?'<i class="c"></i>':'<i></i>');
   return `<div class="lesson"><span class="tag ${pc}" style="margin:0">${esc(l.status)}</span><span class="txt">${esc(l.statement)}</span><span class="ev" title="measured outcomes: ${l.measured_support} for, ${l.measured_contradict} against · promotion needs net +${need} prospective">${boxes.join('')}</span></div>`;}).join('')+
   `<div class="note">Squares = measured outcomes (green for, red against). A candidate needs net +${need} prospective, non-overlapping outcomes to become established; review votes alone never promote.</div>`:'<div class="empty">no lessons yet</div>';
+ const est=cnt.established||0,cand=cnt.candidate||0;const near=ls.filter(l=>l.status==='candidate'&&(l.measured_support-l.measured_contradict)>=need-1);
+ $('rdLes').innerHTML=`${est} established, ${cand} candidates. `+(near.length?`Closest to promotion: “${esc(near[0].statement.slice(0,80))}”. `:'No candidate is near the evidence bar yet. ')+
+  'Only established lessons reach the agents; a candidate earns promotion from outcomes it predicted in advance, never from votes.';
  const cur=((D.memory||{}).curator||{}).last_run||{};
  $('curatorNote').innerHTML=cur.ts?`Learning Curator last ran ${esc(ago(cur.ts))}: <b>${esc(cur.status||'')}</b> · reviewed ${cur.reviewed??'–'} · proposed ${cur.created??'–'}`:'';
 }
@@ -846,6 +967,8 @@ function renderLLM(){
  $('llmStats').innerHTML=[['calls',num(t.calls)],['errors',num(t.errors)],['tokens in',num(t.input_tokens)],['tokens out',num(t.output_tokens)],['p95 latency',t.p95_latency_ms==null?'–':(t.p95_latency_ms/1000).toFixed(1)+'s']]
   .map(([l,v])=>`<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
  const d=L.days||[];const c=chart('llmChart');
+ $('rdLlm').innerHTML=t.calls?`${num(t.calls)} model calls this week, ${num(t.errors)} failed (${pctU(t.errors/Math.max(1,t.calls),1)}). `+
+  (t.p95_latency_ms!=null?`The slowest 5% took over ${(t.p95_latency_ms/1000).toFixed(0)}s. `:'')+(t.errors/Math.max(1,t.calls)>.05?'<b>Error rate is high</b> — check the API key and provider status.':'Healthy.'):'No model calls recorded this week.';
  if(c)c.setOption(base({grid:{left:36,right:8,top:12,bottom:22},xAxis:Object.assign({type:'category',data:d.map(x=>x.day.slice(5))},AX),yAxis:Object.assign({type:'value',minInterval:1},AX),
   series:[{type:'bar',name:'calls',stack:'a',data:d.map(x=>x.calls-x.errors),itemStyle:{color:C['ice-dim'],borderRadius:[0,0,0,0]}},{type:'bar',name:'errors',stack:'a',data:d.map(x=>x.errors),itemStyle:{color:C.crit,borderRadius:[3,3,0,0]}}]}),true);
 }
@@ -858,7 +981,7 @@ async function load(){
  try{
   if(window.__SAMPLE__){D=window.__SAMPLE__;}
   else{const r=await fetch('api/summary',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);D=await r.json();if(D.error)throw new Error(D.error);}
-  showBanner(window.__SAMPLE__?'Preview with sample data modelled on your 23 Sep state — not live figures.':'');
+  showBanner(window.__SAMPLE__?'SAMPLE DATA — not your account. Every figure on this page is invented to demonstrate the layout; the deployed dashboard reads your real state.':'');
   renderStrip();Object.keys(rendered).forEach(k=>delete rendered[k]);setTab(UI.tab);tickClock();
  }catch(e){showBanner('Could not load /api/summary ('+e.message+'). Retrying in 30s — the last good view stays on screen.');}
 }

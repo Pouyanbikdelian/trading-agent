@@ -16,6 +16,7 @@ refresh cannot create or migrate a database.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import os
 import sqlite3
@@ -219,6 +220,111 @@ def risk_block(state_dir: Path, settings: Any, snapshot: Any) -> dict[str, Any]:
             out["drawdown_pct"] = desk_equity / state.equity_high_watermark - 1.0
         if state.daily_equity_open > 0:
             out["day_pct"] = desk_equity / state.daily_equity_open - 1.0
+    return out
+
+
+def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
+    """Daily account NetLiq, the desk book, and capital actually contributed.
+
+    Three corrections to the old equity chart (2026-09-23):
+
+    * The account line is mostly the operator's own pinned positions, so it
+      moved with NVDA and GLD while the desk sat in cash. ``desk`` applies
+      TODAY's pin list to every past snapshot — an approximation the page
+      states — valued exactly as ``managed_view`` values it.
+    * Deposits are stated in the flow ledger (``runtime/capital_flows``) and
+      subtracted on their day, instead of guessed from >25% jumps.
+    * ``flow_candidates`` lists days whose cash and equity jumped together
+      by ≥1% — the signature of a transfer, not a trade (a trade moves cash
+      but not equity) — that no recorded flow explains, so the operator can
+      confirm them with /deposit.
+    """
+    from trading.core.types import AccountSnapshot
+    from trading.runner.holds import load_holds
+    from trading.runner.managed_account import managed_view
+    from trading.runner.state import _positions_from_json
+    from trading.runtime.capital_flows import flows_in_base, load_flows
+
+    out: dict[str, Any] = {"days": [], "flows": [], "flow_candidates": [], "note": ""}
+    try:
+        flows = load_flows(state_dir)
+        out["flows"] = [f.to_dict() for f in flows]
+    except Exception as e:
+        flows = []
+        out["note"] = f"capital_flows.json unreadable ({e}) — returns ignore flows until repaired"
+    conn = _ro_connect(runner_db)
+    if conn is None:
+        return out
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(account_snapshots)")}
+        fx_col = "fx_rates_json" if "fx_rates_json" in cols else "'{}' AS fx_rates_json"
+        ccy_col = "base_currency" if "base_currency" in cols else "'USD' AS base_currency"
+        rows = conn.execute(
+            f"""SELECT ts, cash, equity, positions_json, {fx_col}, {ccy_col}
+                FROM account_snapshots WHERE id IN (
+                  SELECT MAX(id) FROM account_snapshots GROUP BY CAST(ts / 86400 AS INTEGER))
+                ORDER BY ts"""
+        ).fetchall()
+    finally:
+        conn.close()
+    try:
+        pins = load_holds(state_dir)
+    except Exception:
+        pins = set()
+    today = _now().date().isoformat()
+    base = "USD"
+    last_rates: dict[str, float] = {}
+    days: list[dict[str, Any]] = []
+    for r in rows:
+        ts = datetime.fromtimestamp(float(r["ts"]), tz=timezone.utc)
+        day = ts.date().isoformat()
+        if day == today:
+            continue  # a 60s snapshot, not a close; the same rule as equity_curve
+        base = str(r["base_currency"] or "USD").upper()
+        rates = json.loads(r["fx_rates_json"] or "{}")
+        last_rates = rates or last_rates
+        desk: float | None = None
+        try:
+            snap = AccountSnapshot(
+                ts=ts,
+                cash=float(r["cash"]),
+                equity=float(r["equity"]),
+                positions=_positions_from_json(r["positions_json"]),
+                base_currency=base,
+                fx_rates=rates,
+            )
+            desk = float(managed_view(snap, pins, fx_rates=rates).account.equity)
+        except Exception:
+            desk = None
+        days.append(
+            {
+                "t": day,
+                "account": round(float(r["equity"]), 2),
+                "desk": None if desk is None else round(desk, 2),
+                "cash": round(float(r["cash"]), 2),
+            }
+        )
+    by_day = flows_in_base(flows, base, last_rates)
+    contributed = 0.0
+    for d in days:
+        f = by_day.get(d["t"])
+        d["flow"] = f
+        contributed += f or 0.0
+        d["net_flows"] = round(contributed, 2)
+    unconvertible = sorted(k for k, v in by_day.items() if v is None)
+    if unconvertible:
+        out["note"] = f"no FX rate for flows on {', '.join(unconvertible)}"
+    for prev, cur in itertools.pairwise(days):
+        d_cash, d_eq = cur["cash"] - prev["cash"], cur["account"] - prev["account"]
+        if prev["account"] <= 0 or abs(d_cash) < 0.01 * prev["account"]:
+            continue
+        if abs(d_eq - d_cash) <= 0.3 * abs(d_cash) and not cur.get("flow"):
+            out["flow_candidates"].append(
+                {"t": cur["t"], "amount": round(d_cash, 2), "currency": base}
+            )
+    out["days"] = days
+    out["currency"] = base
+    out["pinned_now"] = sorted(pins)
     return out
 
 

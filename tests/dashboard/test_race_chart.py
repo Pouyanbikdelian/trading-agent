@@ -85,10 +85,11 @@ class TestThereIsExactlyOneRebase:
     def test_the_shared_helper_exists(self) -> None:
         assert "const rebase100=(series)=>" in APP
 
-    def test_all_three_normalized_charts_go_through_it(self) -> None:
-        """Sleeve race, strategy race, compare chart — one call each."""
+    def test_every_normalized_chart_goes_through_it(self) -> None:
+        """Strategy race and compare chart — one call each (the sleeve race
+        duplicated the strategy race and was dropped on 2026-09-23)."""
         uses = re.findall(r"rebase100\(", APP)
-        assert len(uses) == 3, uses
+        assert len(uses) == 2, uses
 
     def test_no_chart_still_rebases_on_its_own_first_point(self) -> None:
         """The literal defect, in each of its three spellings."""
@@ -108,7 +109,6 @@ class TestThereIsExactlyOneRebase:
         assert "const rebaseNote=" in APP
         assert "rebased to 100 at " in APP
         assert 'id="raceNote"' in APP
-        assert 'id="lvRaceNote"' in APP
         assert 'id="tickNote"' in APP
 
 
@@ -133,6 +133,11 @@ class TestCapitalFlowsAreNotPlottedAsReturns:
         assert "const flowAdjustedCurve=(pts)=>" in APP
         assert "flowAdjustedCurve(acct)" in APP
         assert "flowAdjustedCurve(pm)" in APP
+
+    def test_stated_deposits_are_removed_before_the_heuristic(self) -> None:
+        """A 3% top-up is below the 25% guard; only the ledger catches it."""
+        assert "const withoutFlows=(pts,flows,scale)=>" in APP
+        assert "const acct=withoutFlows(" in APP
 
     def test_spy_is_not_flow_adjusted(self) -> None:
         """It is a price index. Flattening a real -25% session would be a lie."""
