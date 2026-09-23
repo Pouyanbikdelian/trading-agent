@@ -515,6 +515,19 @@ class Runner:
             coalesce=True,
         )
 
+        # IBKR Flex history (daily NAV + deposits/withdrawals), once a day
+        # after IBKR's overnight statement refresh. Only with a read-only
+        # Flex token configured; see runtime/account_history.py.
+        if os.getenv("FLEX_TOKEN") and os.getenv("FLEX_QUERY_ID"):
+            self._scheduler.add_job(
+                self._run_flex_history_async,
+                CronTrigger(day_of_week="tue-sat", hour=7, minute=30, timezone="America/New_York"),
+                id="flex_history",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+
         # Index constituents are trading inputs, not an alert-only feature.
         self._scheduler.add_job(
             self._refresh_universes_async,
@@ -1783,6 +1796,35 @@ class Runner:
             self.alerts.warning(
                 f"🧾 Broker reconciliation failed: `{type(e).__name__}: {e}`. "
                 "Fills already read from the broker are kept; no status was inferred."
+            )
+
+    def _run_flex_history(self) -> dict[str, object]:
+        from trading.runtime.account_history import (
+            DEFAULT_SEND_URL,
+            fetch_flex,
+            merge_and_save,
+            parse_flex,
+        )
+
+        xml = fetch_flex(
+            os.environ["FLEX_TOKEN"],
+            os.environ["FLEX_QUERY_ID"],
+            send_url=os.getenv("FLEX_SEND_URL") or DEFAULT_SEND_URL,
+        )
+        return merge_and_save(settings.state_dir, [parse_flex(xml)], source="web_service")
+
+    async def _run_flex_history_async(self) -> None:
+        """Daily Flex import. A new deposit is announced once, when it lands."""
+        try:
+            summary = await asyncio.to_thread(self._run_flex_history)
+        except Exception as e:
+            logger.bind(component="account_history").warning(f"flex fetch failed: {e}")
+            self.alerts.warning(f"📒 IBKR history fetch failed: `{type(e).__name__}: {e}`")
+            return
+        if summary.get("new_flows"):
+            self.alerts.info(
+                f"📒 IBKR lists {summary['new_flows']} new deposit/withdrawal record(s); "
+                "the dashboard now counts them as capital, not performance."
             )
 
     async def _deadman_ping_async(self) -> None:

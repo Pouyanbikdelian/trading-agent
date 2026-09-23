@@ -134,6 +134,11 @@ class TestCapitalFlowsAreNotPlottedAsReturns:
         assert "flowAdjustedCurve(acct)" in APP
         assert "flowAdjustedCurve(pm)" in APP
 
+    def test_money_put_in_starts_from_the_opening_deposit_when_known(self) -> None:
+        """With Flex history the baseline is the deposits, not day-1 NAV
+        (88k deposited, 87.4k after the first day's move, is still 88k in)."""
+        assert "const opened=(days[0].flow||0)>=0.5*(days[0].account||Infinity);" in APP
+
     def test_stated_deposits_are_removed_before_the_heuristic(self) -> None:
         """A 3% top-up is below the 25% guard; only the ledger catches it."""
         assert "const withoutFlows=(pts,flows,scale)=>" in APP

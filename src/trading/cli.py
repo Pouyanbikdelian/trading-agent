@@ -942,6 +942,59 @@ def _dashboard_run(
     serve(host=host, port=port)
 
 
+history_app = typer.Typer(help="Account history from IBKR Flex statements (read-only).")
+app.add_typer(history_app, name="history")
+
+
+def _print_history_summary(summary: dict[str, object]) -> None:
+    console.print(
+        f"[green]history[/] {summary['days']} days ({summary['first']} → {summary['last']}), "
+        f"+{summary['new_days']} new · {summary['flows']} deposits/withdrawals, "
+        f"+{summary['new_flows']} new → {settings.state_dir}/account_history.json"
+    )
+
+
+@history_app.command("import-flex")
+def _history_import_flex(
+    files: list[str] = typer.Argument(..., help="Flex statement XML file(s) from Client Portal."),
+) -> None:
+    """Import daily NAV and deposits/withdrawals from downloaded Flex XML.
+
+    The Flex query needs two sections: "Net Asset Value (NAV) in Base" and
+    "Cash Transactions" (with Deposits & Withdrawals). Re-importing is safe:
+    days and transfers are merged, never duplicated.
+    """
+    from pathlib import Path
+
+    from trading.runtime.account_history import merge_and_save, parse_flex
+
+    parsed = [parse_flex(Path(f).read_bytes()) for f in files]
+    _print_history_summary(merge_and_save(settings.state_dir, parsed, source="file"))
+
+
+@history_app.command("fetch-flex")
+def _history_fetch_flex() -> None:
+    """Fetch the configured Flex query via IBKR's Flex Web Service and merge it.
+
+    Needs FLEX_TOKEN and FLEX_QUERY_ID in .env (Client Portal → Settings →
+    Flex Web Service). The token only reads reports; it cannot trade.
+    """
+    from trading.runtime.account_history import (
+        DEFAULT_SEND_URL,
+        fetch_flex,
+        merge_and_save,
+        parse_flex,
+    )
+
+    token, query = os.getenv("FLEX_TOKEN", ""), os.getenv("FLEX_QUERY_ID", "")
+    if not token or not query:
+        raise typer.BadParameter("set FLEX_TOKEN and FLEX_QUERY_ID in .env first")
+    xml = fetch_flex(token, query, send_url=os.getenv("FLEX_SEND_URL") or DEFAULT_SEND_URL)
+    _print_history_summary(
+        merge_and_save(settings.state_dir, [parse_flex(xml)], source="web_service")
+    )
+
+
 mirror_app = typer.Typer(help="Read-only LIVE-account mirror for the dashboard.")
 app.add_typer(mirror_app, name="mirror")
 

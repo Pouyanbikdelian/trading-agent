@@ -253,20 +253,20 @@ def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
         flows = []
         out["note"] = f"capital_flows.json unreadable ({e}) — returns ignore flows until repaired"
     conn = _ro_connect(runner_db)
-    if conn is None:
-        return out
-    try:
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info(account_snapshots)")}
-        fx_col = "fx_rates_json" if "fx_rates_json" in cols else "'{}' AS fx_rates_json"
-        ccy_col = "base_currency" if "base_currency" in cols else "'USD' AS base_currency"
-        rows = conn.execute(
-            f"""SELECT ts, cash, equity, positions_json, {fx_col}, {ccy_col}
-                FROM account_snapshots WHERE id IN (
-                  SELECT MAX(id) FROM account_snapshots GROUP BY CAST(ts / 86400 AS INTEGER))
-                ORDER BY ts"""
-        ).fetchall()
-    finally:
-        conn.close()
+    rows: list[Any] = []
+    if conn is not None:
+        try:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(account_snapshots)")}
+            fx_col = "fx_rates_json" if "fx_rates_json" in cols else "'{}' AS fx_rates_json"
+            ccy_col = "base_currency" if "base_currency" in cols else "'USD' AS base_currency"
+            rows = conn.execute(
+                f"""SELECT ts, cash, equity, positions_json, {fx_col}, {ccy_col}
+                    FROM account_snapshots WHERE id IN (
+                      SELECT MAX(id) FROM account_snapshots GROUP BY CAST(ts / 86400 AS INTEGER))
+                    ORDER BY ts"""
+            ).fetchall()
+        finally:
+            conn.close()
     try:
         pins = load_holds(state_dir)
     except Exception:
@@ -304,17 +304,55 @@ def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
                 "cash": round(float(r["cash"]), 2),
             }
         )
-    by_day = flows_in_base(flows, base, last_rates)
+    # Pre-bot history from IBKR Flex statements (runtime/account_history):
+    # NAV for days before the first snapshot, and deposits/withdrawals as
+    # the broker recorded them. Flex flows are authoritative for the days
+    # the statements cover; the manual ledger fills in after that.
+    from trading.runtime.account_history import load_history
+
+    try:
+        hist = load_history(state_dir)
+    except Exception as e:
+        hist = {"nav": {}, "flows": []}
+        out["note"] = (
+            out["note"] + " · " if out["note"] else ""
+        ) + f"account_history.json unreadable ({e})"
+    first_snap = days[0]["t"] if days else None
+    pre = [
+        {"t": d, "account": round(float(v), 2), "desk": None, "cash": None, "source": "ibkr_flex"}
+        for d, v in sorted(hist["nav"].items())
+        if first_snap is None or d < first_snap
+    ]
+    flex_end = max([*hist["nav"].keys(), *(f["day"] for f in hist["flows"])], default=None)
+    by_day: dict[str, float | None] = {}
+    for f in hist["flows"]:
+        by_day[f["day"]] = (by_day.get(f["day"]) or 0.0) + float(f.get("amount_base") or 0.0)
+    for k, v in flows_in_base(flows, base, last_rates).items():
+        if flex_end is None or k > flex_end:
+            by_day[k] = (
+                None if v is None or by_day.get(k, 0.0) is None else (by_day.get(k) or 0.0) + v
+            )
+    for d in days:
+        d["source"] = "runner"
+    days = pre + days
     contributed = 0.0
     for d in days:
         f = by_day.get(d["t"])
         d["flow"] = f
         contributed += f or 0.0
         d["net_flows"] = round(contributed, 2)
+    out["history"] = {
+        "flex_first": next(iter(sorted(hist["nav"])), None),
+        "flex_last": flex_end,
+        "flex_flows": len(hist["flows"]),
+        "bot_first": first_snap,
+    }
     unconvertible = sorted(k for k, v in by_day.items() if v is None)
     if unconvertible:
         out["note"] = f"no FX rate for flows on {', '.join(unconvertible)}"
     for prev, cur in itertools.pairwise(days):
+        if prev.get("cash") is None or cur.get("cash") is None:
+            continue  # Flex history rows: the broker already listed its transfers
         d_cash, d_eq = cur["cash"] - prev["cash"], cur["account"] - prev["account"]
         if prev["account"] <= 0 or abs(d_cash) < 0.01 * prev["account"]:
             continue

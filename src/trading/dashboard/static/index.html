@@ -454,14 +454,19 @@ function book(){
  const E=D.equity||{};const ccy=E.currency||(D.risk||{}).currency||D.equity_currency||'';
  const days=(E.days&&E.days.length?E.days:(D.equity_curve||[]).map(p=>({t:p.t,account:+p.v,desk:null,net_flows:0,flow:null})));
  if(!days.length)return {days:[],ccy};
+ // When the history starts with the account-opening deposit (IBKR Flex),
+ // "money put in" is simply every deposit minus every withdrawal. When it
+ // starts mid-life (the bot's first snapshot), the first day's value is
+ // the baseline and only later flows are added to it.
  const f0=days[0].net_flows||0;
- const rows=days.map(d=>Object.assign({},d,{contributed:days[0].account+((d.net_flows||0)-f0)}));
+ const opened=(days[0].flow||0)>=0.5*(days[0].account||Infinity);
+ const rows=days.map(d=>Object.assign({},d,{contributed:opened?(d.net_flows||0):days[0].account+((d.net_flows||0)-f0)}));
  const last=rows[rows.length-1];
  const twrPts=flowAdjustedCurve(withoutFlows(rows.map(d=>({t:d.t,v:d.account})),flowMap()));
  const twr=twrPts.length>1?twrPts[twrPts.length-1].v/100-1:null;
  const peak=Math.max(...twrPts.map(p=>p.v));const dd=twrPts.length?twrPts[twrPts.length-1].v/peak-1:null;
  return {days:rows,ccy,last,pnl:last.account-last.contributed,pnlPct:last.contributed>0?last.account/last.contributed-1:null,twr,dd,
-  deposits:(E.flows||[]).length,candidates:E.flow_candidates||[],note:E.note||''};}
+  deposits:(E.flows||[]).length+((E.history||{}).flex_flows||0),candidates:E.flow_candidates||[],note:E.note||'',hist:E.history||{}};}
 const RANGES=[['1m',31],['3m',92],['6m',183],['ytd','ytd'],['1y',366],['all',null]];
 const cutFor=(r)=>{const now=new Date();if(r==='ytd')return new Date(now.getFullYear(),0,1).toISOString().slice(0,10);
  const d=(RANGES.find(x=>x[0]===r)||[])[1];if(!d)return null;return new Date(now.getTime()-d*864e5).toISOString().slice(0,10);};
@@ -528,7 +533,7 @@ function renderCockpit(){
  $('kCash').innerHTML=risk.cash_pct==null?'–':pctU(risk.cash_pct,1);
  $('kCashD').innerHTML=acct.cash!=null?`<span class="muted">${num(acct.cash)} ${esc(ccy)} of the account</span>`:'';
  $('kRet').innerHTML=B.pnl==null?'–':`<span class="${cls(B.pnl)}">${B.pnl>=0?'+':'−'}${num(Math.abs(B.pnl))}</span><small>${esc(ccy)}</small>`;
- $('kRetD').innerHTML=B.last?`<span class="${cls(B.pnlPct)}">${pct(B.pnlPct,1)}</span> <span class="muted">on ${num(B.last.contributed)} put in · time-weighted ${pct(B.twr,1)}</span>`:'';
+ $('kRetD').innerHTML=B.last?`<span class="${cls(B.pnlPct)}">${pct(B.pnlPct,1)}</span> <span class="muted">on ${num(B.last.contributed)} put in since ${esc(B.days[0].t)} · time-weighted ${pct(B.twr,1)}</span>`:'';
  renderGauges();renderAttention();renderEquity();renderSchedule();renderRibbon();renderCosts();renderBrief();
 }
 function renderBrief(){
@@ -537,7 +542,7 @@ function renderBrief(){
  const next=(D.schedule||[]).find(j=>j.key==='cycle');
  if(st.halted)out.push(`The desk is <b>halted</b> (${esc(stripMd(st.halt_reason)||'no reason recorded')}): nothing new trades until you <b>/resume</b>.`);
  else out.push(`The desk is <b>running</b>${next?`; next cycle <b>${esc(fmtNY(next.at))} New York</b>`:''}${st.require_approval?' and it will wait for your approval':''}.`);
- if(B.last)out.push(`Your account is <b>${money(B.last.account,ccy)}</b>, ${B.pnl>=0?'up':'down'} <b>${money(Math.abs(B.pnl),ccy)}</b> (${pct(B.pnlPct,1)}) against the <b>${money(B.last.contributed,ccy)}</b> put in${B.deposits?'':' — no deposits recorded; if you added money, record it with /deposit'}.`);
+ if(B.last)out.push(`Your account is <b>${money(B.last.account,ccy)}</b>, ${B.pnl>=0?'up':'down'} <b>${money(Math.abs(B.pnl),ccy)}</b> (${pct(B.pnlPct,1)}) against the <b>${money(B.last.contributed,ccy)}</b> put in since ${esc(B.days[0].t)}${B.hist.flex_first?' (IBKR history)':' (when the bot started recording — import your IBKR history for the full picture)'}.`);
  const pinnedVal=pos.filter(p=>p.pinned).reduce((s,p)=>s+(p.value_base||0),0);const deskPos=pos.filter(p=>!p.pinned);
  if(r.desk_equity!=null)out.push(`The system manages <b>${money(r.desk_equity,ccy)}</b>${deskPos.length?` across ${deskPos.length} position${deskPos.length>1?'s':''}`:' — all cash'}; ${pos.length-deskPos.length} pinned holding${pos.length-deskPos.length===1?' is':'s are'} yours (${money(pinnedVal,ccy)}) and never traded by it.`);
  const lastTrade=cyc.find(c=>(c.orders||0)>0);const since=lastTrade?cyc.indexOf(lastTrade):cyc.length;
@@ -615,11 +620,12 @@ function renderEquity(){
     areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:col+'40'},{offset:1,color:col+'00'}])}},
    {type:'line',name:'Money put in',step:'end',showSymbol:false,data:rows.map(p=>+p.contributed.toFixed(2)),lineStyle:{width:1.2,color:C.muted,type:'dashed'},itemStyle:{color:C.muted}}]
    .concat(hasDesk?[{type:'line',name:'Desk book (ex-pinned)',showSymbol:false,data:rows.map(p=>p.desk),lineStyle:{width:1.6,color:C.ice},itemStyle:{color:C.ice}}]:[])}),true);
- const first=rows[0],last=rows[rows.length-1];const hi=Math.max(...rows.map(r=>r.account));
+ const first=rows[0],last=rows[rows.length-1];
+ const twrPeak=Math.max(...twrP.map(p=>p.v));const twrDD=twrP.length?twrP[twrP.length-1].v/twrPeak-1:0;
  const flowsIn=last.contributed-first.contributed;
  $('rdEq').innerHTML=`From ${esc(first.t)} the account went ${money(first.account,ccy)} → <b>${money(last.account,ccy)}</b>`+
   (flowsIn?`, of which <b>${flowsIn>0?'+':'−'}${money(Math.abs(flowsIn),ccy)}</b> was money you ${flowsIn>0?'added':'withdrew'}`:'')+
-  `. Performance after removing that: <b>${pct(ret,1)}</b>. `+(last.account/hi-1>-.005?'It is at its high for this window. ':`It is ${pctU(1-last.account/hi,1)} below its high in this window. `)+
+  `. Performance after removing that: <b>${pct(ret,1)}</b>. `+(twrDD>-.005?'It is at its best level for this window. ':`It is ${pctU(-twrDD,1)} below its best level in this window (deposits excluded). `)+
   `The gap between the green line and the dashed line is your profit or loss.`+
   (hasDesk?` The blue line is what the system manages; the rest is your pinned holdings.`:'')+
   (B.candidates.length?` <span class="warn">${B.candidates.length} unrecorded jump${B.candidates.length>1?'s':''} may be deposits — until recorded they count as performance.</span>`:'')+
