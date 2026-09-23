@@ -231,10 +231,22 @@ def test_cmd_halt_does_not_promise_a_flatten(tmp_path: Path, monkeypatch) -> Non
     assert "still fully exposed" in out
 
 
+def _confirm_staged(tmp_path: Path) -> str:
+    from trading.bot import confirmations
+    from trading.bot.telegram import _cmd_confirm
+
+    staged = confirmations.peek(tmp_path)
+    assert staged is not None, "expected a staged confirmation"
+    return _cmd_confirm([staged.token])
+
+
 def test_cmd_resume_clears_halt_file(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
     _cmd_halt(["temp"])
-    out = _cmd_resume()
+    staged = _cmd_resume()
+    assert "Resume trading?" in staged
+    assert json.loads((tmp_path / "halt.json").read_text())["halted"] is True
+    out = _confirm_staged(tmp_path)
     assert "RESUMED" in out
     payload = json.loads((tmp_path / "halt.json").read_text())
     assert payload["halted"] is False
@@ -480,7 +492,8 @@ def test_resume_when_not_halted_says_so(tmp_path: Path, monkeypatch) -> None:
 def test_resume_after_halt_still_clears(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
     _cmd_halt(["bad data"])
-    out = _cmd_resume()
+    _cmd_resume()
+    out = _confirm_staged(tmp_path)
     assert "RESUMED" in out
     assert json.loads((tmp_path / "halt.json").read_text())["halted"] is False
 

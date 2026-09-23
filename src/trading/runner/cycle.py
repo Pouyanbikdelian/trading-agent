@@ -114,6 +114,14 @@ class CycleReport(BaseModel):
 
 
 @dataclass(frozen=True)
+class _BookFingerprint:
+    """Broker positions and working orders at one instant (see Cycle)."""
+
+    positions: tuple[tuple[str, float], ...]
+    working: tuple[tuple[str, str, float], ...]
+
+
+@dataclass(frozen=True)
 class CandidateSnapshotPreparation:
     """Outcome of the PM's non-trading candidate-ladder refresh."""
 
@@ -1087,10 +1095,31 @@ class Cycle:
         # When require_cycle_approval=true, block here until the operator
         # /approve's, /reject's, /pick's a different basket, or the
         # timeout fires. Default paper mode skips this entirely.
+        book_before_approval: _BookFingerprint | None = None
         if _settings.require_cycle_approval and orders:
             candidates = self._compute_top_candidates(
                 prices, cfg=cfg, position_symbols=position_symbols
             )
+            # The basket is sized against the book as it is NOW, and the
+            # approval wait can last minutes. Fingerprint the broker's
+            # positions and working orders so submission can prove nothing
+            # moved underneath the approved orders (see _book_changed_reason).
+            try:
+                book_before_approval = self._book_fingerprint()
+            except Exception as e:
+                self.alerts.error(
+                    "⚠️ could not read the broker book before approval — nothing submitted: "
+                    f"`{type(e).__name__}: {e}`"
+                )
+                return CycleReport(
+                    ts=ts_start,
+                    status="error",
+                    orders_submitted=0,
+                    fills_received=0,
+                    decisions=decisions,
+                    error="pre-approval book read failed",
+                    duration_ms=self._elapsed_ms(ts_start),
+                )
 
             def _risk_rebuild(revised_signal: Signal) -> tuple[list[Any], list[RiskDecision]]:
                 """Re-price an operator revision through the normal risk path.
@@ -1320,6 +1349,24 @@ class Cycle:
                             decisions=decisions,
                             duration_ms=self._elapsed_ms(ts_start),
                         )
+                if book_before_approval is not None:
+                    changed = self._book_changed_reason(book_before_approval)
+                    if changed:
+                        self.alerts.critical(
+                            "⛔ submit gate: the book changed while the basket waited for "
+                            f"approval ({changed}). Nothing submitted — the approved orders "
+                            "were sized for a book that no longer exists. `/cycle` builds "
+                            "a fresh basket."
+                        )
+                        return CycleReport(
+                            ts=ts_start,
+                            status="no_orders",
+                            orders_submitted=0,
+                            fills_received=0,
+                            decisions=decisions,
+                            error=f"book changed during approval: {changed}",
+                            duration_ms=self._elapsed_ms(ts_start),
+                        )
                 (
                     orders_submitted,
                     fills,
@@ -1373,6 +1420,56 @@ class Cycle:
             self._announce_fills(fills)
 
         return self._finish_cycle(ts_start, decisions, orders_submitted, fills)
+
+    def _book_fingerprint(self) -> _BookFingerprint:
+        """Positions and working orders exactly as the broker reports them.
+
+        Raw broker positions, not the managed view: a /hold toggled during
+        the wait changes what the basket should be, and must count too.
+        """
+        positions = tuple(
+            sorted(
+                (p.instrument.symbol.upper(), round(float(p.quantity), 6))
+                for p in (self.broker.get_positions() or [])
+                if abs(float(p.quantity)) > 1e-9
+            )
+        )
+        working = tuple(
+            sorted(
+                (o.instrument.symbol.upper(), o.side.value, round(float(o.quantity), 6))
+                for o in (self.broker.get_open_orders() or [])
+            )
+        )
+        return _BookFingerprint(positions=positions, working=working)
+
+    def _book_changed_reason(self, before: _BookFingerprint) -> str | None:
+        """Why the book no longer matches ``before``, or None if it does.
+
+        Until 2026-09-23 only the defensive path re-proved its orders after
+        the approval wait. A normal basket approved ten minutes later was
+        submitted as sized: a guard exit, a manual /sell or an overnight
+        fill in that window could turn an approved sell into a short, or
+        stack a buy on one already working. Fail closed: a read error or
+        any difference refuses the whole basket; the next /cycle re-plans.
+        """
+        try:
+            now = self._book_fingerprint()
+        except Exception as e:
+            return f"book re-read failed: {type(e).__name__}"
+        if now == before:
+            return None
+        parts: list[str] = []
+        pos_before, pos_now = dict(before.positions), dict(now.positions)
+        moved = sorted(
+            sym
+            for sym in set(pos_before) | set(pos_now)
+            if pos_before.get(sym, 0.0) != pos_now.get(sym, 0.0)
+        )
+        if moved:
+            parts.append("positions: " + ", ".join(moved))
+        if before.working != now.working:
+            parts.append("working orders changed")
+        return "; ".join(parts) or "book changed"
 
     def _submit_and_reconcile(
         self,

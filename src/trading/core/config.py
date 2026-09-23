@@ -123,6 +123,15 @@ class Settings(BaseSettings):
     # before submitting orders. Default off in research/paper; flip on
     # alongside live trading.
     require_cycle_approval: bool = Field(default=False, alias="REQUIRE_CYCLE_APPROVAL")
+    # Manual /buy, /sell, /close bypass the desk's risk limits on purpose
+    # (they are the operator's own trades). They are still size-checked:
+    # at or above CONFIRM_PCT of account equity the bot asks for an explicit
+    # confirm; above MAX_PCT it refuses. An order it cannot size is treated
+    # as large. /flatten and /resume always ask. /halt never does.
+    manual_order_confirm_pct: float = Field(
+        default=0.05, alias="MANUAL_ORDER_CONFIRM_PCT", ge=0.0, le=1.0
+    )
+    manual_order_max_pct: float = Field(default=0.50, alias="MANUAL_ORDER_MAX_PCT", gt=0.0, le=2.0)
 
     # A halt stops new exposure. It does not have to stop the desk from
     # reducing exposure. When true (the default), a `/cycle` run while the

@@ -598,3 +598,94 @@ def test_pm_candidate_prep_refuses_force_flatten_playbook(
     assert path.read_bytes() == original_bytes
     assert cycle._last_regime is None
     assert alerts.sent == []
+
+
+def _approval_cycle(tiny_universe_yaml, primed_cache, tmp_state, monkeypatch):
+    from trading.core import config as config_module
+
+    monkeypatch.setattr(
+        config_module,
+        "settings",
+        config_module.settings.model_copy(
+            update={"state_dir": tmp_state, "require_cycle_approval": True}
+        ),
+    )
+    cfg = RunnerConfig(
+        universe=tiny_universe_yaml,
+        strategies=["risk_parity"],
+        strategy_params={"risk_parity": {"vol_lookback": 30, "rebalance": 1}},
+        auto_refresh=False,
+        history_bars=200,
+    )
+    cycle, broker, _alerts = _make_cycle(cfg, primed_cache, tmp_state)
+    critical: list[str] = []
+    monkeypatch.setattr(cycle.alerts, "critical", lambda msg: critical.append(msg))
+    submissions: list[object] = []
+    monkeypatch.setattr(broker, "submit_order", lambda order: submissions.append(order))
+    return cycle, broker, submissions, critical
+
+
+def test_book_change_during_approval_wait_submits_nothing(
+    tiny_universe_yaml, primed_cache, tmp_state, monkeypatch
+) -> None:
+    """A guard exit or manual trade during the wait invalidates the basket."""
+    cycle, broker, submissions, critical = _approval_cycle(
+        tiny_universe_yaml, primed_cache, tmp_state, monkeypatch
+    )
+    from trading.core.types import Position
+
+    def approve_while_someone_trades(orders, *_a, **_k):
+        moved = [
+            Position(
+                instrument=Instrument(symbol="TEST_A", asset_class=AssetClass.EQUITY),
+                quantity=7.0,
+                avg_price=100.0,
+            )
+        ]
+        monkeypatch.setattr(broker, "get_positions", lambda: moved)
+        return orders
+
+    monkeypatch.setattr(cycle, "_request_cycle_approval", approve_while_someone_trades)
+
+    report = cycle.run_cycle()
+
+    assert submissions == []
+    assert report.orders_submitted == 0
+    assert report.error and "book changed during approval" in report.error
+    assert any("TEST_A" in msg and "Nothing submitted" in msg for msg in critical)
+
+
+def test_unchanged_book_after_approval_still_submits(
+    tiny_universe_yaml, primed_cache, tmp_state, monkeypatch
+) -> None:
+    cycle, _broker, submissions, critical = _approval_cycle(
+        tiny_universe_yaml, primed_cache, tmp_state, monkeypatch
+    )
+    monkeypatch.setattr(cycle, "_request_cycle_approval", lambda orders, *_a, **_k: orders)
+
+    report = cycle.run_cycle()
+
+    assert report.orders_submitted == len(submissions) > 0
+    assert not any("book changed" in msg for msg in critical)
+
+
+def test_unreadable_book_before_approval_refuses_the_cycle(
+    tiny_universe_yaml, primed_cache, tmp_state, monkeypatch
+) -> None:
+    cycle, broker, submissions, _critical = _approval_cycle(
+        tiny_universe_yaml, primed_cache, tmp_state, monkeypatch
+    )
+
+    def boom():
+        raise ConnectionError("gateway down")
+
+    monkeypatch.setattr(broker, "get_open_orders", boom)
+    monkeypatch.setattr(
+        cycle,
+        "_request_cycle_approval",
+        lambda *_a, **_k: pytest.fail("must not ask for approval on an unreadable book"),
+    )
+
+    report = cycle.run_cycle()
+
+    assert report.status == "error" and submissions == []

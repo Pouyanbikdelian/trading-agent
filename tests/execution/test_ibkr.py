@@ -545,3 +545,57 @@ def test_contract_mapping_drops_routing_exchange_for_stocks() -> None:
     )
     ins = _ibkr_contract_to_instrument(routed)
     assert ins.key == "equity:INTC"  # not equity:SMART:INTC
+
+
+# ---------------------------------------------------------------------------
+# Account-kind gate (2026-09-23): the live gate was keyed on the port only.
+
+
+def _order_for(instrument: Instrument) -> Order:
+    return Order(
+        client_order_id="acct-gate",
+        instrument=instrument,
+        side=Side.BUY,
+        quantity=1,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.parametrize(
+    ("env", "accounts", "port", "allowed"),
+    [
+        ("live", ["U1234567"], 4001, True),
+        ("live", ["DU1234567"], 4001, False),  # live process on a paper account
+        ("paper", ["DU1234567"], 4002, True),
+        ("paper", ["U1234567"], 4002, False),  # paper process on a REAL account
+        ("paper", [], 4002, False),  # unknown account -> refuse
+        ("research", ["U1234567"], 4002, True),  # research makes no claim
+    ],
+)
+def test_account_kind_must_match_trading_env(
+    monkeypatch, fake_ib: _FakeIb, aapl: Instrument, env, accounts, port, allowed
+) -> None:
+    fake_ib.managedAccounts = lambda: list(accounts)  # type: ignore[attr-defined]
+    b = IbkrBroker(ib=fake_ib, port=port)
+    b.connect()
+    monkeypatch.setattr(
+        "trading.execution.ibkr.settings",
+        SimpleNamespace(
+            ibkr_host="x",
+            ibkr_port=port,
+            ibkr_client_id=17,
+            trading_env=env,
+            is_live_armed=lambda: env == "live",
+        ),
+    )
+    from trading.execution.base import BrokerError
+
+    if allowed:
+        b.submit_order(_order_for(aapl))
+        assert len(fake_ib.placed) == 1
+    else:
+        with pytest.raises(BrokerError, match="refusing to submit"):
+            b.submit_order(_order_for(aapl))
+        assert fake_ib.placed == []

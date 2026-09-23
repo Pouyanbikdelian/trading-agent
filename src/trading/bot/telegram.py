@@ -1345,6 +1345,31 @@ def _cmd_baseline(args: list[str]) -> str:
 
 
 def _cmd_resume() -> str:
+    """Stage a resume while halted; the operator confirms it.
+
+    Resuming re-arms a desk that a kill switch or a human stopped for a
+    reason. One word used to do it; now it shows the halt reason and
+    needs `/confirm TOKEN` (or the button). Not halted → the old reply.
+    """
+    halted, reason = _halt_state()
+    if not halted:
+        return _resume_now()
+    from trading.bot import confirmations
+    from trading.bot.keyboards import command_confirm_keyboard
+
+    staged = confirmations.stage(
+        settings.state_dir, "resume", {}, f"resume trading (halt: {reason or 'no reason recorded'})"
+    )
+    return ButtonReply(
+        "⚠️ *Resume trading?*\n"
+        f"halt reason: `{reason or 'n/a'}`\n"
+        "Resuming re-arms buys on the next cycle; loss references are kept.\n"
+        f"Tap Confirm or reply `/confirm {staged.token}` within 5 min.",
+        command_confirm_keyboard(staged.token),
+    )
+
+
+def _resume_now() -> str:
     # Report the state rather than acting on a no-op. "✅ RESUMED" when
     # nothing was halted reads as confirmation that a halt was lifted,
     # which is exactly the wrong thing to believe on a phone.
@@ -1663,7 +1688,47 @@ def _cmd_mode(args: list[str]) -> str:
     )
 
 
-def _cmd_confirm() -> str:
+def _cmd_confirm(args: list[str] | None = None) -> str:
+    """Confirm a staged command (``/confirm TOKEN``) or a staged mode change.
+
+    A token always means the command slot. Without one: the only thing
+    staged is confirmed; if a command AND a mode change are both waiting,
+    the operator must say which rather than have the bot guess.
+    """
+    from trading.bot import confirmations
+
+    args = args or []
+    staged_cmd = confirmations.peek(settings.state_dir)
+    if args:
+        return _confirm_staged_command(args[0])
+    if staged_cmd is not None:
+        from trading.runtime.mode import read_pending as _read_mode_pending
+
+        if _read_mode_pending(_mode_paths()[1]) is not None:
+            return (
+                "two things are waiting: a mode change and "
+                f"`{staged_cmd.kind}`. Reply `/confirm {staged_cmd.token}` for the "
+                f"{staged_cmd.kind}, or `/cancel` and re-stage the one you want."
+            )
+        return _confirm_staged_command(staged_cmd.token)
+    return _confirm_mode_change()
+
+
+def _confirm_staged_command(token: str) -> str:
+    from trading.bot import confirmations
+
+    result = confirmations.take(settings.state_dir, token)
+    if isinstance(result, str):
+        return result
+    if result.kind == "resume":
+        return _resume_now()
+    queued = _queue_command(result.kind, result.payload)
+    if queued is not None:
+        return queued
+    return f"✅ confirmed — `{result.summary}` queued; the runner reports the outcome."
+
+
+def _confirm_mode_change() -> str:
     """Apply the staged mode change + fire an off-cycle rebalance."""
     from trading.runtime.mode import (
         clear_pending,
@@ -1704,8 +1769,12 @@ def _cmd_confirm() -> str:
 
 
 def _cmd_cancel() -> str:
+    from trading.bot import confirmations
     from trading.runtime.mode import clear_pending, read_pending
 
+    dropped = confirmations.discard(settings.state_dir)
+    if dropped is not None:
+        return f"❌ `{dropped.summary}` cancelled — nothing was sent."
     _, pending_path, _ = _mode_paths()
     pending = read_pending(pending_path)
     if pending is None:
@@ -1912,7 +1981,7 @@ def _cmd_buy(args: list[str]) -> str:
     payload: dict[str, Any] = {"symbol": symbol, "qty": qty}
     if limit is not None:
         payload["limit"] = limit
-    return _queue_command("buy", payload)
+    return _gate_manual_order("buy", payload, symbol=symbol, qty=qty, limit=limit)
 
 
 def _cmd_sell(args: list[str]) -> str:
@@ -1924,19 +1993,159 @@ def _cmd_sell(args: list[str]) -> str:
     payload: dict[str, Any] = {"symbol": symbol, "qty": qty}
     if limit is not None:
         payload["limit"] = limit
-    return _queue_command("sell", payload)
+    return _gate_manual_order("sell", payload, symbol=symbol, qty=qty, limit=limit)
 
 
 def _cmd_close(args: list[str]) -> str:
     r"""``/close SYM`` — flatten a specific position (alias for ``/sell SYM all``)."""
     if len(args) < 1:
         return registry.usage_for("/close")
-    return _queue_command("close", {"symbol": args[0].upper()})
+    symbol = args[0].upper()
+    return _gate_manual_order("close", {"symbol": symbol}, symbol=symbol, qty="all", limit=None)
 
 
 def _cmd_flatten() -> str:
-    r"""``/flatten`` — close every open position at market."""
-    return _queue_command("flatten", {})
+    r"""``/flatten`` — close every open position at market, after a confirm.
+
+    Always staged: it sells everything, pinned holdings included.
+    """
+    from trading.bot import confirmations
+    from trading.bot.keyboards import command_confirm_keyboard
+
+    snap = _latest_snapshot_or_none()
+    detail = ""
+    if snap is not None and snap.positions:
+        value = sum(abs(_position_value(p) or 0.0) for p in snap.positions.values())
+        detail = (
+            f"{len(snap.positions)} position(s), ~{value:,.0f} "
+            f"{snap.base_currency or ''} at the last snapshot, pinned holdings included.\n"
+        )
+    staged = confirmations.stage(settings.state_dir, "flatten", {}, "flatten every position")
+    return ButtonReply(
+        "🚨 *Flatten everything at market?*\n"
+        f"{detail}"
+        f"Tap Confirm or reply `/confirm {staged.token}` within 5 min.",
+        command_confirm_keyboard(staged.token),
+    )
+
+
+def _latest_snapshot_or_none() -> Any:
+    try:
+        from trading.runner.state import RunnerStore
+
+        return RunnerStore(settings.state_dir / "runner.db").latest_snapshot()
+    except Exception:
+        return None
+
+
+def _position_value(position: Any) -> float | None:
+    """Base-currency-ish market value from the snapshot's own mark."""
+    try:
+        qty = float(position.quantity)
+        if qty == 0:
+            return 0.0
+        mark = float(position.avg_price) + float(position.unrealized_pnl or 0.0) / qty
+        return qty * mark
+    except Exception:
+        return None
+
+
+def _last_close(symbol: str) -> float | None:
+    try:
+        from trading.core.types import AssetClass, Instrument
+        from trading.data.cache import ParquetCache
+
+        df = ParquetCache(settings.data_dir).read(
+            Instrument(symbol=symbol, asset_class=AssetClass.EQUITY), "1D"
+        )
+        if df is None or df.empty:
+            return None
+        value = float(df["close"].dropna().iloc[-1])
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+
+def _estimate_manual_notional(
+    symbol: str, qty: str, limit: str | None
+) -> tuple[float | None, float | None, str]:
+    """(notional in the account's base currency, account equity, how).
+
+    Best effort by design; every unknown returns None, which the gate
+    treats as "too large to wave through".
+    """
+    snap = _latest_snapshot_or_none()
+    equity = float(snap.equity) if snap is not None and snap.equity else None
+    position = None
+    if snap is not None:
+        for pos in snap.positions.values():
+            if pos.instrument.symbol.upper() == symbol.upper():
+                position = pos
+                break
+    if str(qty).lower() == "all":
+        if position is None:
+            return None, equity, "no position in the last snapshot"
+        value = _position_value(position)
+        return (abs(value) if value is not None else None), equity, "position value"
+    try:
+        shares = float(qty)
+    except ValueError:
+        return None, equity, "unparseable quantity"
+    price: float | None = None
+    source = ""
+    if limit is not None:
+        price, source = float(limit), "limit price"
+    elif position is not None:
+        value = _position_value(position)
+        if value is not None and float(position.quantity):
+            price, source = abs(value / float(position.quantity)), "snapshot mark"
+    if price is None:
+        price = _last_close(symbol)
+        source = "last cached close" if price is not None else ""
+    if price is None:
+        return None, equity, "no price available"
+    notional = shares * price
+    base = str(getattr(snap, "base_currency", "") or "USD").upper() if snap is not None else "USD"
+    rates = getattr(snap, "fx_rates", None) or {}
+    if base != "USD" and rates.get("USD"):
+        notional *= float(rates["USD"])
+    return notional, equity, source
+
+
+def _gate_manual_order(
+    kind: str, payload: dict[str, Any], *, symbol: str, qty: str, limit: str | None
+) -> str | None:
+    """Queue small manual orders directly; stage large or unsized ones."""
+    from trading.bot import confirmations
+    from trading.bot.keyboards import command_confirm_keyboard
+
+    confirm_pct = float(getattr(settings, "manual_order_confirm_pct", 0.05))
+    max_pct = float(getattr(settings, "manual_order_max_pct", 0.50))
+    notional, equity, how = _estimate_manual_notional(symbol, qty, limit)
+    decision, share = confirmations.needs_confirmation(
+        notional, equity, confirm_pct=confirm_pct, max_pct=max_pct
+    )
+    if decision == "direct":
+        return _queue_command(kind, payload)
+    if decision == "refuse":
+        return (
+            f"❌ refused: `/{kind} {symbol} {qty}` is ~{share:.0%} of account equity, "
+            f"above the {max_pct:.0%} manual-order ceiling (`MANUAL_ORDER_MAX_PCT`). "
+            "Nothing was sent. Split it, or raise the ceiling deliberately in .env."
+        )
+    size = (
+        f"~{notional:,.0f} ({share:.1%} of equity, from {how})"
+        if notional is not None and share is not None
+        else f"size unknown ({how}) — treated as large"
+    )
+    summary = f"{kind} {symbol} {qty}" + (f" limit {limit}" if limit else "")
+    staged = confirmations.stage(settings.state_dir, kind, payload, summary)
+    return ButtonReply(
+        f"⚠️ *Confirm `{summary}`?*\n"
+        f"{size}\n"
+        f"Tap Confirm or reply `/confirm {staged.token}` within 5 min.",
+        command_confirm_keyboard(staged.token),
+    )
 
 
 def _in_flight_order_ids() -> list[str] | None:
@@ -3371,7 +3580,7 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
     if cmd == "/mode":
         return _cmd_mode(args)
     if cmd == "/confirm":
-        return _cmd_confirm()
+        return _cmd_confirm(args)
     if cmd == "/cancel":
         return _cmd_cancel()
     # --- manual orders ---
@@ -3714,6 +3923,17 @@ async def _handle_callback(data: str) -> str:
             return f"`{tokentail}` can't be run from a button."
         reply = await _dispatch(tokentail)
         return reply if reply is not None else "done."
+
+    if action == keyboards.ACT_CMD_CONFIRM:
+        return _confirm_staged_command(tokentail)
+    if action == keyboards.ACT_CMD_CANCEL:
+        from trading.bot import confirmations
+
+        current = confirmations.peek(settings.state_dir)
+        if current is None or current.token != tokentail:
+            return "that request is no longer waiting — nothing to cancel."
+        confirmations.discard(settings.state_dir)
+        return f"❌ `{current.summary}` cancelled — nothing was sent."
 
     if action in (keyboards.ACT_DESK_APPROVE, keyboards.ACT_DESK_CANCEL):
         # The proposal id is the binding token.  A button from an old chat

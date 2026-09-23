@@ -174,7 +174,7 @@ REGISTRY: tuple[Spec, ...] = (
     Spec("/buy", "buy a symbol", usage="/buy SYM QTY [LIMIT]", example="/buy AAPL 10 180"),
     Spec("/sell", "sell a symbol", usage="/sell SYM [QTY|all] [LIMIT]", example="/sell AAPL all"),
     Spec("/close", "close one position", usage="/close SYMBOL", example="/close AAPL"),
-    Spec("/flatten", "close every open position"),
+    Spec("/flatten", "close every open position (asks to confirm)"),
     Spec(
         "/cancel_order",
         "cancel a pending order",
@@ -206,8 +206,13 @@ REGISTRY: tuple[Spec, ...] = (
         usage="/mode bull|neutral|defense|bear|flatten",
         example="/mode defense",
     ),
-    Spec("/confirm", "apply the previewed mode + run now"),
-    Spec("/cancel", "discard the previewed mode"),
+    Spec(
+        "/confirm",
+        "confirm a staged command, or apply the previewed mode + run now",
+        usage="/confirm [TOKEN]",
+        example="/confirm 4F2A9C",
+    ),
+    Spec("/cancel", "discard the staged command or previewed mode"),
     # --- FX
     Spec(
         "/fx",
@@ -236,7 +241,7 @@ REGISTRY: tuple[Spec, ...] = (
         usage="/halt [reason]",
         example="/halt bad data",
     ),
-    Spec("/resume", "clear the halt, reset the failure counter"),
+    Spec("/resume", "clear the halt, reset the failure counter (asks to confirm)"),
 )
 
 

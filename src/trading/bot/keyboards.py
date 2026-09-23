@@ -50,6 +50,8 @@ ACT_MODE_CONFIRM = "mc"
 ACT_MODE_CANCEL = "mx"
 ACT_DESK_APPROVE = "da"
 ACT_DESK_CANCEL = "dx"
+ACT_CMD_CONFIRM = "cc"  # confirm a staged operator command (token = its id)
+ACT_CMD_CANCEL = "cx"
 ACT_RUN = "run"  # a read-only command, named in the token
 
 # Read-only commands a button may run. An allowlist rather than "any
@@ -184,6 +186,22 @@ def mode_keyboard(mode: str) -> dict[str, Any]:
             [
                 _button("✅ Confirm", ACT_MODE_CONFIRM, str(mode)[:16]),
                 _button("✖️ Cancel", ACT_MODE_CANCEL, str(mode)[:16]),
+            ]
+        ]
+    )
+
+
+def command_confirm_keyboard(token: str) -> dict[str, Any]:
+    """Confirm/cancel one staged operator command (bot.confirmations).
+
+    Bound to the staged command's token, so an older message's button
+    cannot confirm whatever was staged after it.
+    """
+    return _markup(
+        [
+            [
+                _button("✅ Confirm", ACT_CMD_CONFIRM, token),
+                _button("✖️ Cancel", ACT_CMD_CANCEL, token),
             ]
         ]
     )

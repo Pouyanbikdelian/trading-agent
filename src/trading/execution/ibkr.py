@@ -117,6 +117,41 @@ class IbkrBroker(Broker):
     def _is_live_port(self) -> bool:
         return self._port in self._LIVE_PORTS
 
+    def _assert_account_matches_env(self) -> None:
+        """Refuse to trade an account of the wrong kind for TRADING_ENV.
+
+        The live gate was keyed on the PORT (4001/7496). A socat relay, a
+        remapped port or a gateway started in the other mode puts a paper
+        process on a real account, or a live process on paper, with every
+        check green. IBKR's own account id is unambiguous: paper accounts
+        start with "D" (DU…, DF…), real ones do not. Checked on every
+        submission, like the arming check; reads (the live mirror) are
+        unaffected. Research mode makes no claim either way.
+        """
+        env = str(getattr(settings, "trading_env", "research"))
+        if env not in {"live", "paper"}:
+            return
+        accounts_fn = getattr(self._ib, "managedAccounts", None)
+        try:
+            accounts = [str(a).strip() for a in (accounts_fn() if callable(accounts_fn) else [])]
+        except Exception as e:
+            raise BrokerError(
+                f"cannot read the IBKR account id ({type(e).__name__}); refusing to submit"
+            ) from e
+        accounts = [a for a in accounts if a]
+        if not accounts:
+            raise BrokerError("IBKR reported no account id; refusing to submit")
+        paper = [a for a in accounts if a.upper().startswith("D")]
+        if env == "live" and paper:
+            raise BrokerError(
+                f"TRADING_ENV=live but connected to paper account(s) {paper}; refusing to submit"
+            )
+        if env == "paper" and len(paper) != len(accounts):
+            real = sorted(set(accounts) - set(paper))
+            raise BrokerError(
+                f"TRADING_ENV=paper but connected to REAL account(s) {real}; refusing to submit"
+            )
+
     # --------------------------------------------------------- lifecycle
 
     def connect(self) -> None:
@@ -675,6 +710,7 @@ class IbkrBroker(Broker):
                 "live trading not armed — refusing to submit order. Set "
                 "TRADING_ENV=live and ALLOW_LIVE_TRADING=true in .env to enable."
             )
+        self._assert_account_matches_env()
         contract = self._contract(order.instrument)
         ib_order = self._build_ib_order(order)
         # placeOrder is fire-and-forget; the trade-status update arrives
@@ -1013,6 +1049,7 @@ class IbkrBroker(Broker):
         # MAX_MARGIN_BORROWING_PCT=0.0 a negative balance makes the risk
         # manager reject every subsequent basket. That is the shape of the
         # June 2026 incident: three weeks of refused cycles.
+        self._assert_account_matches_env()
         trade = self._call_with_timeout(
             f"placeOrder-fx-{pair_base}{pair_quote}",
             lambda: self._ib.placeOrder(contract, ib_order),
