@@ -22,6 +22,7 @@ check these — the runner does, before instantiating us.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -31,6 +32,7 @@ from trading.core.logging import logger
 from trading.core.types import (
     AccountSnapshot,
     AssetClass,
+    BrokerOrderReport,
     Fill,
     Instrument,
     Order,
@@ -48,6 +50,18 @@ class BrokerTimeoutError(BrokerError):
     The cycle catches this and logs a clear "broker hung" error + Telegram
     alert, instead of waiting forever for the gateway to respond.
     """
+
+
+#: Every exception a timed-out ``_await_async`` can surface. On Python
+#: 3.11+ these are all the builtin ``TimeoutError``; on 3.10 (still inside
+#: ``requires-python``) asyncio's and concurrent.futures' are distinct
+#: classes, and a bare ``except TimeoutError`` let the strict preflight's
+#: timeout escape unconverted.
+_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    asyncio.TimeoutError,
+    concurrent.futures.TimeoutError,
+)
 
 
 # Map our enums to ib-async strings. Centralizing here means a vendor change
@@ -306,7 +320,7 @@ class IbkrBroker(Broker):
 
         try:
             raw = self._await_async(_request_positions(), timeout=request_timeout)
-        except TimeoutError as e:
+        except _TIMEOUT_ERRORS as e:
             raise BrokerTimeoutError(
                 "IBKR reqPositions strict preflight timed out after "
                 f"{request_timeout:.0f}s — refusing to start without a fresh position read"
@@ -1053,9 +1067,84 @@ class IbkrBroker(Broker):
             time.sleep(0.25)
         return None
 
+    # ------------------------------------------------ reconciliation reads
+    #
+    # ``get_fills`` reads ib-async's in-session ``fills()`` cache. The
+    # gateway restarts nightly, so an order queued Friday after the close
+    # and filled Monday at the open was invisible to every later reader
+    # unless a cycle happened to reconcile inside that same session. These
+    # two requests ask the gateway directly. Like the strict preflight they
+    # never reconnect or restart anything: a bookkeeping job must not be
+    # able to cause the outage it would then report.
+
+    RECONCILE_TIMEOUT_S: float = 30.0
+
+    def _strict_request(self, what: str, method: str, *args: Any) -> Any:
+        if self._ib is None or not self._connected or not self._ib.isConnected():
+            raise NotConnectedError(
+                f"IbkrBroker has no active API connection; {what} will not reconnect"
+            )
+        if self._ib_loop is None:
+            raise NotConnectedError(f"IbkrBroker has no transport loop; {what} will not reconnect")
+        request_async = getattr(self._ib, method, None)
+        if not callable(request_async):
+            raise BrokerError(f"IBKR client does not support {method}")
+
+        async def _run() -> Any:
+            return await request_async(*args)
+
+        try:
+            return self._await_async(_run(), timeout=self.RECONCILE_TIMEOUT_S)
+        except _TIMEOUT_ERRORS as e:
+            raise BrokerTimeoutError(
+                f"IBKR {what} timed out after {self.RECONCILE_TIMEOUT_S:.0f}s"
+            ) from e
+
+    def get_executions(self, *, since: datetime | None = None) -> list[Fill]:
+        """Executions the gateway still holds, via ``reqExecutions``.
+
+        An empty filter on purpose: IBKR's time-filter string format is
+        timezone-ambiguous, and filtering client-side on aware datetimes
+        cannot be misread.
+        """
+        raw = self._strict_request("execution history", "reqExecutionsAsync")
+        return self._fills_from_ib(raw or [], since=since)
+
+    def get_completed_orders(self) -> list[BrokerOrderReport]:
+        """Orders the broker has finished with (filled, cancelled, expired)."""
+        raw = self._strict_request("completed orders", "reqCompletedOrdersAsync", False)
+        out: list[BrokerOrderReport] = []
+        for trade in raw or []:
+            order = getattr(trade, "order", None)
+            ref = str(getattr(order, "orderRef", "") or "")
+            if not ref:
+                continue  # placed outside this system; nothing local to settle
+            status_obj = getattr(trade, "orderStatus", None)
+            status = str(getattr(status_obj, "status", "") or "") or str(
+                getattr(getattr(trade, "orderState", None), "status", "") or ""
+            )
+            perm = getattr(order, "permId", None)
+            try:
+                filled = float(getattr(status_obj, "filled", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                filled = 0.0
+            out.append(
+                BrokerOrderReport(
+                    client_order_id=ref,
+                    broker_order_id=str(perm) if perm else None,
+                    status=status or "unknown",
+                    filled_quantity=filled,
+                )
+            )
+        return out
+
     def get_fills(self, *, since: datetime | None = None) -> list[Fill]:
         self._ensure_connected()
         raw = self._bounded("fills", self._ib.fills)
+        return self._fills_from_ib(raw, since=since)
+
+    @staticmethod
+    def _fills_from_ib(raw: Any, *, since: datetime | None) -> list[Fill]:
         out: list[Fill] = []
         for f in raw:
             exec_ = f.execution

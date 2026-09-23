@@ -432,6 +432,18 @@ class Runner:
             coalesce=True,
         )
 
+        # Broker reconciliation after every weekday close, well before the
+        # gateway's nightly restart (23:30 UTC) wipes the session. Read-only:
+        # it records fills, broker-side cancels and permIds; it never trades.
+        self._scheduler.add_job(
+            self._run_broker_reconcile_async,
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone="America/New_York"),
+            id="broker_reconcile",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Index constituents are trading inputs, not an alert-only feature.
         self._scheduler.add_job(
             self._refresh_universes_async,
@@ -1625,6 +1637,53 @@ class Runner:
                     self.alerts.warning(finding.message)
         except Exception:
             logger.bind(component="runner").exception("cycle outcome watch failed")
+
+    _RECONCILE_STATE_FILE = "broker_reconcile.json"
+
+    def _run_broker_reconcile(self) -> None:
+        from trading.core.exec_lock import ExecutionBusyError, execution_lock
+        from trading.runtime.broker_reconcile import reconcile_with_broker
+
+        # The execution lock keeps this pass from interleaving with a cycle
+        # or a manual command that is mid-submission (a PENDING row whose
+        # broker answer has not been recorded yet). Busy means skip: the
+        # next weekday pass catches up, and the cycle reconciles itself.
+        try:
+            with execution_lock(settings.state_dir, holder="broker_reconcile", timeout=5.0):
+                report = reconcile_with_broker(
+                    self.cycle.order_store, self.broker, now=datetime.now(tz=timezone.utc)
+                )
+        except ExecutionBusyError:
+            logger.bind(component="broker_reconcile").info("skipped: execution lock busy")
+            return
+
+        # Say something when the ledger changed, or when the set of
+        # unresolvable rows changed. The same five stale rows are not news
+        # every weekday.
+        attention = sorted(report.unseen_open + report.filled_without_executions)
+        path = settings.state_dir / self._RECONCILE_STATE_FILE
+        try:
+            previous = json.loads(path.read_text()).get("attention", [])
+        except (OSError, ValueError, AttributeError):
+            previous = None
+        if report.changed or attention != previous:
+            if report.needs_attention:
+                self.alerts.warning(report.summary())
+            elif report.changed:
+                self.alerts.info(report.summary())
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"attention": attention}))
+        os.replace(tmp, path)
+
+    async def _run_broker_reconcile_async(self) -> None:
+        try:
+            await asyncio.to_thread(self._run_broker_reconcile)
+        except Exception as e:
+            logger.bind(component="broker_reconcile").exception("broker reconciliation failed")
+            self.alerts.warning(
+                f"🧾 Broker reconciliation failed: `{type(e).__name__}: {e}`. "
+                "Fills already read from the broker are kept; no status was inferred."
+            )
 
     async def _deadman_ping_async(self) -> None:
         """Tell the external dead-man monitor this process is alive."""

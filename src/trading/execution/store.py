@@ -260,6 +260,20 @@ class OrderStore:
                 (status.value, broker_order_id, client_order_id),
             )
 
+    def record_broker_order_id(self, client_order_id: str, broker_order_id: str) -> None:
+        """Remember the broker's permanent id without touching status.
+
+        ``submit_order`` returns our own order back, so until 2026-09-23 no
+        row ever carried IBKR's permId — the one id that survives a gateway
+        restart and appears on statements. First writer wins: an id, once
+        recorded, is never overwritten by a later (possibly mismatched) one.
+        """
+        self.conn.execute(
+            "UPDATE orders SET broker_order_id = ? "
+            "WHERE client_order_id = ? AND (broker_order_id IS NULL OR broker_order_id = '')",
+            (broker_order_id, client_order_id),
+        )
+
     def load_orders(
         self,
         *,

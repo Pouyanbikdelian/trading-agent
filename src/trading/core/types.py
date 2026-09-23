@@ -212,6 +212,35 @@ class Fill(BaseModel):
     exec_id: str | None = None
 
 
+class BrokerOrderReport(BaseModel):
+    """What the broker says became of one order it has finished with.
+
+    Read from IBKR's completed-orders list by the daily reconciliation job.
+    Until 2026-09-23 nothing ever asked: an order cancelled or expired at
+    the broker stayed ``submitted`` locally for life, widening the
+    reconciliation window and tripping the stale-order alarm, and the
+    broker's permanent order id was never stored anywhere.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    client_order_id: str
+    broker_order_id: str | None = None
+    #: The broker's raw status string (IBKR: Filled, Cancelled, ApiCancelled,
+    #: Inactive, ...). Kept verbatim so a new vendor status is visible, not
+    #: silently mapped to the nearest thing we know.
+    status: str
+    filled_quantity: float = 0.0
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self.status.strip().lower() in {"cancelled", "apicancelled", "inactive"}
+
+    @property
+    def is_filled(self) -> bool:
+        return self.status.strip().lower() == "filled"
+
+
 class Position(BaseModel):
     """Net position in a single instrument."""
 
