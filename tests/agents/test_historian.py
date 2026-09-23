@@ -11,6 +11,13 @@ import pytest
 from trading.agents.historian import format_historian_digest, run_historian
 from trading.memory import MemoryStore
 
+VALID_SCOPE = {
+    "applies_when": "Elevated volatility with confirming breadth over the next five sessions",
+    "fails_when": "Narrow breadth or a new macro shock",
+    "invalidated_if": "Three confirmed signals fail over five sessions",
+    "sample": "Three distinct names in the current weekly review",
+}
+
 
 @pytest.fixture
 def mem(tmp_path) -> MemoryStore:
@@ -46,14 +53,17 @@ def test_creates_capped_lessons_and_votes(mem: MemoryStore) -> None:
         return {
             "new_lessons": [
                 {
+                    **VALID_SCOPE,
                     "statement": "Gold breaking down while equities hold flags risk-on rotation",
                     "source_ids": [evidence_id],
                 },
                 {
+                    **VALID_SCOPE,
                     "statement": "Crowded sector momentum unwinds fastest in the first 2 days",
                     "source_ids": [evidence_id],
                 },
                 {
+                    **VALID_SCOPE,
                     "statement": "A third lesson beyond the cap should be ignored entirely",
                     "source_ids": [evidence_id],
                 },
@@ -361,6 +371,7 @@ class TestVoterIndependence:
             return {
                 "new_lessons": [
                     {
+                        **VALID_SCOPE,
                         "statement": "Semis lead the tape out of momentum drawdowns by two days",
                         "source_ids": [evidence_id],
                     }
@@ -541,6 +552,7 @@ def test_curator_records_real_origin_ids_and_strips_reserved_operator_tag(mem: M
         return {
             "new_lessons": [
                 {
+                    **VALID_SCOPE,
                     "title": "Breadth confirms semi recoveries",
                     "body": "Breadth improved before the semiconductor recovery. It applies when the sector holds through a broad correction. Broad participation reduces the chance that a single-name bounce is noise. Add only after breadth confirms the turn.",
                     "source_ids": [evidence_id],
@@ -564,6 +576,7 @@ def test_curator_rejects_fabricated_new_lesson_origin_ids(mem: MemoryStore) -> N
             "votes": [],
             "new_lessons": [
                 {
+                    **VALID_SCOPE,
                     "statement": "Fabricated evidence must not become a durable lesson.",
                     "source_ids": ["pr-does-not-exist"],
                 }
@@ -594,6 +607,7 @@ def test_curator_requires_complete_array_provenance(mem: MemoryStore) -> None:
 
     for index, source_ids in enumerate(invalid_sources):
         lesson: dict[str, object] = {
+            **VALID_SCOPE,
             "statement": f"Candidate {index} must not be created from incomplete provenance.",
         }
         if source_ids is not None:
@@ -617,6 +631,7 @@ def test_journal_only_source_id_is_not_valid_lesson_provenance(mem: MemoryStore)
         llm=lambda system, prompt: {
             "new_lessons": [
                 {
+                    **VALID_SCOPE,
                     "statement": "A journal-shaped fake outcome must never create a lesson.",
                     "source_ids": ["pr-forged"],
                 }
@@ -654,6 +669,7 @@ def test_source_and_vote_must_survive_prompt_budget(mem: MemoryStore) -> None:
         return {
             "new_lessons": [
                 {
+                    **VALID_SCOPE,
                     "statement": "Candidates may only cite evidence that survived prompt budgeting.",
                     "source_ids": [target_id],
                 }
@@ -691,6 +707,7 @@ def test_curator_replay_does_not_duplicate_an_identical_candidate(mem: MemorySto
         return {
             "new_lessons": [
                 {
+                    **VALID_SCOPE,
                     "statement": "Semiconductor breadth must confirm a momentum recovery before entry.",
                     "tags": "semis",
                     "source_ids": [evidence_id],

@@ -4,7 +4,7 @@ The memory store has had the full lesson lifecycle since day one —
 candidate -> established -> challenged -> retired — but nothing ever
 wrote to it. This is the librarian for that filing cabinet.
 
-Twice weekly, after the nightly grading pass, the Historian reads a rolling
+On Friday, after the nightly grading pass, the Historian reads a rolling
 week of journal evidence (graded predictions, committee rulings, PM
 rebalances) plus the current lesson book, and produces:
 
@@ -13,8 +13,8 @@ rebalances) plus the current lesson book, and produces:
   within N days"), never event recaps ("the Dow fell Wednesday").
 * **outcome-linked evidence votes** on existing lessons — every vote names
   a graded prediction or closed episode. Weekly review can interpret the
-  evidence, but cannot manufacture it; only three net measured outcomes
-  establish a candidate.
+  evidence, but cannot manufacture it; only three net prospective,
+  non-overlapping samples establish a candidate.
 * **archive recommendations** for challenged machine lessons whose measured
   evidence has turned decisively against them.  An operator must approve an
   archive; the Curator never silently removes a belief from the vault.
@@ -37,6 +37,8 @@ from trading.memory.store import MemoryStore
 LlmFn = Callable[[str, str], dict[str, Any]]
 
 MAX_NEW_LESSONS = 2
+SCOPE_FIELDS = ("applies_when", "fails_when", "invalidated_if", "sample")
+SCOPE_MAX_CHARS = 600
 
 HISTORIAN_CHARTER = (
     "You are the Learning Curator (the desk's Historian) of a systematic trading desk. You will see one "
@@ -79,6 +81,10 @@ HISTORIAN_CHARTER = (
     "lesson. Name a number or an event, not a feeling.\n"
     "  sample: how many distinct names/weeks/episodes support it, and over "
     "what period. If you cannot say, the lesson is not ready — omit it.\n"
+    "All four scope fields are REQUIRED non-empty strings, at most 600 characters each. "
+    "Include the intended holding/forecast horizon in applies_when. Origin outcomes "
+    "are discovery evidence only: promotion requires new observations begun after "
+    "the claim was proposed; overlapping same-symbol windows count once.\n"
     "Prefer ONE well-conditioned lesson to two vague ones. A lesson whose "
     "conditions you cannot state is a lesson you have not learned.\n\n"
     "The evidence block may contain a 'measured_edge' section: forward "
@@ -516,7 +522,7 @@ def run_historian(
     now: datetime | None = None,
     conditions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One twice-weekly, evidence-gated Learning Curator pass."""
+    """One weekly, evidence-gated Learning Curator pass."""
     llm = llm or _default_llm
     now = now or datetime.now(tz=timezone.utc)
     if now.tzinfo is None:
@@ -559,6 +565,9 @@ def run_historian(
             "contradict": r["contradict"],
             "outcome_support": r["outcome_support"],
             "outcome_contradict": r["outcome_contradict"],
+            "validation_support": r["validation_support"],
+            "validation_contradict": r["validation_contradict"],
+            "validation_excluded": r["validation_excluded"],
             "retrieval_role": r.get("retrieval_role", "review_queue"),
             "evidence": mem.lesson_evidence(r["id"], limit=8),
         }
@@ -647,6 +656,19 @@ def run_historian(
             stmt = fallback
         if len(stmt) < 20:  # garbage guard
             continue
+        invalid_scope = [
+            key
+            for key in SCOPE_FIELDS
+            if not isinstance(lesson.get(key), str)
+            or not 1 <= len(lesson[key].strip()) <= SCOPE_MAX_CHARS
+        ]
+        if invalid_scope:
+            reject_candidate(
+                "Candidate rejected: scope fields must be non-empty strings of at most "
+                f"{SCOPE_MAX_CHARS} characters: {', '.join(invalid_scope)}.",
+                lesson,
+            )
+            continue
         # Carry the scope into the stored statement. The conditions are
         # the difference between a lesson and a superstition, and the
         # statement is the ONLY field any agent ever reads — a condition
@@ -659,14 +681,8 @@ def run_historian(
             ("Retire if", "invalidated_if"),
             ("Sample", "sample"),
         ):
-            val = str(lesson.get(key, "")).strip()
-            if val:
-                stmt += f"\n{label}: {val[:300]}"
-        scope = {
-            key: str(lesson.get(key, "")).strip()[:300]
-            for key in ("applies_when", "fails_when", "invalidated_if", "sample")
-            if str(lesson.get(key, "")).strip()
-        }
+            stmt += f"\n{label}: {lesson[key].strip()}"
+        scope = {key: lesson[key].strip() for key in SCOPE_FIELDS}
         raw_source_ids = lesson.get("source_ids")
         if not isinstance(raw_source_ids, list) or not raw_source_ids:
             reject_candidate("Candidate rejected: source_ids must be a non-empty array.", lesson)

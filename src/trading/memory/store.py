@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS lessons (
     retired_why TEXT,
     tags        TEXT NOT NULL DEFAULT '',
     conditions  TEXT NOT NULL DEFAULT '{}',  -- structured regime snapshot + stated scope
-    last_reviewed_ts REAL                    -- review rotation only; never an expiry clock
+    last_reviewed_ts REAL,                   -- review rotation only; never an expiry clock
+    validation_since_ts REAL                 -- reset on human restoration; NULL means created_ts
 );
 
 CREATE TABLE IF NOT EXISTS lesson_evidence (
@@ -436,6 +437,7 @@ class MemoryStore:
             ("lesson_evidence", "reason", "TEXT NOT NULL DEFAULT ''"),
             ("lessons", "conditions", "TEXT NOT NULL DEFAULT '{}'"),
             ("lessons", "last_reviewed_ts", "REAL"),
+            ("lessons", "validation_since_ts", "REAL"),
             ("shadow", "snapshot", "TEXT NOT NULL DEFAULT '{}'"),
         ):
             with contextlib.suppress(sqlite3.OperationalError):  # already present
@@ -743,10 +745,14 @@ class MemoryStore:
         ).fetchone()
         outcome_support = int(outcome_counts["support"] or 0) if outcome_counts else 0
         outcome_contradict = int(outcome_counts["contradict"] or 0) if outcome_counts else 0
+        validation = self._lesson_validation_counts(lesson_id)
         if (
             row
             and row["status"] == "candidate"
-            and outcome_support - outcome_contradict >= _MIN_OUTCOME_EVIDENCE
+            and kind == "outcome"
+            and supports
+            and validation["validation_support"] - validation["validation_contradict"]
+            >= _MIN_OUTCOME_EVIDENCE
         ):
             self.conn.execute(
                 "UPDATE lessons SET status = 'established' WHERE id = ?", (lesson_id,)
@@ -757,6 +763,7 @@ class MemoryStore:
                     "id": lesson_id,
                     "outcome_support": outcome_support,
                     "outcome_contradict": outcome_contradict,
+                    **validation,
                 },
                 actor=actor,
             )
@@ -783,6 +790,64 @@ class MemoryStore:
             )
         self._write_lesson_card(lesson_id)
         return True
+
+    def _lesson_validation_counts(self, lesson_id: str) -> dict[str, int]:
+        """Count prospective, non-overlapping samples for automatic promotion.
+
+        Three agents forecasting the same move are not three observations.
+        Keep all measured votes, but exclude discovery-period observations and
+        overlapping windows on the same normalized symbol from promotion.
+        Contradictions are seated first so duplicate optimism cannot drown out
+        dissent. This is a conservative sampling rule, not a claim that returns
+        on different symbols are statistically independent.
+        """
+        lesson = self.conn.execute(
+            "SELECT created_ts, validation_since_ts FROM lessons WHERE id = ?", (lesson_id,)
+        ).fetchone()
+        counts = {"validation_support": 0, "validation_contradict": 0, "validation_excluded": 0}
+        if lesson is None:
+            return counts
+        cutoff = float(lesson["validation_since_ts"] or lesson["created_ts"])
+        rows = self.conn.execute(
+            """SELECT e.episode_id, e.relation, e.evidence_kind,
+                      COALESCE(p.subject, ep.symbol) AS subject,
+                      COALESCE(p.ts, ep.ts_open) AS started,
+                      COALESCE(p.due_ts, ep.ts_close) AS ended
+               FROM lesson_evidence AS e
+               LEFT JOIN predictions AS p ON p.id = e.episode_id AND p.graded_ts IS NOT NULL
+               LEFT JOIN episodes AS ep ON ep.id = e.episode_id
+               WHERE e.lesson_id = ? AND e.evidence_kind IN ('origin', 'outcome')""",
+            (lesson_id,),
+        ).fetchall()
+        origins: dict[str, list[tuple[float, float]]] = {}
+        candidates: list[tuple[str, float, float, str, str]] = []
+        for row in rows:
+            is_vote = row["relation"] in ("supports", "contradicts")
+            if row["subject"] is None or row["started"] is None or row["ended"] is None:
+                counts["validation_excluded"] += int(is_vote)
+                continue
+            subject = str(row["subject"]).strip().upper()
+            start, end = float(row["started"]), float(row["ended"])
+            if not subject or not math.isfinite(start) or not math.isfinite(end) or end < start:
+                counts["validation_excluded"] += int(is_vote)
+                continue
+            if row["relation"] == "origin":
+                origins.setdefault(subject, []).append((start, end))
+            elif is_vote:
+                candidates.append((subject, start, end, row["relation"], row["episode_id"]))
+
+        accepted: dict[str, list[tuple[float, float]]] = {}
+        for subject, start, end, relation, _ in sorted(
+            candidates, key=lambda item: (item[3] != "contradicts", item[2], item[1], item[4])
+        ):
+            occupied = [*origins.get(subject, []), *accepted.get(subject, [])]
+            if start < cutoff or any(start <= right and end >= left for left, right in occupied):
+                counts["validation_excluded"] += 1
+                continue
+            accepted.setdefault(subject, []).append((start, end))
+            key = "validation_support" if relation == "supports" else "validation_contradict"
+            counts[key] += 1
+        return counts
 
     def retire_lesson(self, lesson_id: str, why: str, *, actor: str = "system") -> bool:
         """Retired, never deleted — the card keeps its full history."""
@@ -814,8 +879,9 @@ class MemoryStore:
         if row is None or row["status"] != "retired":
             return False
         self.conn.execute(
-            "UPDATE lessons SET status = 'candidate', last_reviewed_ts = NULL WHERE id = ?",
-            (lesson_id,),
+            """UPDATE lessons SET status = 'candidate', last_reviewed_ts = NULL,
+                      validation_since_ts = ? WHERE id = ?""",
+            (_now(), lesson_id),
         )
         self.journal(
             "lesson_restored",
@@ -873,6 +939,7 @@ class MemoryStore:
                     "outcome_support": outcome_support,
                     "outcome_contradict": outcome_contradict,
                     "outcome_observations": outcome_support + outcome_contradict,
+                    **self._lesson_validation_counts(str(row["id"])),
                     "tags": row["tags"],
                     "conditions": snapshot,
                     "scope": scope,
@@ -986,11 +1053,12 @@ class MemoryStore:
 
         No candidate is expired, demoted or forgotten. This queue merely
         decides which bounded set gets the next scarce reviewer pass. A
-        condition match wins; otherwise the least-recently-reviewed
-        candidate rotates in, so an enduring but quiet regime is revisited.
+        quarter of the slots is reserved for the least-recently-reviewed
+        candidates, regardless of regime. Relevance fills the remaining
+        slots so an enduring regime cannot starve every other hypothesis.
         """
         cards = self._lesson_cards_for_status("candidate", current_conditions)
-        return sorted(
+        ranked = sorted(
             cards,
             key=lambda c: (
                 -float(c["relevance"]),
@@ -998,7 +1066,43 @@ class MemoryStore:
                 -self._evidence_strength(c),
                 float(c["created_ts"]),
             ),
-        )[:limit]
+        )
+        return self._reserve_review_rotation(cards, ranked, limit=limit)
+
+    @staticmethod
+    def _reserve_review_rotation(
+        cards: list[dict[str, Any]], ranked: list[dict[str, Any]], *, limit: int
+    ) -> list[dict[str, Any]]:
+        """Reserve bounded attention for overdue claims, without changing standing."""
+        if limit <= 0:
+            return []
+        oldest = sorted(
+            cards,
+            key=lambda card: (
+                float(card["last_reviewed_ts"] or 0.0),
+                float(card["created_ts"]),
+                str(card["id"]),
+            ),
+        )
+        reserved = max(1, (limit + 3) // 4)
+        selected = [{**card, "retrieval_role": "overdue_review"} for card in oldest[:reserved]]
+        seen = {str(card["id"]) for card in selected}
+        for card in [*ranked, *oldest]:
+            if len(selected) >= limit:
+                break
+            if str(card["id"]) not in seen:
+                selected.append(card)
+                seen.add(str(card["id"]))
+        return selected
+
+    def _status_review_queue(
+        self, current_conditions: dict[str, Any], *, status: str, limit: int
+    ) -> list[dict[str, Any]]:
+        cards = self._lesson_cards_for_status(status, current_conditions)
+        ranked = self.retrieve_lessons(
+            current_conditions, status=status, max_relevant=max(0, limit - 1), max_diversifiers=1
+        )
+        return self._reserve_review_rotation(cards, ranked, limit=limit)
 
     def lessons_for_historian_review(
         self, current_conditions: dict[str, Any]
@@ -1006,12 +1110,8 @@ class MemoryStore:
         """The bounded rulebook for one Historian pass, never a deletion policy."""
         return [
             *self.candidate_review_queue(current_conditions, limit=12),
-            *self.retrieve_lessons(
-                current_conditions, status="established", max_relevant=4, max_diversifiers=1
-            ),
-            *self.retrieve_lessons(
-                current_conditions, status="challenged", max_relevant=2, max_diversifiers=1
-            ),
+            *self._status_review_queue(current_conditions, status="established", limit=5),
+            *self._status_review_queue(current_conditions, status="challenged", limit=3),
         ]
 
     def lesson_review(
@@ -1025,22 +1125,24 @@ class MemoryStore:
         desk change before a lesson leaves the active vault.
         """
         candidates = self.candidate_review_queue(current_conditions, limit=candidate_limit)
-        established = self.retrieve_lessons(
-            current_conditions, status="established", max_relevant=4, max_diversifiers=1
-        )
-        challenged = self.retrieve_lessons(
-            current_conditions, status="challenged", max_relevant=2, max_diversifiers=1
-        )
+        established = self._status_review_queue(current_conditions, status="established", limit=5)
+        challenged = self._status_review_queue(current_conditions, status="challenged", limit=3)
         queue = [*candidates, *established, *challenged]
         review_actions: list[dict[str, Any]] = []
         for rank, card in enumerate(queue, start=1):
             net = self._evidence_strength(card)
             if card["status"] == "candidate":
+                validation_net = int(card["validation_support"]) - int(
+                    card["validation_contradict"]
+                )
                 action = "awaiting_evidence" if card["outcome_observations"] == 0 else "reviewed"
                 reason = (
                     "No completed outcome linked yet; keep as a candidate."
                     if action == "awaiting_evidence"
-                    else f"{net:+d} net measured outcomes; candidate remains evidence-gated."
+                    else (
+                        f"{net:+d} net measured outcomes; {validation_net:+d} net prospective, "
+                        "non-overlapping samples eligible for promotion."
+                    )
                 )
             elif card["status"] == "established":
                 action = "kept"

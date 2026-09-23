@@ -33,15 +33,22 @@ from trading.core.types import Order
 FILENAME = "holds.json"
 
 
-def load_holds(state_dir: Path) -> set[str]:
-    """Read the held-symbol set. Missing/corrupt file = no holds."""
+def load_holds(state_dir: Path, *, strict: bool = False) -> set[str]:
+    """Missing means no pins; safety-critical readers refuse malformed state."""
     path = Path(state_dir) / FILENAME
     if not path.exists():
         return set()
     try:
         payload = json.loads(path.read_text())
-        return {str(s).upper() for s in payload.get("symbols", [])}
+        symbols = payload["symbols"]
+        if not isinstance(symbols, list) or not all(
+            isinstance(s, str) and s.strip() for s in symbols
+        ):
+            raise ValueError("holds symbols must be a list of non-empty strings")
+        return {s.upper().strip() for s in symbols}
     except Exception:
+        if strict:
+            raise ValueError("Cannot read pinned holdings safely; repair holds.json") from None
         return set()
 
 

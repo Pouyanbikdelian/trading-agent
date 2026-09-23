@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 from typing import Any
 
 import pytest
@@ -52,7 +54,7 @@ def make_fake_llm(broken_agents: set[str] | None = None):
                 "watch": "5y yield 5d move",
                 "dissent_summary": "trader bullish vs risk officer bearish",
             }
-        if "Challenger" in system:
+        if "Challenger" in system and "Fund Manager" not in system:
             calls.append("challenger")
             return {
                 "objections": [
@@ -187,8 +189,146 @@ def test_challenger_sees_all_takes_and_market_context(mem: MemoryStore) -> None:
 
     digest = run_committee({"macro_dial": {"composite": 1.2}}, mem, llm=spy_llm)
     # Challenger received market context AND every agent's take.
-    assert "Market context" in seen["prompt"]
+    parsed = json.loads(seen["prompt"])
+    assert parsed["market_context"]["macro_dial"] == {"composite": 1.2}
     for name in CHARTERS:
-        assert name in seen["prompt"] or name in str(digest["takes"])
+        assert name in parsed["takes"]
     assert digest["market_caveat"].startswith("late-stage")
     assert digest["objections"][0]["target_agent"] == "committee"
+
+
+def test_manager_bounds_mapping_takes_without_erasing_dissent() -> None:
+    from trading.agents.committee import _budgeted_manager_prompt
+
+    takes = {
+        name: {**_take("bullish", name.upper()), "take": "full rationale " * 800}
+        for name in CHARTERS
+    }
+    objections = [
+        {
+            "target_agent": "committee",
+            "objection": "Crowded trade",
+            "falsifier": "Broad earnings acceleration",
+        }
+    ]
+    payload = {
+        "takes": takes,
+        "objections": objections,
+        "guard_flags": ["Concentration elevated"],
+        "established_lessons": [{"id": "L1", "lesson": "Protect downside"}],
+        "calibration": [{"agent": "quant", "n": 50, "hit_rate": 0.52}],
+    }
+    original = copy.deepcopy(payload)
+    rendered = _budgeted_manager_prompt(payload, budget=6000)
+    parsed = json.loads(rendered)
+
+    assert len(rendered) <= 6000
+    assert set(parsed["takes"]) == set(CHARTERS)
+    assert parsed["objections"] == objections
+    for key in ("guard_flags", "calibration", "established_lessons"):
+        assert parsed[key] == payload[key]
+    for name, take in takes.items():
+        assert parsed["takes"][name]["prediction"] == take["prediction"]
+        assert parsed["takes"][name]["stance"] == take["stance"]
+    assert payload == original
+
+
+def test_protected_prompt_overflow_is_explicit() -> None:
+    from trading.agents.committee import _budgeted_context, _budgeted_manager_prompt
+
+    lessons = [{"id": "L1", "lesson": "Never discard conditions " * 1000}]
+    with pytest.raises(ValueError, match="protected manager evidence"):
+        _budgeted_manager_prompt(
+            {"takes": {"quant": _take("bullish")}, "established_lessons": lessons}, budget=1000
+        )
+    with pytest.raises(ValueError, match="protected specialist context"):
+        _budgeted_context({"established_lessons": lessons}, budget=1000)
+
+
+def test_busy_committee_prompts_are_valid_bounded_and_keep_all_voices(mem: MemoryStore) -> None:
+    from trading.agents.committee import (
+        CHALLENGER_PROMPT_BUDGET,
+        MANAGER_PROMPT_BUDGET,
+        SPECIALIST_PROMPT_BUDGET,
+    )
+
+    context = {
+        "account": {"equity": 100000, "base_currency": "CHF"},
+        "positions": [{"symbol": "SPY", "qty": 10}],
+        "macro_dial": {"composite": -1.3},
+        "headlines": [{"title": "News " * 800, "source": "reuters"} for _ in range(48)],
+        "candidate_ladder": {
+            "source": "runner",
+            "ranked": [{"symbol": f"T{i}", "rank": i, "score": 0.2} for i in range(25)],
+        },
+        "_data_gaps": ["vol_surface stale: treat as unknown"],
+        "established_lessons": [{"id": "L1", "lesson": "Respect evidence"}],
+        "operator_objections": [{"text": "Question crowded momentum"}],
+    }
+    original = copy.deepcopy(context)
+    prompts: dict[str, dict[str, Any]] = {}
+
+    def spy_llm(system: str, prompt: str) -> dict[str, Any]:
+        if "Challenger" in system and "Fund Manager" not in system:
+            assert len(prompt) <= CHALLENGER_PROMPT_BUDGET
+            prompts["challenger"] = json.loads(prompt)
+            return {
+                "objections": [
+                    {
+                        "target_agent": "committee",
+                        "objection": "Crowding",
+                        "falsifier": "Earnings breadth",
+                    }
+                ],
+                "market_phase_caveat": "Late-cycle fragility",
+            }
+        if "Fund Manager" in system:
+            assert len(prompt) <= MANAGER_PROMPT_BUDGET
+            prompts["manager"] = json.loads(prompt)
+            return {"posture": "neutral"}
+        name = next(name for name, charter in CHARTERS.items() if charter == system)
+        rendered = prompt.split("\n", 1)[1]
+        assert len(rendered) <= SPECIALIST_PROMPT_BUDGET
+        prompts[name] = json.loads(rendered)
+        return {**_take("bullish", name.upper()), "take": "Long rationale " * 1000}
+
+    result = run_committee(context, mem, llm=spy_llm)
+
+    assert result["ok"]
+    assert set(result["takes"]) == set(CHARTERS)
+    assert set(prompts["challenger"]["takes"]) == set(CHARTERS)
+    assert set(prompts["manager"]["takes"]) == set(CHARTERS)
+    assert prompts["manager"]["objections"][0]["objection"] == "Crowding"
+    assert prompts["manager"]["market_phase_caveat"] == "Late-cycle fragility"
+    assert prompts["manager"]["operator_objections"] == context["operator_objections"]
+    for name in CHARTERS:
+        assert prompts[name]["_data_gaps"] == context["_data_gaps"]
+    market = prompts["challenger"]["market_context"]
+    for key in ("account", "positions", "macro_dial", "_data_gaps", "established_lessons"):
+        assert market[key] == context[key]
+    assert len(market["candidate_ladder"]["ranked"]) >= 8
+    assert market["_prompt_omissions"]["headlines"] > 0
+    assert context == original
+
+
+def test_missing_challenger_is_visible_to_manager_operator_and_journal(mem: MemoryStore) -> None:
+    from trading.agents.committee import format_digest_compact
+
+    base_llm, _ = make_fake_llm()
+    manager_payload = {}
+
+    def broken_challenger(system: str, prompt: str) -> dict[str, Any]:
+        if "Fund Manager" in system:
+            manager_payload.update(json.loads(prompt))
+        elif "Challenger" in system:
+            raise RuntimeError("provider unavailable")
+        return base_llm(system, prompt)
+
+    digest = run_committee({}, mem, llm=broken_challenger)
+
+    assert digest["unavailable_agents"] == ["challenger"]
+    assert manager_payload["unavailable_agents"] == ["challenger"]
+    assert "Incomplete review — unavailable: challenger" in format_digest_compact(digest)
+    assert "Incomplete review — unavailable: challenger" in format_digest(digest)
+    committee_row = next(row for row in mem.journal_tail(20) if row["kind"] == "committee")
+    assert committee_row["payload"]["unavailable_agents"] == ["challenger"]

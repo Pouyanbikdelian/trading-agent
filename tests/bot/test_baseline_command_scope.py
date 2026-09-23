@@ -63,7 +63,7 @@ def desk(monkeypatch, tmp_path: Path):
         lambda *a, **kw: SimpleNamespace(
             changed=True,
             excluded=set(PINNED),
-            account=snap.model_copy(update={"equity": DESK_EQUITY}),
+            account=snap.model_copy(update={"equity": DESK_EQUITY, "scope": "managed"}),
         ),
     )
 
@@ -106,6 +106,24 @@ def test_the_confirmation_quotes_what_was_actually_written(desk) -> None:
 
     assert f"{DESK_EQUITY:,.2f}" in out
     assert f"{ACCOUNT_EQUITY:,.2f}" not in out
+
+
+def test_failed_managed_valuation_never_resets_against_account(desk, monkeypatch) -> None:
+    import trading.runner.managed_account as managed_module
+
+    def broken(*args, **kwargs):
+        raise ValueError("missing FX")
+
+    monkeypatch.setattr(managed_module, "managed_view", broken)
+    out = telegram_module._cmd_baseline(["reset"])
+    assert "nothing was reset" in out
+    assert desk == {}
+
+
+def test_unknown_managed_baseline_does_not_publish_false_returns(desk) -> None:
+    out = telegram_module._cmd_baseline([])
+    assert "returns unavailable" in out
+    assert "drawdown vs peak" not in out
 
 
 def test_an_unpinned_account_still_resets_against_the_whole_account(

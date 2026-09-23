@@ -57,18 +57,13 @@ def _extract_json(text: str) -> dict[str, Any]:
     start = text.find("{")
     if start == -1:
         raise ValueError("no JSON object in response")
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                parsed = json.loads(text[start : i + 1])
-                if isinstance(parsed, dict):
-                    return parsed
-                raise ValueError("JSON completion is not an object")
-    raise ValueError("unbalanced JSON in response")
+    # Brace counting mistakes punctuation inside a quoted thesis for JSON
+    # structure. raw_decode handles escaped quotes/braces and still permits
+    # the prose/code-fence wrapping providers occasionally return.
+    parsed, _ = json.JSONDecoder().raw_decode(text, start)
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON completion is not an object")
+    return parsed
 
 
 def _anthropic_key() -> str | None:
@@ -153,6 +148,7 @@ def _record_telemetry(
     stop_reason: str | None,
     timeout_s: float,
     error_type: str | None = None,
+    http_status: int | None = None,
 ) -> None:
     """Persist non-sensitive LLM cost/latency evidence for operations.
 
@@ -176,6 +172,7 @@ def _record_telemetry(
         "cache_read_input_tokens": (usage or {}).get("cache_read_input_tokens"),
         "stop_reason": stop_reason,
         "error_type": error_type,
+        "http_status": http_status,
     }
     logger.bind(component="agents.llm", **row).info("LLM completion")
     try:
@@ -202,6 +199,7 @@ def _call_anthropic(
     effort = _anthropic_effort(tier)
     timeout_s = _timeout_s(tier)
     started = time.monotonic()
+    resp = None
     try:
         resp = httpx.post(
             "https://api.anthropic.com/v1/messages",
@@ -224,6 +222,9 @@ def _call_anthropic(
             },
             timeout=timeout_s,
         )
+        _raise_with_body(resp)
+        body = resp.json()
+        completion = "".join(b.get("text", "") for b in body.get("content", []))
     except Exception as exc:
         _record_telemetry(
             provider="anthropic",
@@ -236,10 +237,9 @@ def _call_anthropic(
             stop_reason=None,
             timeout_s=timeout_s,
             error_type=type(exc).__name__,
+            http_status=resp.status_code if resp is not None else None,
         )
         raise
-    _raise_with_body(resp)
-    body = resp.json()
     _record_telemetry(
         provider="anthropic",
         model=model,
@@ -250,8 +250,9 @@ def _call_anthropic(
         usage=body.get("usage") if isinstance(body.get("usage"), dict) else None,
         stop_reason=str(body.get("stop_reason")) if body.get("stop_reason") else None,
         timeout_s=timeout_s,
+        http_status=resp.status_code,
     )
-    return "".join(b.get("text", "") for b in body.get("content", []))
+    return completion
 
 
 def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int, tier: str | None) -> str:
@@ -259,6 +260,7 @@ def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int, tier:
 
     timeout_s = _timeout_s(tier)
     started = time.monotonic()
+    resp = None
     try:
         resp = httpx.post(
             "https://api.openai.com/v1/chat/completions",
@@ -273,6 +275,10 @@ def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int, tier:
             },
             timeout=timeout_s,
         )
+        _raise_with_body(resp)
+        body = resp.json()
+        choice = body["choices"][0]
+        completion = str(choice["message"]["content"])
     except Exception as exc:
         _record_telemetry(
             provider="openai",
@@ -285,11 +291,10 @@ def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int, tier:
             stop_reason=None,
             timeout_s=timeout_s,
             error_type=type(exc).__name__,
+            http_status=resp.status_code if resp is not None else None,
         )
         raise
-    _raise_with_body(resp)
-    body = resp.json()
-    choice = body["choices"][0]
+    usage = body.get("usage")
     _record_telemetry(
         provider="openai",
         model=model,
@@ -297,11 +302,17 @@ def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int, tier:
         effort=None,
         max_tokens=max_tokens,
         latency_ms=(time.monotonic() - started) * 1_000,
-        usage=body.get("usage") if isinstance(body.get("usage"), dict) else None,
+        usage={
+            "input_tokens": usage.get("prompt_tokens"),
+            "output_tokens": usage.get("completion_tokens"),
+        }
+        if isinstance(usage, dict)
+        else None,
         stop_reason=str(choice.get("finish_reason")) if choice.get("finish_reason") else None,
         timeout_s=timeout_s,
+        http_status=resp.status_code,
     )
-    return str(choice["message"]["content"])
+    return completion
 
 
 def _frontier_model_override() -> str | None:

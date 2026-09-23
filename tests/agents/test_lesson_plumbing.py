@@ -110,14 +110,16 @@ class TestTheManagerPromptStopsSlicingLessonsOff:
 
         assert json.loads(_budgeted_manager_prompt(payload)) == payload
 
-    def test_an_oversized_payload_sheds_takes_and_keeps_the_lessons(self) -> None:
-        """The whole point: opinions give way, learning does not."""
+    def test_an_oversized_payload_shortens_takes_and_keeps_the_lessons(self) -> None:
+        """Prose gives way; every voice and the learned conditions survive."""
         from trading.agents.committee import _budgeted_manager_prompt
 
-        rendered = _budgeted_manager_prompt(self._payload(8, 4_000))
+        rendered = _budgeted_manager_prompt(self._payload(8, 4_000), budget=9000)
 
         parsed = json.loads(rendered)  # valid JSON, not a mid-string cut
-        assert len(parsed["takes"]) < 8
+        assert len(rendered) <= 9000
+        assert len(parsed["takes"]) == 8
+        assert len(parsed["takes"][0]["take"]) < 4000
         assert parsed["established_lessons"][0]["statement"] == "Never buy PM"
         assert parsed["operator_lessons_under_consideration"]
 

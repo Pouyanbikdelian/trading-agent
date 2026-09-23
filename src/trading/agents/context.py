@@ -128,7 +128,11 @@ def _book_concentration(
 def build_context(
     state_dir: Path, data_dir: Path, *, include_candidate_ladder: bool = True
 ) -> dict[str, Any]:
-    from trading.memory.store import MemoryStore, lesson_condition_fingerprint
+    from trading.memory.store import (
+        MemoryStore,
+        is_operator_lesson_tags,
+        lesson_condition_fingerprint,
+    )
     from trading.runner.holds import load_holds, load_k_override
     from trading.runner.state import RunnerStore
     from trading.runtime.portfolio_stats import _read_close
@@ -237,11 +241,36 @@ def build_context(
             {
                 "id": r["id"],
                 "lesson": r["statement"],  # full elaborated text: title + 4-sentence body
-                "support_vs_contradict": f"{r['support']}/{r['contradict']}",
+                "provenance": (
+                    "operator_instruction"
+                    if is_operator_lesson_tags(r["tags"])
+                    else "empirical_lesson"
+                ),
+                "authority": (
+                    "Owner instruction; authority does not depend on empirical validation."
+                    if is_operator_lesson_tags(r["tags"])
+                    else "Market hypothesis retained as established; assess scope and measured evidence."
+                ),
+                "support_vs_contradict": f"{r['outcome_support']}/{r['outcome_contradict']}",
+                "measured_outcomes": {
+                    "support": r["outcome_support"],
+                    "contradict": r["outcome_contradict"],
+                },
+                "promotion_evidence": {
+                    "support": r["validation_support"],
+                    "contradict": r["validation_contradict"],
+                    "excluded": r["validation_excluded"],
+                    "basis": "Prospective non-overlapping same-symbol windows; cross-symbol correlation untested.",
+                },
+                "legacy_and_review_votes": {
+                    "support": r["support"] - r["outcome_support"],
+                    "contradict": r["contradict"] - r["outcome_contradict"],
+                },
                 "retrieval_role": r["retrieval_role"],
                 "matched_conditions": r["matched_conditions"],
                 "different_conditions": r["different_conditions"],
                 "conditions": r["conditions"],
+                "scope": r["scope"],
             }
             for r in mem.retrieve_lessons(lesson_conditions, max_relevant=3, max_diversifiers=2)
         ]

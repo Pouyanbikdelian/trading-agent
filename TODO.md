@@ -218,13 +218,26 @@ Items 1-2 are built; the rest are specced and independently abandonable.
       wired: committee passes, risk/cap cuts, operator mandates.
 - [x] **Learning Curator + lesson lifecycle** (built 2026-09-06).
       `candidate -> established -> challenged -> retired`, nothing ever
-      deleted. Twice-weekly evidence-gated pass in `agents/historian.py`
+      deleted. Friday 19:00 New York evidence-gated pass in `agents/historian.py`
       ranking on measured outcomes only; exact-content candidate dedupe;
       operator lessons protected from machine archiving; archive of a
       challenged lesson is a recommendation a human must accept.
       Each pass persisted immutably to `curator_runs` / `curator_actions`.
       Restore path (`desk.propose_lesson_restore`) returns a lesson to
       `candidate`, never straight to `established`.
+- [x] **September audit corrections implemented locally (2026-09-21).**
+      Managed-book identity and fail-closed FX/hold valuation; newer baseline
+      resets survive concurrent writes; valid bounded committee prompts with
+      all voices and dissent; prospective non-overlapping lesson promotion;
+      overdue review slots; explicit operator/empirical provenance; read-only
+      running-image verification. Candidate image passed isolated VPS checks;
+      deployment and live baseline repair await the owner-authorized restart.
+      See [audit handoff](output/audits/2026-09-21-implementation-handoff.md).
+- [ ] **Matched strategy/PM shadow comparison.** Same decision dates,
+      universe, CHF FX, costs and risk controls; compare slow momentum, PM,
+      and momentum plus advisory vetoes before changing live allocations.
+- [ ] **Lesson application attribution.** Record considered/applied/overridden
+      lesson IDs and resulting weight changes; prompt inclusion is not impact.
 - [ ] **Regime fingerprint, promoted out of `cycle.py`.** A first cut
       lives in `Cycle._regime_fingerprint` (vol bucket, dispersion,
       breadth) purely so shadow rows are sliceable from day one. Move it

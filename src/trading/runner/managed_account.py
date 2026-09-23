@@ -26,9 +26,14 @@ actually decide, and the operator still approves the result.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 
 from trading.core.types import AccountSnapshot, Position
 from trading.core.valuation import position_value_base
+
+
+class ManagedValuationError(ValueError):
+    """No safe managed equity can be calculated; never fall back to the account."""
 
 
 @dataclass(frozen=True)
@@ -79,17 +84,16 @@ def managed_view(
 ) -> ManagedView:
     """Return the account with held positions removed and paid for.
 
-    Never raises and never returns a nonsensical account: if the
-    subtraction would take equity to zero or below — a pinned book worth
-    more than the account, which should be impossible but would be
-    catastrophic to size against — the original snapshot is returned
-    untouched and nothing is marked excluded.
+    Missing FX or invalid equity refuses the projection. Falling back to
+    whole-account equity changes the book being measured and used to
+    poison both sizing and the drawdown reference.
     """
     if not held_symbols or account.scope != "account":
         return ManagedView(account=account)
 
     wanted = {s.upper() for s in held_symbols}
     excluded: dict[str, float] = {}
+    quantities: dict[str, float] = {}
     unconverted: list[str] = []
     keep: dict[str, Position] = {}
 
@@ -101,22 +105,25 @@ def managed_view(
         value, clean = position_value_base(
             position,
             base_currency=account.base_currency,
-            fx_rates=fx_rates,
+            fx_rates=fx_rates if fx_rates is not None else account.fx_rates,
             last_prices=last_prices,
         )
         excluded[symbol] = excluded.get(symbol, 0.0) + value
         if not clean:
             unconverted.append(symbol)
+        if not isfinite(value) or not isfinite(position.quantity):
+            raise ManagedValuationError(f"Invalid pinned position valuation for {symbol}")
+        quantities[key] = float(position.quantity)
+
+    if unconverted:
+        raise ManagedValuationError(f"No FX rate for pinned holdings: {', '.join(unconverted)}")
 
     if not excluded:
         return ManagedView(account=account)
 
     remaining = account.equity - sum(excluded.values())
-    if remaining <= 0:
-        # Refusing to build a view is the honest outcome. A zero or
-        # negative sizing base would either produce no orders at all or,
-        # worse, absurd ones; and it can only arise from bad data.
-        return ManagedView(account=account)
+    if not isfinite(remaining) or remaining <= 0:
+        raise ManagedValuationError("Pinned holdings leave no positive finite managed equity")
 
     return ManagedView(
         account=account.model_copy(
@@ -126,6 +133,7 @@ def managed_view(
                 "scope": "managed",
                 "excluded_value": sum(excluded.values()),
                 "excluded_symbols": tuple(sorted(excluded)),
+                "excluded_quantities": quantities,
             }
         ),
         excluded=excluded,

@@ -36,6 +36,7 @@ import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import date, datetime, timezone
+from math import isfinite
 from pathlib import Path
 from threading import RLock
 
@@ -152,8 +153,8 @@ class RiskManager:
             # A Telegram /halt can land after our preceding reload but before
             # this save.  A fresh halt always wins over a stale in-memory
             # unhalted state; otherwise a harmless HWM update could undo the
-            # operator's emergency stop.  The manager is the sole writer of
-            # baseline/HWM fields, so retain its current counters.
+            # operator's emergency stop. The bot also writes baselines;
+            # merge a newer reset while still holding the file lock.
             try:
                 disk = self._read_state_unlocked()
             except Exception as e:
@@ -166,6 +167,8 @@ class RiskManager:
                     reason=f"halt.json corrupt: {type(e).__name__}",
                     halted_at=datetime.now(timezone.utc),
                 )
+            if _baseline_is_newer(disk, self._state):
+                self._adopt_baseline(disk)
             if halt_intent is None and disk.halted and not self._state.halted:
                 self._state = self._state.replace(
                     halted=True,
@@ -187,6 +190,20 @@ class RiskManager:
                 raise
 
     # ------------------------------------------------------ halt control
+
+    def _adopt_baseline(self, state: HaltState) -> None:
+        """Move the entire reference, including its book identity, together."""
+        self._state = self._state.replace(
+            equity_high_watermark=state.equity_high_watermark,
+            daily_equity_open=state.daily_equity_open,
+            last_day=state.last_day,
+            daily_baseline_session=state.daily_baseline_session,
+            daily_baseline_captured_at=state.daily_baseline_captured_at,
+            daily_baseline_source=state.daily_baseline_source,
+            daily_baseline_currency=state.daily_baseline_currency,
+            baseline_scope=state.baseline_scope,
+            baseline_book_identity=state.baseline_book_identity,
+        )
 
     @property
     def state(self) -> HaltState:
@@ -267,15 +284,7 @@ class RiskManager:
                     f"{disk.daily_equity_open:,.2f} "
                     f"(source {disk.daily_baseline_source!r})"
                 )
-                self._state = self._state.replace(
-                    equity_high_watermark=disk.equity_high_watermark,
-                    daily_equity_open=disk.daily_equity_open,
-                    last_day=disk.last_day,
-                    daily_baseline_session=disk.daily_baseline_session,
-                    daily_baseline_captured_at=disk.daily_baseline_captured_at,
-                    daily_baseline_source=disk.daily_baseline_source,
-                    daily_baseline_currency=disk.daily_baseline_currency,
-                )
+                self._adopt_baseline(disk)
 
     @contextmanager
     def submission_gate(self, *, allow_when_halted: bool = False) -> Iterator[bool]:
@@ -453,6 +462,27 @@ class RiskManager:
 
     # ------------------------------------------------ session-aware intraday
 
+    def _baseline_book_reason(self, account: AccountSnapshot) -> str | None:
+        """A capital transfer is neither a return nor permission to erase a loss.
+
+        Without a verified transfer ledger, require an explicit operator
+        reset when the excluded positions change. Legacy managed references
+        have no provable identity, so cannot be adopted silently.
+        """
+        if self._state.equity_high_watermark <= 0 and self._state.daily_equity_open <= 0:
+            return None
+        if (self._state.baseline_scope or "account") != account.scope:
+            return "risk baseline describes a different book; review /baseline and reset explicitly"
+        identity = self._state.baseline_book_identity
+        if identity is None and account.scope == "account":
+            return None
+        if identity != account.risk_book_identity:
+            return (
+                "risk baseline pinned-position identity is missing or changed; "
+                "review /baseline and reset explicitly (not a measured loss)"
+            )
+        return None
+
     def capture_session_open(
         self,
         account: AccountSnapshot,
@@ -486,7 +516,7 @@ class RiskManager:
                 "refusing daily baseline outside the verified NYSE opening window"
             )
             return None
-        if account.equity <= 0:
+        if not isfinite(account.equity) or account.equity <= 0:
             logger.bind(component="risk").warning(
                 "refusing daily baseline from non-positive account equity"
             )
@@ -501,6 +531,10 @@ class RiskManager:
 
         with self._state_lock:
             self._reload_halt_state()
+            book_reason = self._baseline_book_reason(account)
+            if book_reason is not None:
+                logger.bind(component="risk").warning(book_reason)
+                return None
             same_trusted_session = (
                 self._state.daily_baseline_session == session_date
                 and self._state.daily_baseline_captured_at is not None
@@ -525,6 +559,7 @@ class RiskManager:
                 daily_equity_open=account.equity,
                 equity_high_watermark=new_hwm,
                 baseline_scope=str(getattr(account, "scope", "account") or "account"),
+                baseline_book_identity=account.risk_book_identity,
                 daily_baseline_session=session_date,
                 daily_baseline_captured_at=captured_at,
                 daily_baseline_source=source,
@@ -581,7 +616,7 @@ class RiskManager:
         A genuine loss/drawdown still persists a hard halt immediately.
         """
         base_currency = str(account.base_currency or "").upper()
-        if account.equity <= 0 or not base_currency:
+        if not isfinite(account.equity) or account.equity <= 0 or not base_currency:
             return RiskDecision(
                 action="reject",
                 reason="live account snapshot is not usable for risk evaluation",
@@ -589,11 +624,11 @@ class RiskManager:
 
         with self._state_lock:
             self._reload_halt_state()
-            # Before any comparison: are the stored baselines even talking
-            # about the same book as this snapshot?
-            self._reconcile_baseline_scope(account)
             if self._state.halted:
                 return RiskDecision(action="halt", reason=f"already halted: {self._state.reason}")
+            book_reason = self._baseline_book_reason(account)
+            if book_reason is not None:
+                return RiskDecision(action="reject", reason=book_reason)
 
             baseline_reason = self._trusted_daily_baseline_reason(
                 session_label=session_label,
@@ -888,12 +923,13 @@ class RiskManager:
                 )
 
         # --- 2. Sector cap (scale each sector's members together).
-        if sector_map:
+        if sector_map is not None:
             grouped: dict[str, list[str]] = {}
             for key in weights:
-                sec = sector_map.get(key)
-                if sec:
-                    grouped.setdefault(sec, []).append(key)
+                # Missing classification is shared uncertainty, not a free
+                # pass around the concentration limit.
+                sec = sector_map.get(key) or "Unknown"
+                grouped.setdefault(sec, []).append(key)
             for sec, keys in grouped.items():
                 exposure = sum(abs(weights[k]) for k in keys)
                 if exposure > self.limits.max_sector_exposure:

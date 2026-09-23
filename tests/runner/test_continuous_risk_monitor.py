@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import trading.runner.runner as runner_module
 from trading.core.config import settings
@@ -128,3 +131,44 @@ def test_missed_open_blocks_execution_once_without_persisting_halt(
     assert not manager.is_halted()
     assert len(alerts.warning_messages) == 1
     assert "baseline" in alerts.warning_messages[0].lower()
+
+
+def test_invalid_managed_valuation_preserves_reporting_and_never_reaches_risk_monitor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner, manager, alerts = _live_runner(tmp_path, monkeypatch)
+    session = nyse_session_on(date(2026, 3, 9))
+    assert session is not None
+    snapshot = _snapshot(session.market_open, 100_000.0)
+    runner.broker = SimpleNamespace(
+        get_account=lambda: snapshot,
+        get_fx_rates=lambda: {},
+    )
+    saved = []
+    projection = Mock(side_effect=ValueError("Missing USD/CHF FX rate"))
+    runner.cycle._as_managed_account = projection
+    runner.cycle.runner_store = SimpleNamespace(save_snapshot=saved.append)
+    monitor = Mock()
+    runner._monitor_live_account_risk = monitor
+    monkeypatch.setattr(
+        "trading.runtime.broker_liveness.record_broker_liveness",
+        lambda *_args: {"ready": True},
+    )
+
+    asyncio.run(runner._refresh_account_snapshot())
+    asyncio.run(runner._refresh_account_snapshot())
+
+    assert saved == [snapshot, snapshot]
+    monitor.assert_not_called()
+    assert len(alerts.warning_messages) == 1
+    assert "New cycles cannot execute" in alerts.warning_messages[0]
+    assert manager.state.equity_high_watermark == 0
+
+    # Recovery resumes monitoring and allows a later recurrence to alert again.
+    projection.side_effect = None
+    projection.return_value = snapshot
+    asyncio.run(runner._refresh_account_snapshot())
+    monitor.assert_called_once_with(snapshot, liveness={"ready": True})
+    projection.side_effect = ValueError("Missing USD/CHF FX rate")
+    asyncio.run(runner._refresh_account_snapshot())
+    assert len(alerts.warning_messages) == 2

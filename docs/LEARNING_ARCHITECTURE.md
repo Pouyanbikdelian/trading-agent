@@ -305,8 +305,11 @@ candidate ──promote──> established ──challenge──> challenged ─
 Nothing is ever deleted. A retired lesson keeps its card, its evidence and
 its archive reason; the journal keeps who did it and why.
 
-- **Only `established` lessons reach agent context.** A candidate is a
-  hypothesis the desk is carrying, not a belief it acts on.
+- **Only `established` machine lessons reach active lesson context.**
+  Operator candidates are separately labelled as views under consideration.
+  Established operator instructions retain owner authority without being
+  presented as empirically validated market claims. Context separates
+  measured outcomes, legacy review votes and eligible promotion samples.
 - **Restoration never reinstates a belief.** `restore_retired_lesson`
   returns a lesson to `candidate` and clears `last_reviewed_ts`, so a
   previously-archived idea has to re-earn establishment on fresh measured
@@ -318,8 +321,9 @@ its archive reason; the journal keeps who did it and why.
 
 ### The Learning Curator
 
-`agents/historian.py::run_historian` — one twice-weekly, evidence-gated
-pass. It is advisory and has no path to strategy, risk or broker state.
+`agents/historian.py::run_historian` — one evidence-gated pass, scheduled
+Friday at 19:00 America/New_York after grading. It is advisory and has no
+path to strategy, risk or broker state.
 
 Each pass:
 
@@ -333,6 +337,20 @@ Each pass:
    lessons. It does not archive them itself.
 4. Persists the whole pass immutably to `curator_runs` and
    `curator_actions`.
+
+Automatic promotion now requires three net prospective samples whose
+observations began after the claim was created (or restored). Discovery
+sources cannot validate their own claim. Overlapping prediction/episode
+windows for the same normalized symbol count once, with contradictory
+evidence taking precedence within an overlap. All measured votes remain
+auditable. This does not establish independence across correlated symbols,
+and existing lesson statuses are not retroactively rewritten.
+
+New candidates must supply non-empty applicability, failure, invalidation,
+and sample fields. Reviews reserve a quarter of each bounded status queue
+for the oldest review timestamps, so relevance cannot permanently exclude
+other regimes. The PM still needs decision-level application attribution;
+prompt inclusion alone does not prove a lesson improved a trade.
 
 ### Why the run tables exist
 

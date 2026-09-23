@@ -133,6 +133,10 @@ class HaltState(BaseModel):
     # not move, so the scope travels with the numbers and a change in it
     # forces a re-stamp rather than a halt. None = pre-2026-08-22 state.
     baseline_scope: str | None = None
+    # A managed book is defined by the excluded positions and quantities,
+    # not just the word "managed". Unknown legacy identities need an
+    # explicit reset rather than silently adopting today's holdings.
+    baseline_book_identity: str | None = None
 
     def replace(self, **fields: Any) -> HaltState:
         return self.model_copy(update=fields)

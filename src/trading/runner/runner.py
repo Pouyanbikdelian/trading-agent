@@ -1430,10 +1430,21 @@ class Runner:
             )
         if monitor_fx:
             snap = snap.model_copy(update={"fx_rates": monitor_fx})
-        self._monitor_live_account_risk(
-            self.cycle._as_managed_account(snap, fx_rates=monitor_fx, announce=False),
-            liveness=liveness,
-        )
+        try:
+            managed = self.cycle._as_managed_account(snap, fx_rates=monitor_fx, announce=False)
+        except ValueError as exc:
+            # Persist the honest whole-account snapshot, but never feed a
+            # fallback amount into the managed loss switches.
+            detail = str(exc)
+            logger.bind(component="risk_monitor").error(f"managed valuation unavailable: {detail}")
+            if detail != getattr(self, "_last_managed_valuation_error", None):
+                self.alerts.warning(
+                    f"Managed risk valuation unavailable: {detail}. New cycles cannot execute."
+                )
+            self._last_managed_valuation_error: str | None = detail
+        else:
+            self._last_managed_valuation_error = None
+            self._monitor_live_account_risk(managed, liveness=liveness)
         self.cycle.runner_store.save_snapshot(snap)
 
         # Touch heartbeat. A successful snapshot refresh proves the trader
@@ -1540,7 +1551,7 @@ class Runner:
                     "⚠️ *Live execution safety gate*\n"
                     f"{decision.reason}.\n"
                     "A real-account review remains available, but no executable "
-                    "cycle may run until a trusted NYSE-open baseline is captured."
+                    "cycle may run until the baseline issue above is resolved."
                 )
             return
 
@@ -1978,7 +1989,7 @@ class Runner:
             logger.bind(component="sentinel").exception("late-day de-risk run failed")
 
     async def _run_historian_async(self) -> None:
-        """Twice-weekly lesson distillation — see agents/historian.py."""
+        """Friday lesson distillation after grading — see agents/historian.py."""
         try:
             from trading.agents.context import build_context
             from trading.agents.historian import format_historian_digest, run_historian

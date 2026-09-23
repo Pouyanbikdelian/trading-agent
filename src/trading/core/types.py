@@ -265,6 +265,18 @@ class AccountSnapshot(BaseModel):
     # symbols it came from. Empty on an "account" snapshot.
     excluded_value: float = 0.0
     excluded_symbols: tuple[str, ...] = ()
+    # Quantities, not market values: price changes are returns, while a
+    # change in the pinned position transfers capital into/out of the desk.
+    excluded_quantities: dict[str, float] = Field(default_factory=dict)
+
+    @property
+    def risk_book_identity(self) -> str:
+        import json
+
+        return json.dumps(
+            [self.scope, sorted(self.excluded_symbols), sorted(self.excluded_quantities.items())],
+            separators=(",", ":"),
+        )
 
     @field_validator("ts")
     @classmethod

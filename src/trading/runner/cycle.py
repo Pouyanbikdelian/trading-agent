@@ -2752,25 +2752,14 @@ class Cycle:
         — the book it actually runs. Cash is untouched; all of it is the
         desk's to deploy.
 
-        Never raises. A failure here would silently return the whole
-        account, which sizes too large, so the fallback is announced.
+        Refuse a failed projection: returning the whole account changes
+        the sizing base and can manufacture a loss on the next monitor tick.
         """
         from trading.core.config import settings as _held_settings
         from trading.runner.holds import load_holds
         from trading.runner.managed_account import managed_view
 
-        try:
-            held = load_holds(_held_settings.state_dir)
-        except Exception:
-            logger.bind(component="cycle").exception(
-                "could not read holds; sizing against the WHOLE account"
-            )
-            if announce:
-                self.alerts.error(
-                    "⚠️ could not read `/holds` — this cycle is sized against the "
-                    "whole account, pinned positions included."
-                )
-            return account
+        held = load_holds(_held_settings.state_dir, strict=True)
         if not held:
             return account
 

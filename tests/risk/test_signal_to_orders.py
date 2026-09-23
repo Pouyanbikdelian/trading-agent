@@ -95,6 +95,25 @@ def test_sector_cap_scales_only_that_sector(mgr, aapl, msft, xom, account_100k, 
     assert len(sector_decisions) == 1
 
 
+def test_unclassified_targets_share_the_existing_sector_cap(
+    mgr, aapl, msft, xom, account_100k, t0
+) -> None:
+    mgr.limits = mgr.limits.model_copy(update={"max_position_pct": 1.0})
+    sig = signal_from(t0, {"equity:AAPL": 0.20, "equity:MSFT": 0.20, "equity:XOM": 0.10})
+    orders, decisions = mgr.signal_to_orders(
+        sig,
+        account=account_100k,
+        last_prices={"equity:AAPL": 100.0, "equity:MSFT": 100.0, "equity:XOM": 100.0},
+        instruments=instruments_dict(aapl, msft, xom),
+        sector_map={"equity:XOM": "energy"},
+    )
+    by_sym = {order.instrument.symbol: order for order in orders}
+    assert by_sym["AAPL"].quantity == pytest.approx(150.0)
+    assert by_sym["MSFT"].quantity == pytest.approx(150.0)
+    assert by_sym["XOM"].quantity == pytest.approx(100.0)
+    assert any(d.reason == "sector cap on Unknown" for d in decisions)
+
+
 def test_delta_against_existing_position(mgr, aapl, account_100k, t0) -> None:
     # Already long 50 shares; target weight asks for 100 shares.
     pos = Position(instrument=aapl, quantity=50.0, avg_price=100.0)

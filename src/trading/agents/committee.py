@@ -292,7 +292,9 @@ def _agent_view(name: str, context: dict[str, Any]) -> dict[str, Any]:
     keys = _VIEW_KEYS.get(name)
     if not keys:
         return context
-    return {k: context[k] for k in keys if k in context}
+    # Missing/stale readings must remain visible in every specialist view;
+    # an empty macro block is not evidence of a calm market.
+    return {k: context[k] for k in (*keys, "_data_gaps") if k in context}
 
 
 def _display(name: str) -> str:
@@ -326,50 +328,169 @@ def _frontier_llm(system: str, prompt: str) -> dict[str, Any]:
     return complete_json(system, prompt, tier="frontier")
 
 
-MANAGER_PROMPT_BUDGET = 9_000
+# Character ceilings, separate from output-token limits. A production
+# context replay exceeded the old 9k challenger ceiling even after safe
+# compaction. Leave room for all voices, provenance and contrary evidence.
+MANAGER_PROMPT_BUDGET = 18_000
+SPECIALIST_PROMPT_BUDGET = 18_000
+CHALLENGER_PROMPT_BUDGET = 24_000
+
+
+def _prompt_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, default=str, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compact_takes(takes: Any, limit: int) -> Any:
+    """Keep every voice and its forecast; shorten only explanatory prose.
+
+    Production takes are keyed by agent, not ordered history. Dropping the
+    tail erased later voices, and treating this mapping as a list previously
+    bypassed compaction altogether. The list form remains supported for old
+    stored debates. Prediction fields, sources and cited lessons stay intact.
+    """
+    result = copy.deepcopy(takes)
+    rows = result.values() if isinstance(result, dict) else result
+    if isinstance(rows, list) or isinstance(result, dict):
+        for row in rows:
+            if (
+                isinstance(row, dict)
+                and isinstance(row.get("take"), str)
+                and len(row["take"]) > limit
+            ):
+                row["take"] = row["take"][: limit - 1] + "…"
+    return result
+
+
+def _trim_context(context: dict[str, Any], fitted: Callable[[], str | None]) -> str | None:
+    """Shed complete optional rows while protecting the book and lessons.
+
+    A raw JSON slice discarded whichever data happened to come last, often
+    the candidate ladder or freshness warnings. Omission counts make a
+    bounded sample explicit; no absent headline is presented as no news.
+    If protected evidence cannot fit, callers skip the review visibly.
+    """
+    blocks: list[tuple[dict[str, Any], str, str, int]] = [
+        (context, "headlines", "headlines", 3),
+        (context, "dossiers", "dossiers", 2),
+        (context, "recent_memory", "recent_memory", 0),
+        (context, "source_trust", "source_trust", 3),
+    ]
+    ladder = context.get("candidate_ladder")
+    if isinstance(ladder, dict):
+        blocks.append((ladder, "ranked", "candidate_ladder.ranked", 8))
+    omissions = context.setdefault("_prompt_omissions", {})
+    for parent, key, path, minimum in blocks:
+        rows = parent.get(key)
+        while isinstance(rows, list) and len(rows) > minimum:
+            rows.pop()
+            omissions[path] = omissions.get(path, 0) + 1
+            result = fitted()
+            if result is not None:
+                return result
+    # A very long first article/dossier must not prevent a valid market view.
+    # Retain a usable ranked pool; never trim positions, mandates or lessons.
+    for parent, key, path, _ in blocks:
+        if path == "candidate_ladder.ranked":
+            continue
+        rows = parent.get(key)
+        if isinstance(rows, list) and rows:
+            omissions[path] = omissions.get(path, 0) + len(rows)
+            parent[key] = []
+            result = fitted()
+            if result is not None:
+                return result
+    return None
+
+
+def _budgeted_context(context: dict[str, Any], budget: int = SPECIALIST_PROMPT_BUDGET) -> str:
+    payload = copy.deepcopy(context)
+
+    def fitted() -> str | None:
+        rendered = _prompt_json(payload)
+        return rendered if len(rendered) <= budget else None
+
+    result = fitted()
+    if result is None:
+        result = _trim_context(payload, fitted)
+    if result is None:
+        raise ValueError(f"protected specialist context exceeds {budget}-character prompt budget")
+    return result
+
+
+def _budgeted_challenger_prompt(
+    context: dict[str, Any],
+    takes: dict[str, dict[str, Any]],
+    budget: int = CHALLENGER_PROMPT_BUDGET,
+) -> str:
+    payload: dict[str, Any] = {
+        "market_context": copy.deepcopy(context),
+        "takes": copy.deepcopy(takes),
+    }
+
+    def fitted() -> str | None:
+        rendered = _prompt_json(payload)
+        return rendered if len(rendered) <= budget else None
+
+    result = fitted()
+    if result is not None:
+        return result
+    payload["takes"] = _compact_takes(takes, 800)
+    payload["_take_text_max_chars"] = 800
+    result = fitted() or _trim_context(payload["market_context"], fitted)
+    if result is not None:
+        return result
+    for limit in (400, 200):
+        payload["takes"] = _compact_takes(takes, limit)
+        payload["_take_text_max_chars"] = limit
+        result = fitted()
+        if result is not None:
+            return result
+    raise ValueError(f"protected challenger evidence exceeds {budget}-character prompt budget")
 
 
 def _budgeted_manager_prompt(payload: dict[str, Any], budget: int = MANAGER_PROMPT_BUDGET) -> str:
-    """Serialize under ``budget`` by dropping whole items, never slicing.
+    """Keep all voices, dissent and lessons in valid, strictly bounded JSON.
 
-    This used to be ``json.dumps(payload)[:9000]``. ``established_lessons``
-    is the second-to-last key, after eight full agent takes — so on a busy
-    day the raw slice cut the lesson book off first and handed the model
-    JSON truncated mid-string. Silent, and exactly backwards: the takes
-    are today's opinions, the lessons are what the desk has already
-    learned, and the opinions are what should give way.
-
-    ``agents/pm.py`` was rewritten for the same defect; this is the same
-    trim order applied to the manager's smaller payload. The result is
-    always valid JSON.
+    The live dictionary of takes bypassed the old list-only trim, which
+    then deleted objections while still exceeding the budget. Shorten the
+    prose of every take fairly; never discard an entire dissenting voice.
+    Oversized protected evidence produces an explicit unavailable review,
+    not an unbounded prompt or silently missing lessons.
     """
     p = copy.deepcopy(payload)
 
     def fitted() -> str | None:
-        s = json.dumps(p, default=str)
+        s = _prompt_json(p)
         return s if len(s) <= budget else None
 
     s = fitted()
     if s is not None:
         return s
 
-    # Takes are newest-first, so popping the tail sheds the stalest view.
-    # One always survives: a manager with zero takes has nothing to rule on.
-    seq = p.get("takes")
-    while isinstance(seq, list) and len(seq) > 1:
-        seq.pop()
+    for limit in (1600, 800, 400, 200):
+        p["takes"] = _compact_takes(payload.get("takes"), limit)
+        p["_take_text_max_chars"] = limit
         s = fitted()
         if s is not None:
             return s
 
-    # Then the supporting apparatus, least decision-bearing first. The
-    # lesson keys are absent from this list on purpose.
-    for key in ("calibration", "objections", "guard_flags", "disagreement_index"):
-        p.pop(key, None)
+    # Keep each objection's identity and falsifier, even when its rationale
+    # needs an excerpt. Calibration, guards and memory remain unchanged.
+    objections = p.get("objections")
+    for limit in (400, 200):
+        if isinstance(objections, list):
+            for row in objections:
+                if (
+                    isinstance(row, dict)
+                    and isinstance(row.get("objection"), str)
+                    and len(row["objection"]) > limit
+                ):
+                    row["objection"] = row["objection"][: limit - 1] + "…"
+        p["_objection_text_max_chars"] = limit
         s = fitted()
         if s is not None:
             return s
-    return json.dumps(p, default=str)
+    raise ValueError(f"protected manager evidence exceeds {budget}-character prompt budget")
 
 
 def _record_committee_selection_snapshot(
@@ -455,12 +576,12 @@ def run_committee(
     # model. An injected ``llm`` (tests) overrides both and keeps runs hermetic.
     specialist_llm = llm or _default_llm
     decision_llm = llm or _frontier_llm
-    ctx_block = json.dumps(context, default=str, indent=1)[:18000]
     takes: dict[str, dict[str, Any]] = {}
+    unavailable_agents: list[str] = []
 
     for name, charter in CHARTERS.items():
         try:
-            view = json.dumps(_agent_view(name, context), default=str, indent=1)[:18000]
+            view = _budgeted_context(_agent_view(name, context))
             out = specialist_llm(charter, f"Today's context (your specialist slice):\n{view}")
             pred = out.get("prediction") or {}
             if not {"subject", "direction", "horizon_days", "confidence"} <= set(pred):
@@ -477,10 +598,15 @@ def run_committee(
             )
             mem.journal("take", {"agent": name, "prediction_id": pid, **out}, actor=name)
         except Exception as e:
+            unavailable_agents.append(name)
             logger.bind(component="agents", agent=name).warning(f"take failed: {e}")
 
     if not takes:
-        return {"ok": False, "reason": "no agent produced a valid take"}
+        return {
+            "ok": False,
+            "reason": "no agent produced a valid take",
+            "unavailable_agents": unavailable_agents,
+        }
 
     # Deterministic guards: mechanical checks the personas miss. Advisory
     # context for the manager + the digest; never an order gate.
@@ -490,10 +616,9 @@ def run_committee(
     objections: list[dict[str, Any]] = []
     market_caveat = ""
     try:
-        target_block = json.dumps(takes, default=str)[:6000]
         ch = decision_llm(
             CHALLENGER_CHARTER,
-            f"Market context:\n{ctx_block[:3000]}\n\nCommittee takes:\n{target_block}",
+            _budgeted_challenger_prompt(context, takes),
         )
         objections = list(ch.get("objections", []))[:5]
         market_caveat = str(ch.get("market_phase_caveat", ""))[:300]
@@ -503,6 +628,7 @@ def run_committee(
             actor="challenger",
         )
     except Exception as e:
+        unavailable_agents.append("challenger")
         logger.bind(component="agents", agent="challenger").warning(f"challenge failed: {e}")
 
     # --- Manager synthesis
@@ -514,9 +640,13 @@ def run_committee(
             {
                 "takes": takes,
                 "objections": objections,
+                "market_phase_caveat": market_caveat,
                 "calibration": calibration or [],
                 "disagreement_index": disagreement,
                 "guard_flags": guard_flags,
+                "operator_objections": context.get("operator_objections", []),
+                "operator_mandates": context.get("operator_mandates", []),
+                "unavailable_agents": unavailable_agents,
                 # The manager is a frontier decision node and had no view
                 # of the lesson book at all — it synthesized from takes
                 # alone, so everything the desk had learned reached the
@@ -529,6 +659,7 @@ def run_committee(
         )
         ruling = decision_llm(MANAGER_CHARTER, manager_prompt)
     except Exception as e:
+        unavailable_agents.append("manager")
         logger.bind(component="agents", agent="manager").warning(f"ruling failed: {e}")
         ruling = {
             "posture": "neutral",
@@ -546,9 +677,14 @@ def run_committee(
         "market_caveat": market_caveat,
         "disagreement_index": disagreement,
         "guard_flags": guard_flags,
+        "unavailable_agents": unavailable_agents,
     }
     _record_committee_selection_snapshot(mem, context, takes)
-    mem.journal("committee", {"ruling": ruling, "disagreement": disagreement}, actor="manager")
+    mem.journal(
+        "committee",
+        {"ruling": ruling, "disagreement": disagreement, "unavailable_agents": unavailable_agents},
+        actor="manager",
+    )
     return digest
 
 
@@ -566,6 +702,9 @@ def format_digest_compact(digest: dict[str, Any]) -> str:
     lines = [
         f"🏛 *Committee* — {posture_icon} *{posture}*  (dissent {digest['disagreement_index']:.1f})"
     ]
+    if digest.get("unavailable_agents"):
+        missing = ", ".join(_display(name) for name in digest["unavailable_agents"])
+        lines.append(f"⚠️ Incomplete review — unavailable: {missing}.")
     if r.get("proposal"):
         lines += ["", f"*Conclusion:* {_clip(r['proposal'], 360)}"]
     if digest.get("market_caveat"):
@@ -585,6 +724,9 @@ def format_digest(digest: dict[str, Any]) -> str:
         return f"🤖 Committee did not convene: {digest.get('reason', 'unknown')}"
     icons = {"bullish": "🟢", "neutral": "⚪", "bearish": "🔴"}
     lines = ["🏛 *Daily committee* — advisory only"]
+    if digest.get("unavailable_agents"):
+        missing = ", ".join(_display(name) for name in digest["unavailable_agents"])
+        lines.append(f"⚠️ Incomplete review — unavailable: {missing}.")
     for name, t in digest["takes"].items():
         p = t["prediction"]
         lines.append(

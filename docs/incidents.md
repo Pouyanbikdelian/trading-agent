@@ -14,6 +14,46 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-09-18 — Managed equity compared with a whole-account peak
+
+**Symptoms.** The continuous monitor reported a −36.17% drawdown on
+CHF 53,805.74 of managed equity. `/resume` re-halted, and `/baseline reset`
+did not repair the reference.
+
+**Wrong theory.** A large investment loss had breached the drawdown limit.
+The compared values described different books: the stored peak was
+CHF 84,290.39 for the whole account. Pinned holdings had been removed from
+the monitored equity, not from that peak. This comparison cannot establish
+the account's actual historical return.
+
+**Actual causes.** The running bot image still reset to whole-account
+equity while retaining the managed scope. Its source differed from the
+checkout, which already contained a reset correction. Additional audit
+reproductions found that a changed pinned quantity/set could fabricate a
+return, missing FX could corrupt the projection, and a concurrent stale
+risk-manager save could overwrite a newer operator reset.
+
+**Prepared correction (2026-09-21; not yet deployed).** Baselines now carry
+managed-book identity. An unknown or changed book blocks new exposure until
+an explicit, reviewed reset; opening capture cannot silently erase the old
+reference. Managed valuation refuses missing FX and malformed holds, and
+reset fields must match the supplied snapshot. Saves preserve newer resets
+under the state lock. The deployment verifier hashes the actual runtime
+files and records immutable image/container IDs for every selected service.
+
+**Recovery.** Verify the corrected image in all services, obtain a fresh,
+authenticated broker snapshot, reconcile the pinned book, and explicitly
+repair the contaminated baseline with audit provenance. Resetting a
+baseline does not clear the halt. Preserve the original state and historical
+performance evidence. A halted runner can still execute protective exits;
+use a stopped runner for maintenance that must submit no orders.
+
+**Lesson.** A Git revision in the checkout is not proof of deployed code,
+and a scope label is not proof that two equity numbers measure the same
+capital. Changing the compared book must never look like a market return.
+
+---
+
 ## 2026-08-18 — A loss halt became an information blackout
 
 **TL;DR:** The account dropped through the −0.60% daily-loss limit at

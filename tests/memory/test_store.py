@@ -46,13 +46,16 @@ def test_episode_roundtrip_with_entry_percentile(mem: MemoryStore) -> None:
     assert rows[0]["entry_pctile_52w"] == pytest.approx(0.91)
 
 
-def test_lesson_lifecycle_promote_and_retire(mem: MemoryStore) -> None:
+def test_lesson_lifecycle_promote_and_retire(mem: MemoryStore, monkeypatch) -> None:
     t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    # The source is discovery evidence; subsequent observations begin after
+    # the claim is recorded, rather than recycling its historical sample.
+    monkeypatch.setattr("trading.memory.store._now", lambda: (t0 + timedelta(days=11)).timestamp())
     eps = [
         mem.add_episode(
             symbol=f"S{i}",
-            ts_open=t0,
-            ts_close=t0 + timedelta(days=10),
+            ts_open=t0 + timedelta(days=12 * i),
+            ts_close=t0 + timedelta(days=12 * i + 10),
             entry_px=100,
             exit_px=90,
             pnl_pct=-0.10,

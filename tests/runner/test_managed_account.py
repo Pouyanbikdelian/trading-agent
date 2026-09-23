@@ -125,24 +125,18 @@ class TestNothingHeldChangesNothing:
 
 
 class TestItRefusesToProduceNonsense:
-    def test_a_pinned_book_larger_than_the_account_is_left_alone(self) -> None:
-        """Only bad data can do this, and sizing against zero or negative
-        equity is worse than sizing against too much."""
+    def test_a_pinned_book_larger_than_the_account_is_refused(self) -> None:
         snap = account(pos("NVDA", 40, 216.0), equity=5_000.0)
 
-        view = managed_view(snap, {"NVDA"}, fx_rates={"USD": USDCHF})
-
-        assert view.account is snap
-        assert not view.changed
+        with pytest.raises(ValueError, match="positive finite managed equity"):
+            managed_view(snap, {"NVDA"}, fx_rates={"USD": USDCHF})
 
     def test_a_missing_fx_rate_is_reported_not_hidden(self) -> None:
         """Passing a USD number through as CHF understates the deduction
         by a fifth, which overstates the sizing base by the same. The old
         code did this everywhere and said nothing."""
-        view = managed_view(account(pos("NVDA", 40, 216.0)), {"NVDA"}, fx_rates={})
-
-        assert view.unconverted == ("NVDA",)
-        assert "No FX rate" in view.note("CHF")
+        with pytest.raises(ValueError, match="No FX rate"):
+            managed_view(account(pos("NVDA", 40, 216.0)), {"NVDA"}, fx_rates={})
 
     def test_a_base_currency_position_needs_no_rate(self) -> None:
         view = managed_view(account(pos("NESN", 100, 90.0, currency="CHF")), {"NESN"}, fx_rates={})

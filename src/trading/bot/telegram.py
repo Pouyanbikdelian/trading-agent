@@ -1206,22 +1206,28 @@ def _cmd_baseline(args: list[str]) -> str:
     # gain on an account that did not move. Rebuild the same view the
     # risk manager sees before quoting any percentage.
     desk_equity = equity
+    desk_snapshot = snap
     pinned: list[str] = []
-    if str(getattr(state, "baseline_scope", "") or "") == "managed" and snap is not None:
+    if snap is not None:
         try:
             from trading.runner.holds import load_holds
             from trading.runner.managed_account import managed_view
 
             view = managed_view(
                 snap,
-                load_holds(settings.state_dir),
+                load_holds(settings.state_dir, strict=True),
                 fx_rates=getattr(snap, "fx_rates", None) or {},
             )
+            desk_snapshot = view.account
             if view.changed:
                 desk_equity = float(view.account.equity)
                 pinned = sorted(view.excluded)
-        except Exception:
-            desk_equity = equity
+        except Exception as exc:
+            logger.bind(component="bot").warning(f"baseline valuation refused: {exc}")
+            return (
+                "❌ baseline valuation unavailable; nothing was reset. "
+                "Check pinned holdings and their FX rates before retrying."
+            )
 
     def _describe() -> list[str]:
         scope = str(getattr(state, "baseline_scope", "") or "account")
@@ -1252,10 +1258,20 @@ def _cmd_baseline(args: list[str]) -> str:
                 lines.append(f"live equity: `{equity:,.2f} {ccy}`")
             # Every percentage below is against desk_equity, which equals
             # `equity` whenever nothing is pinned.
-            if state.equity_high_watermark > 0:
+            same_book = (
+                desk_snapshot is not None
+                and (state.baseline_scope or "account") == desk_snapshot.scope
+                and (
+                    state.baseline_book_identity == desk_snapshot.risk_book_identity
+                    or (state.baseline_book_identity is None and desk_snapshot.scope == "account")
+                )
+            )
+            if not same_book:
+                lines.append("⚠️ Baseline book identity is unknown or changed; returns unavailable.")
+            if same_book and state.equity_high_watermark > 0:
                 dd = (desk_equity - state.equity_high_watermark) / state.equity_high_watermark
                 lines.append(f"drawdown vs peak: `{dd:+.2%}`")
-            if state.daily_equity_open > 0:
+            if same_book and state.daily_equity_open > 0:
                 day = (desk_equity - state.daily_equity_open) / state.daily_equity_open
                 lines.append(f"day P&L vs stored open: `{day:+.2%}`")
         else:
@@ -1295,7 +1311,8 @@ def _cmd_baseline(args: list[str]) -> str:
             observed_at=snap.ts,
             reason=reason,
             actor="telegram",
-            scope=str(getattr(state, "baseline_scope", "") or "account"),
+            scope=desk_snapshot.scope if desk_snapshot is not None else "account",
+            snapshot=desk_snapshot,
         )
     except BaselineResetError as e:
         return f"❌ baseline reset refused — {e}"

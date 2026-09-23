@@ -108,7 +108,7 @@ Set at minimum:
 | `IBKR_USERNAME`        | Your IBKR account login.                           |
 | `IBKR_PASSWORD`        | Bot-only password if your account supports it.     |
 | `IBKR_TRADING_MODE`    | `paper` (default) or `live`.                       |
-| `IBKR_HOST`            | `ib-gateway` inside compose (docker DNS).          |
+| `IBKR_HOST`            | `127.0.0.1` for the host-networked runner/gateway. |
 | `IBKR_PORT`            | `4002` paper, `4001` live.                         |
 | `TRADING_ENV`          | `research` / `paper` / `live`. Start at `paper`.   |
 | `ALLOW_LIVE_TRADING`   | `false` until you've explicitly decided otherwise. |
@@ -168,9 +168,12 @@ Edit `docker-compose.yml` if you need a different cron (default: weekdays
 docker compose --profile paper restart trader
 ```
 
-The healthcheck reads the heartbeat file every 60 s; if no cycle runs for
-5 min and the container reports unhealthy, Docker will restart it (with
-`restart: unless-stopped`).
+The healthcheck reads the heartbeat file every 60 s. A stale heartbeat
+marks the runner unhealthy; `restart: unless-stopped` restarts an exited
+container, **not** a container that merely becomes unhealthy. The autoheal
+sidecar currently watches only the gateway. The bot still shares the
+runner heartbeat, so its health status does not independently measure
+Telegram responsiveness.
 
 ## 10. Telegram alerts
 
@@ -245,11 +248,112 @@ VPS dies you want this archive somewhere else.
 - `docker compose --profile paper exec trader sqlite3 /app/state/runner.db
    'SELECT * FROM cycles ORDER BY ts DESC LIMIT 10;'` — recent cycles.
 - `docker compose --profile paper exec trader cat /app/state/halt.json` — current halt state.
-- Halt manually: `docker compose exec trader python -c "from pathlib import
-   Path; import json; p = Path('/app/state/halt.json'); s = json.loads(p.read_text());
-   s['halted']=True; s['reason']='manual'; p.write_text(json.dumps(s))"`.
-   The runner picks this up at the next cycle.
-- Unhalt: same edit, set `halted=false`.
+- Halt manually: `docker compose exec bot trading halt --reason manual`.
+  This uses the configured `STATE_DIR` and the locked, atomic halt writer.
+  Do not edit `halt.json` directly while processes can write it.
+- Resume is an explicit operator action through `/resume`; it preserves
+  the loss references. A halt blocks added exposure but still permits
+  verified risk-reducing paths. It is not a no-orders maintenance barrier.
+
+## 14. Verify the code that is actually running
+
+The September 2026 baseline incident persisted after the source checkout
+had been fixed: the bot container still contained the old reset handler.
+Neither `git rev-parse HEAD` nor seeing `trading-agent:latest` in `docker ps`
+proves the service loaded the intended image. A Docker restart also keeps
+the old image; services must be recreated to use a rebuilt image.
+
+Run the stdlib-only checker on the Docker host, against the reviewed
+checkout. It needs Python 3.10+ and read access to Docker; it does not
+load `.env`, invoke Compose, import `trading`, or connect to the broker:
+
+```bash
+cd /opt/trading-agent
+python3 scripts/verify_deployment.py
+```
+
+Defaults cover `trader-live`, `trader-bot`, and `trader-dashboard`. To
+verify paper or a differently named deployment, provide the checkout
+directory and the complete container list explicitly:
+
+```bash
+python3 scripts/verify_deployment.py /opt/trading-agent trader trader-bot trader-dashboard
+```
+
+The JSON report includes immutable container/image IDs, the current tag's
+image ID, a checkout manifest fingerprint, and changed/missing/unexpected
+paths. It verifies all files under `src/`, `config/`, and `docker/`, plus
+`pyproject.toml`, excluding Python bytecode caches and `.DS_Store`. It
+also checks that Python resolves the package to `/app/src/trading`, that
+all selected services share an image, and that the container identity and
+checkout remain stable during each check. Exit status is **0** for a
+match, **1** for drift, **2** when verification is incomplete. Missing or
+stopped services cannot pass. Save the JSON alongside the reviewed commit
+ID in the deployment record.
+
+Scope matters: `config/` is mounted from the host in production, so the
+check proves the files currently visible to the container. It cannot prove
+that a long-lived process reloaded an edited file. It does not verify
+installed dependency versions, `uv.lock` (absent from the runtime image),
+broker readiness, baseline correctness, or account reconciliation. Container
+health is reported separately and does not make source drift acceptable.
+
+## 15. Maintenance release with the live runner stopped
+
+Prepare and test the reviewed change locally first. Do not change risk
+limits, arming flags, baseline state, or the live state-environment stamp
+as a side effect of deployment. Take a consistent backup of the state
+databases and halt file before any subsequent state migration; retain
+the prior image ID and deployment manifest for rollback.
+
+For an operator-authorized maintenance window, record a halt, then stop
+the runner and the command/scheduling processes. A halt alone leaves
+guard exits and other verified reductions available. Stopping the runner
+does not cancel orders already resting at the broker.
+
+```bash
+docker compose exec bot trading halt --reason 'maintenance: reviewed accounting repair'
+docker compose --profile live stop trader-live bot scheduler
+```
+
+Build the shared image without starting any service. The build definition
+lives on the paper `trader` service; selecting it here only builds code:
+
+```bash
+docker compose --profile paper build trader
+```
+
+Verify the candidate image in a temporary container with no network,
+broker credentials, state mounts, or trading entrypoint. The checker can
+read this isolated process while the live runner remains stopped:
+
+```bash
+deploy_probe=$(docker run -d --network none --no-healthcheck --entrypoint python trading-agent:latest -B -c 'import time; time.sleep(600)')
+python3 scripts/verify_deployment.py /opt/trading-agent "$deploy_probe"
+docker rm -f "$deploy_probe"
+```
+
+Continue only if verification returned 0. Prepare all consumers of the
+shared image with **no start**, so the bot cannot be left on stale code:
+
+```bash
+docker compose --profile live up --no-start --no-deps --force-recreate trader-live bot dashboard
+```
+
+Leave the live runner stopped until the owner explicitly authorizes live
+execution. [AGENTS.md](../AGENTS.md) requires approval each time Codex
+runs live execution; starting an armed live runner can submit orders even
+if a halt exists. After the approved start, immediately rerun the checker
+against all three services and inspect independent broker/snapshot
+freshness and reconciliation evidence. Re-enable the scheduler only as
+part of that approved restart. Do not clear the persisted halt as part of
+an image release or treat a source match as authorization to resume.
+
+Repairing an already contaminated baseline is a separate, reviewed state
+operation: use a fresh reconciled account snapshot, prove the managed
+book and currency, and retain the previous reference and reset provenance.
+A code deployment cannot reconstruct true historical drawdown from the
+corrupted high-water mark.
 
 ## Troubleshooting
 
@@ -258,5 +362,5 @@ VPS dies you want this archive somewhere else.
 | `trader` healthcheck failing         | Heartbeat stale or `status=error`         | `docker compose logs trader` for the traceback                  |
 | `ib-gateway` restarting every ~30s   | Login / 2FA failure                       | Check `ib-gateway` logs; confirm 2FA, sometimes restart from UI |
 | `BrokerError: not connected`         | Gateway booted slower than the trader     | Add `depends_on.condition: service_healthy` (compose v3.9+)     |
-| Orders rejected with `position` reason | `max_position_pct` too tight            | Adjust `config/risk.yaml`, restart trader                       |
+| Orders rejected with `position` reason | Requested position breaches the cap    | Inspect sizing and approved limits; do not loosen limits as a deployment fix |
 | `Cycle … status=error` after upgrade | Strategy params drift after a refactor    | Pin the strategy params dict in your runner config              |

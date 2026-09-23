@@ -41,10 +41,12 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 
 from trading.core.file_lock import file_lock
 from trading.core.logging import logger
+from trading.core.types import AccountSnapshot
 from trading.risk.limits import HaltState
 
 FILENAME = "halt.json"
@@ -177,6 +179,7 @@ def reset_equity_baseline(
     reason: str,
     actor: str,
     scope: str | None = None,
+    snapshot: AccountSnapshot | None = None,
     max_snapshot_age_s: float = 900.0,
     now: datetime | None = None,
 ) -> tuple[HaltState, HaltState]:
@@ -201,8 +204,10 @@ def reset_equity_baseline(
 
     ``scope`` names which book ``equity`` describes — ``"managed"`` for the
     desk's slice with pinned positions removed, ``"account"`` for the whole
-    account. It must agree with the stored ``baseline_scope``, because these
-    baselines are only meaningful against the book they were measured from.
+    account. A scalar-only caller must match the stored scope. A caller
+    supplying a validated snapshot may explicitly acknowledge a book change;
+    its amount, scope, timestamp and currency must all agree, and the old
+    and new identities are audited. Neither path clears a halt.
 
     That check exists because of 2026-09-14. The caller computed the desk
     figure correctly for display and then passed the *account* figure to this
@@ -219,16 +224,25 @@ def reset_equity_baseline(
     the account now. Returns ``(before, after)`` so the caller can show the
     operator exactly what changed.
     """
-    if equity <= 0:
+    if not isfinite(equity) or equity <= 0:
         raise BaselineResetError("account equity is not positive; nothing was reset")
     normalized_currency = str(currency or "").strip().upper()
     if not normalized_currency:
         raise BaselineResetError("account currency is unknown; nothing was reset")
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
         raise BaselineResetError("account snapshot has no timezone; nothing was reset")
+    if snapshot is not None and (
+        snapshot.equity != equity
+        or snapshot.base_currency.upper() != normalized_currency
+        or snapshot.ts != observed_at
+        or snapshot.scope != scope
+    ):
+        raise BaselineResetError("reset values do not match the supplied book snapshot")
 
     moment = now or datetime.now(tz=timezone.utc)
     age_s = (moment - observed_at).total_seconds()
+    if age_s < -5:
+        raise BaselineResetError("account snapshot is in the future; nothing was reset")
     if age_s > max_snapshot_age_s:
         raise BaselineResetError(
             f"the newest account snapshot is {age_s / 60:.0f} min old — too stale to "
@@ -259,7 +273,7 @@ def reset_equity_baseline(
             # introduced the field — so treat None as "account" rather than
             # as a mismatch.
             stored_scope = str(before.baseline_scope or "account").strip().lower()
-            if requested_scope != stored_scope:
+            if requested_scope != stored_scope and snapshot is None:
                 raise BaselineResetError(
                     f"the kill switches measure the {stored_scope} book but this "
                     f"reset describes the {requested_scope} book. Stamping "
@@ -290,6 +304,8 @@ def reset_equity_baseline(
             daily_baseline_captured_at=moment,
             daily_baseline_source=f"operator_reset:{actor}",
             daily_baseline_currency=normalized_currency,
+            baseline_scope=snapshot.scope if snapshot is not None else before.baseline_scope,
+            baseline_book_identity=(snapshot.risk_book_identity if snapshot is not None else None),
         )
         _write_halt_state_unlocked(path, after)
 
@@ -305,6 +321,10 @@ def reset_equity_baseline(
         "previous_daily_open": before.daily_equity_open,
         "still_halted": after.halted,
         "session_label": session_label.isoformat() if session_label else None,
+        "scope": after.baseline_scope,
+        "book_identity": after.baseline_book_identity,
+        "previous_scope": before.baseline_scope,
+        "previous_book_identity": before.baseline_book_identity,
     }
     try:
         audit = Path(state_dir) / "baseline_resets.jsonl"
