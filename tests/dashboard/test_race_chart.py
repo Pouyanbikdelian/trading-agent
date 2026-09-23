@@ -86,7 +86,7 @@ class TestThereIsExactlyOneRebase:
         assert "const rebase100=(series)=>" in APP
 
     def test_all_three_normalized_charts_go_through_it(self) -> None:
-        """Sleeve race, strategy race, holdings — one call each."""
+        """Sleeve race, strategy race, compare chart — one call each."""
         uses = re.findall(r"rebase100\(", APP)
         assert len(uses) == 3, uses
 

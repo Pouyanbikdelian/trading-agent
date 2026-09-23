@@ -23,16 +23,18 @@ import time
 from pathlib import Path
 
 APP = Path("src/trading/dashboard/app.py").read_text()
+#: Since the 2026-09-23 redesign the page lives in its own file.
+PAGE = Path("src/trading/dashboard/static/index.html").read_text()
 
 
 class TestNoHardcodedPaperLabels:
-    def test_the_equity_card_label_is_not_hardcoded(self) -> None:
-        assert "Equity (paper)" not in APP
-        assert 'Equity (<span class="envlbl">paper</span>)' in APP
+    def test_no_label_says_paper_in_plain_text(self) -> None:
+        assert "(paper)" not in PAGE
+        assert "Equity (paper)" not in PAGE
 
-    def test_the_account_card_label_is_not_hardcoded(self) -> None:
-        assert "— traded book (paper)</span>" not in APP
-        assert '— traded book (<span class="envlbl">paper</span>)' in APP
+    def test_the_equity_card_label_is_filled_from_the_environment(self) -> None:
+        assert 'Equity (<span class="envlbl">paper</span>)' in PAGE
+        assert 'Account NetLiq <span class="envlbl">paper</span>' in PAGE
 
     def test_the_strategy_race_series_follows_the_environment(self) -> None:
         """The race's account series names its environment AND its book.
@@ -42,89 +44,65 @@ class TestNoHardcodedPaperLabels:
         account's NetLiq including the operator's own positions. See
         tests/dashboard/test_race_chart.py.
         """
-        assert "'momentum top-k (paper)'" not in APP
-        assert "'momentum top-k ('+(d.env||'paper')+')'" not in APP
-        assert "'account NetLiq ('+(d.env||'paper')+' · '+ccy+')'" in APP
+        assert "'momentum top-k (paper)'" not in PAGE
+        assert "'account NetLiq ('+(D.env||'paper')+' · '+ccy+')'" in PAGE
 
     def test_every_env_label_is_filled_from_the_payload(self) -> None:
-        assert "document.querySelectorAll('.envlbl')" in APP
-        assert "e.textContent=d.env||'paper'" in APP
+        assert "document.querySelectorAll('.envlbl')" in PAGE
+        assert "e.textContent=D.env||'paper'" in PAGE
 
     def test_live_is_visually_flagged(self) -> None:
         """Reading 'live' should not require looking for it."""
-        assert "if((d.env||'')==='live')" in APP
+        assert "env==='live'" in PAGE
 
     def test_the_server_supplies_the_environment(self) -> None:
         assert 'out["env"] = getattr(_s, "trading_env", "") or ""' in APP
 
 
 class TestScheduleComesFromTheRealCron:
-    def test_the_rebalance_slot_is_not_hardcoded(self) -> None:
-        assert "{n:'⚖️ rebalance (paper)',dow:[5],h:21,m:5}" not in APP
-        assert "'⚖️ rebalance ('+envl+')'" in APP
+    """The page used to parse the cron in JavaScript, as UTC, and hardcode
+    six other job times; each was wrong the day the schedule moved. The
+    server now computes every next fire time with APScheduler's own
+    triggers (dashboard/cockpit.schedule_block)."""
 
-    def test_the_pm_slot_is_not_hardcoded_to_monday(self) -> None:
-        assert "{n:'🧪 PM rebalance',dow:[1],h:14,m:30}" not in APP
+    def test_the_page_no_longer_parses_cron(self) -> None:
+        assert "parseCron" not in PAGE
+        assert "D.schedule" in PAGE
 
-    def test_the_pm_slot_uses_the_server_supplied_lead_time(self) -> None:
-        """Mirrors runner._precycle_trigger's configurable lead time."""
-        assert "shift(cyc,Number(d.pm_pre_cycle_lead_minutes)||45)" in APP
-
-    def test_the_server_supplies_the_cron(self) -> None:
+    def test_the_server_supplies_the_cron_and_its_timezone(self) -> None:
         assert 'out["cycle_cron"] = os.getenv("CRON", "")' in APP
+        assert 'out["cycle_tz"] = os.getenv("SCHEDULE_TZ", "") or "UTC"' in APP
 
+    def test_next_fire_times_follow_new_york(self) -> None:
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from zoneinfo import ZoneInfo
 
-class TestCronParsing:
-    """The JS parser, reimplemented in Python against the same shapes, so a
-    regression in the accepted formats is caught here rather than by an
-    operator noticing the wrong time on the page."""
+        from trading.dashboard.cockpit import schedule_block
 
-    @staticmethod
-    def _parse(t: str):
-        dowmap = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4, "FRI": 5, "SAT": 6}
-        parts = (t or "").strip().split()
-        if len(parts) < 5:
-            return None
-        try:
-            m, h = int(parts[0]), int(parts[1])
-        except ValueError:
-            return None
-        f = parts[4].upper()
-        dow: list[int] = []
-        if f == "*":
-            dow = [0, 1, 2, 3, 4, 5, 6]
-        else:
-            for part in f.split(","):
-                r = [dowmap.get(x) if x in dowmap else int(x) for x in part.split("-")]
-                if len(r) == 2:
-                    dow.extend(i % 7 for i in range(r[0], r[1] + 1))
-                else:
-                    dow.append(r[0] % 7)
-        return {"h": h, "m": m, "dow": dow} if dow else None
+        now = datetime(2026, 11, 2, 12, tzinfo=timezone.utc)  # after the DST change
+        jobs = {
+            j["key"]: datetime.fromisoformat(j["at"]).astimezone(ZoneInfo("America/New_York"))
+            for j in schedule_block(
+                SimpleNamespace(pm_pre_cycle_lead_minutes=45),
+                cron="0 15 * * FRI",
+                tz="America/New_York",
+                now=now,
+            )
+        }
+        assert jobs["cycle"].strftime("%a %H:%M") == "Fri 15:00"
+        assert jobs["pm"].strftime("%a %H:%M") == "Fri 14:15"
+        assert jobs["broker_ready"].strftime("%a %H:%M") == "Fri 14:00"
+        assert jobs["curator"].strftime("%a %H:%M") == "Fri 19:00"
+        assert jobs["reconcile"].strftime("%H:%M") == "16:30"
 
-    def test_the_live_cron_parses(self) -> None:
-        assert self._parse("0 19 * * FRI") == {"h": 19, "m": 0, "dow": [5]}
+    def test_no_cron_still_lists_the_fixed_jobs(self) -> None:
+        from types import SimpleNamespace
 
-    def test_the_old_paper_cron_parses(self) -> None:
-        assert self._parse("5 21 * * FRI") == {"h": 21, "m": 5, "dow": [5]}
+        from trading.dashboard.cockpit import schedule_block
 
-    def test_a_weekday_range_parses(self) -> None:
-        assert self._parse("0 16 * * MON-FRI")["dow"] == [1, 2, 3, 4, 5]
-
-    def test_numeric_days_parse(self) -> None:
-        assert self._parse("0 16 * * 1-5")["dow"] == [1, 2, 3, 4, 5]
-
-    def test_a_star_means_every_day(self) -> None:
-        assert len(self._parse("30 22 * * *")["dow"]) == 7
-
-    def test_junk_yields_none_rather_than_a_wrong_time(self) -> None:
-        for junk in ("", "nonsense", "0 19 *", "x y * * FRI"):
-            assert self._parse(junk) is None
-
-    def test_the_pm_slot_lands_45_minutes_earlier(self) -> None:
-        c = self._parse("0 19 * * FRI")
-        total = c["h"] * 60 + c["m"] - 45
-        assert (total // 60, total % 60) == (18, 15)  # matches the runner's log
+        keys = {j["key"] for j in schedule_block(SimpleNamespace(), cron="", tz="UTC")}
+        assert "cycle" not in keys and {"committee", "curator", "reconcile"} <= keys
 
 
 class TestSnapshotAgeSeesWalWrites:
