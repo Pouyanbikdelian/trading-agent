@@ -163,6 +163,66 @@ def _historian_trigger() -> Any:
     return CronTrigger(day_of_week="fri", hour=19, minute=0, timezone="America/New_York")
 
 
+def _nyse_rth_every_15(offset_minute: int) -> Any:
+    """Every 15 minutes inside NYSE regular hours, on New York wall time.
+
+    The guards and the sentinel used ``hour="13-20"`` in UTC. That is
+    09:05-16:50 New York in summer (two pre-open passes and four after the
+    close, whose market orders queue to the next open) and 08:05-15:50 in
+    winter (ninety minutes of stale pre-open prints, and the last ten
+    minutes of the session missed). Anchoring on New York time makes both
+    seasons 09:30-16:00.
+    """
+    from apscheduler.triggers.combining import OrTrigger
+    from apscheduler.triggers.cron import CronTrigger
+
+    tz = "America/New_York"
+    minutes = sorted({(offset_minute + 15 * i) % 60 for i in range(4)})
+    opening = ",".join(str(m) for m in minutes if m >= 30)
+    return OrTrigger(
+        [
+            CronTrigger(day_of_week="mon-fri", hour=9, minute=opening, timezone=tz),
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour="10-15",
+                minute=",".join(str(m) for m in minutes),
+                timezone=tz,
+            ),
+        ]
+    )
+
+
+#: The schedule timezone that keeps the weekly cycle a fixed distance from
+#: the NYSE close in both DST seasons.
+NYSE_TZ = "America/New_York"
+
+
+def _cycle_dst_warning(cron: str, tz: str) -> str | None:
+    """Warn when a UTC-anchored weekday cycle will drift against the NYSE.
+
+    CRON=5 21 * * FRI (UTC) is 17:05 New York in summer and 16:05 in
+    winter: five minutes after the close, before the free daily bar is
+    final. The TODO asked someone to remember to edit .env twice a year.
+    Anchoring the cron in New York time removes the chore.
+    """
+    if tz == NYSE_TZ:
+        return None
+    parts = cron.split()
+    if len(parts) != 5:
+        return None
+    try:
+        hour = int(parts[1])
+    except ValueError:
+        return None
+    if tz.upper() in {"UTC", "ETC/UTC", "GMT"} and 12 <= hour <= 23:
+        return (
+            f"cycle cron {cron!r} is anchored in {tz}; it shifts one hour against the "
+            f"NYSE close at every DST change. Set SCHEDULE_TZ={NYSE_TZ} and express "
+            "CRON in New York time (e.g. '5 17 * * FRI')."
+        )
+    return None
+
+
 def _add_scorecard_backfill_targets(
     symbols: set[str],
     starts: dict[str, datetime],
@@ -195,7 +255,7 @@ def _add_scorecard_backfill_targets(
         starts[symbol] = min(starts.get(symbol, default_start), earliest - timedelta(days=3))
 
 
-def _humanize_cron(expr: str) -> str:
+def _humanize_cron(expr: str, tz: str = "UTC") -> str:
     """Translate a 5-field cron string into something humans read.
 
     Only handles the common case "M H * * DOW" — falls back to the raw
@@ -211,7 +271,8 @@ def _humanize_cron(expr: str) -> str:
         h = int(hour)
     except ValueError:
         return expr
-    time_s = f"{h:02d}:{m:02d} UTC"
+    label = "New York" if tz == "America/New_York" else tz
+    time_s = f"{h:02d}:{m:02d} {label}"
     if dom == "*" and mon == "*" and dow == "*":
         return f"daily at {time_s}"
     if dom == "*" and mon == "*" and dow.upper() in _CRON_DOW_NAMES:
@@ -384,7 +445,7 @@ class Runner:
         if guards_enabled():
             self._scheduler.add_job(
                 self._run_guards_async,
-                CronTrigger(day_of_week="mon-fri", hour="13-20", minute="5-59/15", timezone="UTC"),
+                _nyse_rth_every_15(5),
                 id="guards",
                 replace_existing=True,
                 max_instances=1,
@@ -751,6 +812,11 @@ class Runner:
             timezone=self.config.schedule_tz,
         )
         self._scheduler.add_job(self._run_cycle_async, trigger, id="cycle", replace_existing=True)
+        dst_warning = _cycle_dst_warning(self.config.schedule_cron, self.config.schedule_tz)
+        if dst_warning:
+            logger.bind(component="runner").warning(dst_warning)
+            with contextlib.suppress(Exception):
+                self.alerts.warning(f"🕰 {dst_warning}")
 
         # Off-cycle trigger watcher: polls state/trigger_now.flag every 30s
         # and fires a cycle when the operator (via /mode confirm or
@@ -845,7 +911,9 @@ class Runner:
             # can't see. Advisory only — debounced like the others.
             self._scheduler.add_job(
                 self._run_options_monitor_async,
-                CronTrigger(hour="15,19", minute=45, timezone="UTC"),
+                CronTrigger(
+                    day_of_week="mon-fri", hour="11,15", minute=45, timezone="America/New_York"
+                ),
                 id="options_monitor",
                 replace_existing=True,
             )
@@ -876,13 +944,15 @@ class Runner:
                     id="econ_watch",
                     replace_existing=True,
                 )
-                # News watch: feeds the daily scout dashboard. 13:40 UTC
-                # weekdays — fresh headlines + sector momentum. The on-demand
+                # News watch: feeds the daily scout dashboard. 09:40 New
+                # York weekdays — fresh headlines + sector momentum. The on-demand
                 # /committee path refreshes this again before it debates.
                 # Pure RSS/yfinance; failures degrade, not break.
                 self._scheduler.add_job(
                     self._run_news_watch_async,
-                    CronTrigger(day_of_week="mon-fri", hour=13, minute=40, timezone="UTC"),
+                    CronTrigger(
+                        day_of_week="mon-fri", hour=9, minute=40, timezone="America/New_York"
+                    ),
                     id="news_watch",
                     replace_existing=True,
                 )
@@ -944,14 +1014,13 @@ class Runner:
                     id="agent_pm_mark",
                     replace_existing=True,
                 )
-                # Sentinel: intraday tripwires every 15 min during US RTH.
-                # 13:30-20:00 UTC covers 9:30-16:00 ET in summer (shifts an
-                # hour in winter — acceptable for a tripwire). Mechanical
-                # checks are free; the LLM runs only when a wire trips.
+                # Sentinel: intraday tripwires every 15 min during US RTH,
+                # New York wall time in both DST seasons. Mechanical checks
+                # are free; the LLM runs only when a wire trips.
                 # INFORMATION ONLY — it alerts, it never convenes the committee.
                 self._scheduler.add_job(
                     self._run_sentinel_async,
-                    CronTrigger(day_of_week="mon-fri", hour="13-20", minute="*/15", timezone="UTC"),
+                    _nyse_rth_every_15(0),
                     id="sentinel",
                     replace_existing=True,
                     max_instances=1,
@@ -979,13 +1048,13 @@ class Runner:
                 id="daily_summary",
                 replace_existing=True,
             )
-            # Macro financial-conditions monitor: daily 13:30 UTC
-            # (pre-US-open, after Europe has priced overnight macro).
+            # Macro financial-conditions monitor: weekdays 09:30 New York
+            # (the open, after Europe has priced overnight macro).
             # Rates/dollar/energy/BTC z-score dial from the 2018-2026
             # lead-lag study (docs/research_macro_leadlag.md). Advisory.
             self._scheduler.add_job(
                 self._run_macro_monitor_async,
-                CronTrigger(hour=13, minute=30, timezone="UTC"),
+                CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone="America/New_York"),
                 id="macro_monitor",
                 replace_existing=True,
             )
@@ -1195,7 +1264,7 @@ class Runner:
             "🤖 Runner online",
             f"  Strategy:    {strat_line}",
             f"  Universe:    {cfg.universe.upper()}",
-            f"  Rebalance:   {_humanize_cron(cfg.schedule_cron)}",
+            f"  Rebalance:   {_humanize_cron(cfg.schedule_cron, cfg.schedule_tz)}",
             f"  Next run:    {next_run_s}",
         ]
         if cfg.vol_target is not None:
