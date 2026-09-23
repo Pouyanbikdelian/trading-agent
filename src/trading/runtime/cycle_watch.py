@@ -20,9 +20,12 @@ every cycle (scheduled, ``/cycle``, ``/review``) writes exactly once:
   reason. Weaker than "stuck" — a momentum book can legitimately hold — so
   it is a warning with a larger N.
 
-Each finding carries a dedupe key tied to the streak's first cycle (or the
-missed fire time), persisted in ``cycle_watch.json``, so an hourly watchdog
-alerts once per incident rather than once per hour.
+Each finding carries a dedupe key persisted in ``cycle_watch.json``, so an
+hourly watchdog alerts once per incident rather than once per hour. A
+streak is keyed on the last HEALTHY cycle before it (its anchor), which
+does not move as the streak grows; keying on the streak's oldest visible
+row re-alerted every cycle once the streak outgrew the read window. A
+stuck desk implies no trades, so the weaker warning is suppressed then.
 """
 
 from __future__ import annotations
@@ -105,34 +108,43 @@ def check_missed_cycle(
         level="critical",
         message=(
             f"⏰ *Missed cycle.* The cycle scheduled for {fire:%a %Y-%m-%d %H:%M %Z} "
-            f"has no record {grace.total_seconds() / 3600:.0f}h later. The runner, "
-            "scheduler or VPS was not running it. Check `/health`; `/cycle` runs "
-            "one now if appropriate."
+            f"has no record {grace.total_seconds() / 3600:.0f}h later: the runner "
+            "was down, the scheduler did not fire, or the cycle died before it "
+            "could record itself. Check `/health`; `/cycle` runs one now if "
+            "appropriate."
         ),
     )
 
 
 def _streak(
     rows: Sequence[Mapping[str, object]], pred: Callable[[Mapping[str, object]], bool]
-) -> list[Mapping[str, object]]:
+) -> tuple[list[Mapping[str, object]], str]:
+    """The newest-first run matching ``pred``, and a stable incident anchor.
+
+    The anchor is the first row that breaks the run (the last healthy
+    cycle). If the run fills the whole window there is none in view; the
+    constant "window" is used, which changes the key at most once.
+    """
     out: list[Mapping[str, object]] = []
+    anchor = "window"
     for row in rows:  # newest first
         if not pred(row):
+            anchor = _ts(row).isoformat()
             break
         out.append(row)
-    return out
+    return out, anchor
 
 
 def check_stuck_desk(
     cycles: Sequence[Mapping[str, object]], *, streak: int = DEFAULT_STUCK_STREAK
 ) -> CycleWatchFinding | None:
-    run = _streak(cycles, lambda c: str(c.get("status")) in STUCK_STATUSES)
+    run, anchor = _streak(cycles, lambda c: str(c.get("status")) in STUCK_STATUSES)
     if len(run) < streak:
         return None
     first = run[-1]
     statuses = ", ".join(sorted({str(c.get("status")) for c in run}))
     return CycleWatchFinding(
-        key=f"stuck:{_ts(first).isoformat()}",
+        key=f"stuck:{anchor}",
         level="critical",
         message=(
             f"🧱 *Desk cannot trade.* The last {len(run)} cycles all ended "
@@ -150,12 +162,12 @@ def _orders(row: Mapping[str, object]) -> int:
 def check_no_trades(
     cycles: Sequence[Mapping[str, object]], *, streak: int = DEFAULT_NO_TRADE_STREAK
 ) -> CycleWatchFinding | None:
-    run = _streak(cycles, lambda c: _orders(c) == 0)
+    run, anchor = _streak(cycles, lambda c: _orders(c) == 0)
     if len(run) < streak:
         return None
     first = run[-1]
     return CycleWatchFinding(
-        key=f"notrade:{_ts(first).isoformat()}",
+        key=f"notrade:{anchor}",
         level="warning",
         message=(
             f"💤 *No trades in {len(run)} cycles* (since {_ts(first):%Y-%m-%d}). "
@@ -177,10 +189,11 @@ def evaluate(
 ) -> list[CycleWatchFinding]:
     """All current findings, most severe first. ``cycles`` is newest first."""
     ordered = sorted(cycles, key=_ts, reverse=True)
+    stuck = check_stuck_desk(ordered, streak=stuck_streak)
     found = [
         check_missed_cycle(ordered, cron=cron, tz=tz, now=now, grace=grace),
-        check_stuck_desk(ordered, streak=stuck_streak),
-        check_no_trades(ordered, streak=no_trade_streak),
+        stuck,
+        None if stuck is not None else check_no_trades(ordered, streak=no_trade_streak),
     ]
     return [f for f in found if f is not None]
 

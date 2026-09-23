@@ -28,6 +28,7 @@ whose outcome is unknown stays a human decision (``/orders resolve``).
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -50,6 +51,7 @@ class ReconcileReport:
     filled_without_executions: list[str] = field(default_factory=list)
     unseen_open: list[str] = field(default_factory=list)
     unmatched_executions: int = 0
+    ambiguous: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
 
     @property
@@ -58,7 +60,7 @@ class ReconcileReport:
 
     @property
     def needs_attention(self) -> bool:
-        return bool(self.filled_without_executions or self.unseen_open)
+        return bool(self.filled_without_executions or self.unseen_open or self.ambiguous)
 
     def summary(self) -> str:
         lines = ["🧾 *Broker reconciliation*"]
@@ -80,6 +82,11 @@ class ReconcileReport:
                 + ", ".join(f"`{c}`" for c in self.unseen_open)
                 + ". `/orders resolve` retires them once you have checked."
             )
+        if self.ambiguous:
+            lines.append(
+                "⚠️ several broker orders share one id; left untouched: "
+                + ", ".join(f"`{c}`" for c in self.ambiguous)
+            )
         if len(lines) == 1:
             lines.append("ledger already agrees with the broker")
         return "\n".join(lines)
@@ -92,13 +99,29 @@ def _call_optional(broker: Any, name: str, *args: Any, **kwargs: Any) -> tuple[b
     return True, fn(*args, **kwargs)
 
 
+def _filled_locally(store: OrderStore, coid: str) -> float:
+    return float(sum(f.quantity for f in store.load_fills(client_order_id=coid)))
+
+
 def reconcile_with_broker(
-    store: OrderStore, broker: Any, *, now: datetime, lookback: timedelta = MAX_LOOKBACK
+    store: OrderStore,
+    broker: Any,
+    *,
+    now: datetime,
+    lookback: timedelta = MAX_LOOKBACK,
+    apply_lock: Callable[[], AbstractContextManager[Any]] = nullcontext,
 ) -> ReconcileReport:
     """One read-only reconciliation pass. Broker read errors propagate.
 
-    A failed read must fail the pass loudly rather than settle the ledger
-    from a partial view of the broker.
+    All broker reads happen first, outside ``apply_lock``; only the ledger
+    writes run inside it. The runner passes the execution lock, so a manual
+    /close is never kept waiting behind a slow gateway. Nothing a concurrent
+    submission creates can be mis-settled: fills are applied only to orders
+    that were open before the reads, and a cancel only on broker evidence
+    naming that exact order.
+
+    A failed read fails the pass loudly rather than settle the ledger from
+    a partial view of the broker.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
@@ -111,37 +134,67 @@ def reconcile_with_broker(
     oldest = min(order.created_at for order in open_by_id.values())
     since = max(oldest - timedelta(minutes=5), now - lookback)
 
+    # ---- reads (no lock)
     has_exec, fills = _call_optional(broker, "get_executions", since=since)
     if has_exec:
         report.sources.append("executions")
     else:
         fills = broker.get_fills(since=since)
         report.sources.append("session_fills")
+    has_completed, completed = _call_optional(broker, "get_completed_orders")
+    completed_by_id: dict[str, BrokerOrderReport] = {}
+    duplicated: set[str] = set()
+    if has_completed:
+        report.sources.append("completed_orders")
+        for rep in completed or []:
+            if not isinstance(rep, BrokerOrderReport):
+                continue
+            if rep.client_order_id in completed_by_id:
+                duplicated.add(rep.client_order_id)
+            completed_by_id[rep.client_order_id] = rep
+    for coid in duplicated:
+        completed_by_id.pop(coid, None)
+    report.ambiguous = sorted(duplicated & set(open_by_id))
+    working_ids = {str(o.client_order_id) for o in (broker.get_open_orders() or [])}
 
+    # ---- writes (under the lock)
+    with apply_lock():
+        _apply(store, report, open_by_id, fills or [], completed_by_id, working_ids, has_completed)
+
+    logger.bind(component="broker_reconcile").info(
+        f"reconciled: fills={report.fills_recorded} settled={len(report.settled)} "
+        f"cancelled={len(report.cancelled)} unseen={len(report.unseen_open)} "
+        f"filled_without_exec={len(report.filled_without_executions)} "
+        f"ambiguous={len(report.ambiguous)} sources={report.sources}"
+    )
+    return report
+
+
+def _apply(
+    store: OrderStore,
+    report: ReconcileReport,
+    open_by_id: dict[str, Any],
+    fills: list[Any],
+    completed_by_id: dict[str, BrokerOrderReport],
+    working_ids: set[str],
+    has_completed: bool,
+) -> None:
     touched: set[str] = set()
-    for fill in fills or []:
+    for fill in fills:
         if not isinstance(fill, Fill):
             continue
         if fill.order_id not in open_by_id:
             report.unmatched_executions += 1
             continue
+        before = len(store.load_fills(client_order_id=fill.order_id))
         store.save_fill(fill, client_order_id=fill.order_id)
-        report.fills_recorded += 1
-        touched.add(fill.order_id)
+        if len(store.load_fills(client_order_id=fill.order_id)) > before:
+            report.fills_recorded += 1  # new executions only, not re-reads
+            touched.add(fill.order_id)
     for coid in sorted(touched):
         status = store.settle_status(coid)
         if status is not None:
             report.settled[coid] = status.value
-
-    has_completed, completed = _call_optional(broker, "get_completed_orders")
-    completed_by_id: dict[str, BrokerOrderReport] = {}
-    if has_completed:
-        report.sources.append("completed_orders")
-        for rep in completed or []:
-            if isinstance(rep, BrokerOrderReport):
-                completed_by_id[rep.client_order_id] = rep
-
-    working_ids = {str(o.client_order_id) for o in (broker.get_open_orders() or [])}
 
     still_open = {order.client_order_id for order, _s, _b in store.open_orders()}
     for coid in sorted(open_by_id):
@@ -151,7 +204,14 @@ def reconcile_with_broker(
             report.broker_ids_recorded += 1
         if coid not in still_open:
             continue  # settled by fills above
+        if coid in report.ambiguous:
+            continue
         if rep is not None and rep.is_cancelled:
+            if rep.filled_quantity > _filled_locally(store, coid) + 1e-6:
+                # Partly executed before the cancel, and those executions
+                # are no longer visible: cancelling would hide real shares.
+                report.filled_without_executions.append(coid)
+                continue
             store.update_status(coid, OrderStatus.CANCELLED)
             report.cancelled.append(coid)
             report.settled.pop(coid, None)
@@ -161,11 +221,3 @@ def reconcile_with_broker(
             continue
         if coid not in working_ids and has_completed and rep is None:
             report.unseen_open.append(coid)
-
-    logger.bind(component="broker_reconcile").info(
-        f"reconciled: fills={report.fills_recorded} settled={len(report.settled)} "
-        f"cancelled={len(report.cancelled)} unseen={len(report.unseen_open)} "
-        f"filled_without_exec={len(report.filled_without_executions)} "
-        f"sources={report.sources}"
-    )
-    return report

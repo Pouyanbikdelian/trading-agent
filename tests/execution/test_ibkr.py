@@ -571,7 +571,9 @@ def _order_for(instrument: Instrument) -> Order:
         ("paper", ["DU1234567"], 4002, True),
         ("paper", ["U1234567"], 4002, False),  # paper process on a REAL account
         ("paper", [], 4002, False),  # unknown account -> refuse
-        ("research", ["U1234567"], 4002, True),  # research makes no claim
+        ("research", ["DU1234567"], 4002, True),  # research on paper is fine
+        ("research", ["U1234567"], 4002, False),  # a real account needs arming, any env
+        ("live-unarmed", ["U1234567"], 4003, False),  # remapped port, not armed
     ],
 )
 def test_account_kind_must_match_trading_env(
@@ -586,7 +588,7 @@ def test_account_kind_must_match_trading_env(
             ibkr_host="x",
             ibkr_port=port,
             ibkr_client_id=17,
-            trading_env=env,
+            trading_env="live" if env == "live-unarmed" else env,
             is_live_armed=lambda: env == "live",
         ),
     )

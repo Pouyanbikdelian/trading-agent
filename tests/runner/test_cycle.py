@@ -689,3 +689,20 @@ def test_unreadable_book_before_approval_refuses_the_cycle(
     report = cycle.run_cycle()
 
     assert report.status == "error" and submissions == []
+
+
+def test_hold_toggled_during_approval_wait_submits_nothing(
+    tiny_universe_yaml, primed_cache, tmp_state, monkeypatch
+) -> None:
+    cycle, _broker, submissions, critical = _approval_cycle(
+        tiny_universe_yaml, primed_cache, tmp_state, monkeypatch
+    )
+
+    def approve_after_a_hold(orders, *_a, **_k):
+        (tmp_state / "holds.json").write_text('{"TEST_A": {"reason": "mine"}}')
+        return orders
+
+    monkeypatch.setattr(cycle, "_request_cycle_approval", approve_after_a_hold)
+    report = cycle.run_cycle()
+    assert submissions == [] and report.orders_submitted == 0
+    assert any("hold list changed" in msg for msg in critical)

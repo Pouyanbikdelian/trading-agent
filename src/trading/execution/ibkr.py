@@ -126,11 +126,13 @@ class IbkrBroker(Broker):
         check green. IBKR's own account id is unambiguous: paper accounts
         start with "D" (DU…, DF…), real ones do not. Checked on every
         submission, like the arming check; reads (the live mirror) are
-        unaffected. Research mode makes no claim either way.
+        unaffected.
+
+        Keyed on the account, not the environment label: a real account
+        requires ``is_live_armed()`` whatever TRADING_ENV or the port says,
+        so research or unarmed-live on a remapped port cannot trade it.
         """
         env = str(getattr(settings, "trading_env", "research"))
-        if env not in {"live", "paper"}:
-            return
         accounts_fn = getattr(self._ib, "managedAccounts", None)
         try:
             accounts = [str(a).strip() for a in (accounts_fn() if callable(accounts_fn) else [])]
@@ -140,16 +142,23 @@ class IbkrBroker(Broker):
             ) from e
         accounts = [a for a in accounts if a]
         if not accounts:
-            raise BrokerError("IBKR reported no account id; refusing to submit")
+            # A real gateway always reports its accounts. Only offline test
+            # doubles lack them; outside live/paper and off the live ports
+            # there is nothing to protect.
+            if env in {"live", "paper"} or self._is_live_port():
+                raise BrokerError("IBKR reported no account id; refusing to submit")
+            return
         paper = [a for a in accounts if a.upper().startswith("D")]
+        real = sorted(set(accounts) - set(paper))
+        armed = getattr(settings, "is_live_armed", None)
+        if real and not (callable(armed) and armed()):
+            raise BrokerError(
+                f"connected to REAL account(s) {real} but live trading is not armed "
+                f"(TRADING_ENV={env}); refusing to submit"
+            )
         if env == "live" and paper:
             raise BrokerError(
                 f"TRADING_ENV=live but connected to paper account(s) {paper}; refusing to submit"
-            )
-        if env == "paper" and len(paper) != len(accounts):
-            real = sorted(set(accounts) - set(paper))
-            raise BrokerError(
-                f"TRADING_ENV=paper but connected to REAL account(s) {real}; refusing to submit"
             )
 
     # --------------------------------------------------------- lifecycle
@@ -1161,10 +1170,20 @@ class IbkrBroker(Broker):
                 getattr(getattr(trade, "orderState", None), "status", "") or ""
             )
             perm = getattr(order, "permId", None)
-            try:
-                filled = float(getattr(status_obj, "filled", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                filled = 0.0
+            # ib-async builds a completed order's OrderStatus from the status
+            # string alone, so orderStatus.filled is 0 in production; the
+            # executed size lives on the Order (filledQuantity).
+            filled = 0.0
+            for raw_qty in (
+                getattr(status_obj, "filled", None),
+                getattr(order, "filledQuantity", None),
+            ):
+                try:
+                    q = float(raw_qty or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if q < 1e300:  # ib-async uses UNSET_DOUBLE (1.7976931348623157e308)
+                    filled = max(filled, q)
             out.append(
                 BrokerOrderReport(
                     client_order_id=ref,

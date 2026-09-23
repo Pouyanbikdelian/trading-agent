@@ -296,10 +296,14 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         _s = get_settings()
         out["env"] = getattr(_s, "trading_env", "") or ""
         out["cycle_cron"] = os.getenv("CRON", "") or getattr(_s, "schedule_cron", "") or ""
+        # The cron's own timezone. Since 2026-09-23 the live cycle is
+        # expressed in New York time; parsing it as UTC showed it 4-5h early.
+        out["cycle_tz"] = os.getenv("SCHEDULE_TZ", "") or "UTC"
         out["pm_pre_cycle_lead_minutes"] = _s.pm_pre_cycle_lead_minutes
     except Exception:
         out["env"] = ""
         out["cycle_cron"] = ""
+        out["cycle_tz"] = "UTC"
         out["pm_pre_cycle_lead_minutes"] = 45
 
     # Memory vitals.
@@ -914,16 +918,19 @@ fetch('api/summary').then(r=>r.json()).then(d=>{
  const shift=(c,mins)=>{const t=c.h*60+c.m-mins; return t<0?null:{h:Math.floor(t/60),m:t%60,dow:c.dow};};
  const cyc=parseCron(d.cycle_cron);
  const envl=d.env||'paper';
+ const NYZ='America/New_York';
+ const cycTz=(d.cycle_tz&&d.cycle_tz!=='UTC')?d.cycle_tz:undefined;
  const jobs=[
- {n:'🏛 committee',dow:[1,2,3,4,5],h:14,m:0},
- {n:'📰 news watch',dow:[1,2,3,4,5],h:13,m:40},
- {n:'📊 PM daily mark',dow:[1,2,3,4,5],h:21,m:15},
- {n:'🎓 prediction grading',dow:[0,1,2,3,4,5,6],h:22,m:30},
-  {n:'📚 Learning Curator',dow:[2,5],h:19,m:0,tz:'America/New_York'}];
+ {n:'🏛 committee',dow:[1,5],h:13,m:0,tz:NYZ},
+ {n:'📰 news watch',dow:[1,2,3,4,5],h:9,m:40,tz:NYZ},
+ {n:'📊 PM daily mark',dow:[1,2,3,4,5],h:17,m:15,tz:NYZ},
+ {n:'🧾 broker reconciliation',dow:[1,2,3,4,5],h:16,m:30,tz:NYZ},
+ {n:'🎓 prediction grading',dow:[0,1,2,3,4,5,6],h:18,m:45,tz:NYZ},
+  {n:'📚 Learning Curator',dow:[5],h:19,m:0,tz:NYZ}];
  if(cyc){
   const pm=shift(cyc,Number(d.pm_pre_cycle_lead_minutes)||45);
-  if(pm) jobs.push({n:'🧪 PM rebalance',...pm});
-  jobs.push({n:'⚖️ rebalance ('+envl+')',...cyc});
+  if(pm) jobs.push({n:'🧪 PM rebalance',...pm,tz:cycTz});
+  jobs.push({n:'⚖️ rebalance ('+envl+')',...cyc,tz:cycTz});
  }
  const nowU=new Date();
  const zoneParts=(date,tz)=>{const out={};new Intl.DateTimeFormat('en-US',{timeZone:tz,weekday:'short',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric',hourCycle:'h23'}).formatToParts(date).forEach(p=>{out[p.type]=p.value;});return {y:+out.year,m:+out.month,d:+out.day,h:+out.hour,min:+out.minute,sec:+out.second,weekday:out.weekday};};

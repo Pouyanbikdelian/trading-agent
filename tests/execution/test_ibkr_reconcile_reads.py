@@ -104,3 +104,21 @@ def test_disconnected_client_is_refused_not_reconnected(monkeypatch) -> None:
     with pytest.raises(NotConnectedError):
         broker.get_completed_orders()
     assert ib.calls == []
+
+
+def test_completed_filled_quantity_comes_from_the_order(monkeypatch) -> None:
+    """ib-async's completed-order status carries no fill size; the Order does."""
+    trades = [
+        SimpleNamespace(
+            order=SimpleNamespace(orderRef="cyc-2", permId=11, filledQuantity=4.0),
+            orderStatus=SimpleNamespace(status="Cancelled", filled=0.0),
+        ),
+        SimpleNamespace(
+            order=SimpleNamespace(
+                orderRef="cyc-3", permId=12, filledQuantity=1.7976931348623157e308
+            ),
+            orderStatus=SimpleNamespace(status="Cancelled", filled=0.0),
+        ),
+    ]
+    reports = _broker(_Ib(completed=trades), monkeypatch).get_completed_orders()
+    assert [r.filled_quantity for r in reports] == [4.0, 0.0]  # UNSET_DOUBLE ignored

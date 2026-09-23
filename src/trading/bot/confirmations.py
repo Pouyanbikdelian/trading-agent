@@ -96,8 +96,21 @@ def stage(
     return staged
 
 
-def peek(state_dir: Path) -> StagedCommand | None:
-    """The staged command, or None if nothing (readable) is staged."""
+def peek(
+    state_dir: Path, *, now: datetime | None = None, include_expired: bool = False
+) -> StagedCommand | None:
+    """The staged command, or None if nothing (readable, unexpired) is staged.
+
+    An expired entry is treated as empty: a two-day-old /flatten must not
+    keep blocking a mode confirmation or capture the next /cancel.
+    """
+    staged = _read(state_dir)
+    if staged is None or include_expired:
+        return staged
+    return None if staged.expired(_now(now)) else staged
+
+
+def _read(state_dir: Path) -> StagedCommand | None:
     try:
         raw = json.loads(_path(state_dir).read_text())
         staged_at = datetime.fromisoformat(str(raw["staged_at"]))
@@ -123,6 +136,14 @@ def discard(state_dir: Path) -> StagedCommand | None:
     return staged
 
 
+def discard_if_token(state_dir: Path, token: str) -> StagedCommand | None:
+    """Discard only if ``token`` names the staged command (buttons)."""
+    staged = peek(state_dir)
+    if staged is None or staged.token != token.strip().upper():
+        return None
+    return discard(state_dir)
+
+
 def take(state_dir: Path, token: str | None, *, now: datetime | None = None) -> StagedCommand | str:
     """Consume the staged command if ``token`` matches and it is fresh.
 
@@ -130,7 +151,7 @@ def take(state_dir: Path, token: str | None, *, now: datetime | None = None) -> 
     on success and on expiry, never on a token mismatch — a stale button
     must not cancel the request that replaced it.
     """
-    staged = peek(state_dir)
+    staged = peek(state_dir, include_expired=True)
     if staged is None:
         return "nothing is waiting for confirmation."
     if token is None or token.strip().upper() != staged.token:

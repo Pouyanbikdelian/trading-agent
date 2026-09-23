@@ -235,3 +235,56 @@ def test_runner_job_alerts_on_change_and_debounces_repeat_gaps(tmp_path: Path, m
 
     assert [level for level, _ in sent] == ["warning"]
     assert "stale" in sent[0][1]
+
+
+def test_partly_filled_then_cancelled_without_visible_fills_is_flagged(store: OrderStore) -> None:
+    """ib-async reports the executed size on the Order; cancelling would hide shares."""
+    broker = _CompletedBroker(
+        completed=[BrokerOrderReport(client_order_id="a", status="Cancelled", filled_quantity=4)],
+        working=[_order("b"), _order("c"), _order("d")],
+    )
+    report = reconcile_with_broker(store, broker, now=NOW)
+    assert report.filled_without_executions == ["a"]
+    assert _status(store, "a") == OrderStatus.SUBMITTED
+
+
+def test_duplicate_broker_ids_are_left_untouched(store: OrderStore) -> None:
+    broker = _CompletedBroker(
+        completed=[
+            BrokerOrderReport(client_order_id="b", status="Cancelled"),
+            BrokerOrderReport(client_order_id="b", status="Filled", filled_quantity=10),
+        ],
+        working=[_order("a"), _order("c"), _order("d")],
+    )
+    report = reconcile_with_broker(store, broker, now=NOW)
+    assert report.ambiguous == ["b"] and _status(store, "b") == OrderStatus.SUBMITTED
+    assert report.needs_attention
+
+
+def test_re_read_executions_are_not_news(store: OrderStore) -> None:
+    broker = _CompletedBroker(executions=[_fill("a", 4, "e1")], completed=[], working=[])
+    first = reconcile_with_broker(store, broker, now=NOW)
+    second = reconcile_with_broker(store, broker, now=NOW)
+    assert first.fills_recorded == 1 and first.changed
+    assert second.fills_recorded == 0 and not second.changed
+
+
+def test_writes_happen_under_the_lock_and_reads_before_it(store: OrderStore) -> None:
+    events: list[str] = []
+
+    class _Tracking(_CompletedBroker):
+        def get_executions(self, *, since=None):
+            events.append("read")
+            return [_fill("a", 10, "e1")]
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def lock():
+        events.append("lock")
+        yield
+        events.append("unlock")
+
+    reconcile_with_broker(store, _Tracking(completed=[], working=[]), now=NOW, apply_lock=lock)
+    assert events == ["read", "lock", "unlock"]
+    assert _status(store, "a") == OrderStatus.FILLED

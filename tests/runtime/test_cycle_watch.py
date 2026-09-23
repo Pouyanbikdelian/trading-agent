@@ -76,9 +76,10 @@ def test_findings_alert_once_per_incident(tmp_path: Path) -> None:
     t = datetime(2026, 9, 25, 21, 5, tzinfo=UTC)
     rows = [_row(t - timedelta(days=7 * i), "halted", 0) for i in range(4)]
     findings = cw.evaluate(rows, cron=CRON, tz=NY, now=t + timedelta(minutes=30))
-    assert {f.key.split(":")[0] for f in findings} == {"stuck", "notrade"}
+    # A stuck desk implies no trades; only the stronger finding is raised.
+    assert {f.key.split(":")[0] for f in findings} == {"stuck"}
 
-    assert len(cw.unalerted(tmp_path, findings)) == 2
+    assert len(cw.unalerted(tmp_path, findings)) == 1
     assert cw.unalerted(tmp_path, findings) == []
 
     # A new streak (a fresh first cycle) is a new incident.
@@ -97,3 +98,49 @@ def test_corrupt_state_re_alerts_rather_than_silences(tmp_path: Path) -> None:
 def test_rows_must_be_timezone_aware() -> None:
     with pytest.raises(ValueError):
         cw.check_stuck_desk([{"ts": datetime(2026, 9, 25), "status": "halted"}] * 2)
+
+
+def test_a_growing_streak_keeps_one_key(tmp_path: Path) -> None:
+    """Keyed on the last healthy cycle, so each new stuck cycle is not news."""
+    t = datetime(2026, 9, 25, 21, 5, tzinfo=UTC)
+    healthy = _row(t - timedelta(days=70), "ok", 5)
+    week = [_row(t - timedelta(days=7 * i), "halted", 0) for i in range(3)]
+    later = [_row(t + timedelta(days=7), "halted", 0), *week]
+    k1 = cw.check_stuck_desk([*week, healthy])
+    k2 = cw.check_stuck_desk([*later, healthy])
+    assert k1 is not None and k2 is not None and k1.key == k2.key
+
+
+def test_no_trade_warning_still_fires_without_a_stuck_desk() -> None:
+    t = datetime(2026, 9, 25, 21, 5, tzinfo=UTC)
+    rows = [_row(t - timedelta(days=7 * i), "no_orders", 0) for i in range(4)]
+    found = cw.evaluate(rows, cron=CRON, tz=NY, now=t + timedelta(minutes=30))
+    assert [f.key.split(":")[0] for f in found] == ["notrade"]
+
+
+def test_stale_liveness_alerts_once_per_outage(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import os
+    import time
+    from types import SimpleNamespace
+
+    import trading.runner.runner as runner_module
+    from trading.runner.runner import Runner
+
+    monkeypatch.setattr(runner_module, "settings", SimpleNamespace(state_dir=tmp_path))
+    hb = tmp_path / "heartbeat.json"
+    hb.write_text("{}")
+    old = time.time() - 30 * 3600
+    os.utime(hb, (old, old))
+    sent: list[str] = []
+    fake = SimpleNamespace(
+        HEARTBEAT_WATCHDOG_HOURS=25.0,
+        _last_success_ts=None,
+        alerts=SimpleNamespace(warning=sent.append, critical=sent.append),
+        cycle=SimpleNamespace(runner_store=SimpleNamespace(recent_cycles=lambda limit: [])),
+        config=SimpleNamespace(schedule_cron="5 17 * * FRI", schedule_tz="America/New_York"),
+    )
+    for _ in range(3):
+        asyncio.run(Runner._watchdog(fake))  # type: ignore[arg-type]
+    liveness = [m for m in sent if "broker snapshot" in m]
+    assert len(liveness) == 1

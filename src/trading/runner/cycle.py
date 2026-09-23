@@ -119,6 +119,7 @@ class _BookFingerprint:
 
     positions: tuple[tuple[str, float], ...]
     working: tuple[tuple[str, str, float], ...]
+    holds: str = ""
 
 
 @dataclass(frozen=True)
@@ -1422,11 +1423,20 @@ class Cycle:
         return self._finish_cycle(ts_start, decisions, orders_submitted, fills)
 
     def _book_fingerprint(self) -> _BookFingerprint:
-        """Positions and working orders exactly as the broker reports them.
+        """Positions and working orders as the broker reports them, plus holds.
 
-        Raw broker positions, not the managed view: a /hold toggled during
-        the wait changes what the basket should be, and must count too.
+        Raw broker positions, so the comparison does not depend on the
+        managed view. ``holds.json`` is hashed in as well: the basket was
+        filtered through the hold list at planning time, so a /hold toggled
+        during the wait also invalidates it. Read after sizing, so it
+        guards the approval wait (minutes), not the seconds of planning.
         """
+        import hashlib
+
+        try:
+            holds_raw = (self._state_dir() / "holds.json").read_bytes()
+        except OSError:
+            holds_raw = b""
         positions = tuple(
             sorted(
                 (p.instrument.symbol.upper(), round(float(p.quantity), 6))
@@ -1440,7 +1450,11 @@ class Cycle:
                 for o in (self.broker.get_open_orders() or [])
             )
         )
-        return _BookFingerprint(positions=positions, working=working)
+        return _BookFingerprint(
+            positions=positions,
+            working=working,
+            holds=hashlib.sha256(holds_raw).hexdigest()[:16],
+        )
 
     def _book_changed_reason(self, before: _BookFingerprint) -> str | None:
         """Why the book no longer matches ``before``, or None if it does.
@@ -1469,6 +1483,8 @@ class Cycle:
             parts.append("positions: " + ", ".join(moved))
         if before.working != now.working:
             parts.append("working orders changed")
+        if before.holds != now.holds:
+            parts.append("hold list changed")
         return "; ".join(parts) or "book changed"
 
     def _submit_and_reconcile(

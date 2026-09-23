@@ -483,7 +483,8 @@ def config_now(state_dir: Path) -> dict[str, Any]:
     }
 
     out["schedule"] = {
-        "cycle_cron_utc": _os.getenv("CRON", "(compose default)"),
+        "cycle_cron": _os.getenv("CRON", "(compose default)"),
+        "cycle_cron_timezone": _os.getenv("SCHEDULE_TZ", "UTC"),
         "agent_pm_runs": "45 minutes before the cycle, derived from the same cron",
         "broker_readiness_check": "1 hour before the cycle",
         "_all_jobs_live_in_the_runner": (

@@ -205,14 +205,23 @@ def _cycle_dst_warning(cron: str, tz: str) -> str | None:
     final. The TODO asked someone to remember to edit .env twice a year.
     Anchoring the cron in New York time removes the chore.
     """
-    if tz == NYSE_TZ:
-        return None
     parts = cron.split()
     if len(parts) != 5:
         return None
     try:
         hour = int(parts[1])
     except ValueError:
+        return None
+    if tz == NYSE_TZ:
+        # The opposite migration mistake: SCHEDULE_TZ switched to New York
+        # while CRON still holds the old UTC hour (5 21 -> 21:05 New York,
+        # i.e. Saturday 01:05 UTC).
+        if not 16 <= hour <= 20:
+            return (
+                f"cycle cron {cron!r} runs at {hour:02d}:xx New York, outside the "
+                "16:00-20:59 post-close window. If CRON still holds a UTC hour, "
+                "convert it (e.g. '5 21' UTC -> '5 17' New York)."
+            )
         return None
     if tz.upper() in {"UTC", "ETC/UTC", "GMT"} and 12 <= hour <= 23:
         return (
@@ -1682,17 +1691,28 @@ class Runner:
             else:
                 age_s = None  # bootstrapping — no heartbeat yet
             if age_s is not None and age_s > self.HEARTBEAT_WATCHDOG_HOURS * 3600.0:
-                self.alerts.warning(
-                    f"⏰ Watchdog: no successful broker snapshot in {age_s / 3600:.1f}h. "
-                    "Check `/health` and the gateway."
+                from trading.runtime import cycle_watch as _cw
+
+                # Once per stale episode (keyed on the last good heartbeat),
+                # not once per hourly poll for a whole outage weekend.
+                last_good = int(now.timestamp() - age_s)
+                stale = _cw.CycleWatchFinding(
+                    key=f"liveness:{last_good}",
+                    level="warning",
+                    message=(
+                        f"⏰ Watchdog: no successful broker snapshot in {age_s / 3600:.1f}h. "
+                        "Check `/health` and the gateway."
+                    ),
                 )
+                for finding in _cw.unalerted(settings.state_dir, [stale]):
+                    self.alerts.warning(finding.message)
         except Exception:
             logger.bind(component="runner").exception("watchdog liveness poll failed")
 
         try:
             from trading.runtime import cycle_watch
 
-            cycles = self.cycle.runner_store.recent_cycles(limit=20)
+            cycles = self.cycle.runner_store.recent_cycles(limit=200)
             findings = cycle_watch.evaluate(
                 cycles,
                 cron=self.config.schedule_cron,
@@ -1713,15 +1733,20 @@ class Runner:
         from trading.core.exec_lock import ExecutionBusyError, execution_lock
         from trading.runtime.broker_reconcile import reconcile_with_broker
 
-        # The execution lock keeps this pass from interleaving with a cycle
-        # or a manual command that is mid-submission (a PENDING row whose
-        # broker answer has not been recorded yet). Busy means skip: the
-        # next weekday pass catches up, and the cycle reconciles itself.
+        # The execution lock keeps the ledger WRITES from interleaving with a
+        # cycle or manual command that is mid-submission. The broker reads
+        # happen before it is taken, so a manual /close is never kept waiting
+        # behind a slow gateway. Busy means skip: the next weekday pass
+        # catches up, and the cycle reconciles itself.
         try:
-            with execution_lock(settings.state_dir, holder="broker_reconcile", timeout=5.0):
-                report = reconcile_with_broker(
-                    self.cycle.order_store, self.broker, now=datetime.now(tz=timezone.utc)
-                )
+            report = reconcile_with_broker(
+                self.cycle.order_store,
+                self.broker,
+                now=datetime.now(tz=timezone.utc),
+                apply_lock=lambda: execution_lock(
+                    settings.state_dir, holder="broker_reconcile", timeout=5.0
+                ),
+            )
         except ExecutionBusyError:
             logger.bind(component="broker_reconcile").info("skipped: execution lock busy")
             return
@@ -1740,9 +1765,14 @@ class Runner:
                 self.alerts.warning(report.summary())
             elif report.changed:
                 self.alerts.info(report.summary())
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"attention": attention}))
-        os.replace(tmp, path)
+        try:
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"attention": attention}))
+            os.replace(tmp, path)
+        except OSError:
+            # The pass itself succeeded; losing the debounce only means one
+            # repeated message tomorrow.
+            logger.bind(component="broker_reconcile").exception("could not save debounce state")
 
     async def _run_broker_reconcile_async(self) -> None:
         try:

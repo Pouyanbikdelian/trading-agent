@@ -166,18 +166,117 @@ def test_cancel_discards_the_staged_command(bot: Path) -> None:
     assert "cancelled" in out and cf.peek(bot) is None
 
 
-def test_bare_confirm_refuses_to_guess_between_mode_and_command(bot: Path) -> None:
+def test_bare_confirm_means_the_mode_never_the_staged_order(bot: Path) -> None:
     tg._cmd_mode(["defense"])
     tg._cmd_flatten()
     out = tg._cmd_confirm([])
-    assert "two things are waiting" in out
+    assert "DEFENSE" in out
+    assert [c["type"] for c in _pending_commands(bot)] == []  # flatten NOT queued
+    assert cf.peek(bot) is not None  # and still waiting for its own token
+
+
+def test_bare_confirm_with_only_a_command_asks_for_its_token(bot: Path) -> None:
+    tg._cmd_flatten()
+    out = tg._cmd_confirm([])
+    assert "needs its token" in out
     assert _pending_commands(bot) == []
 
 
-def test_bare_confirm_with_only_a_command_confirms_it(bot: Path) -> None:
+def test_mode_cancel_button_leaves_a_staged_order_alone(bot: Path) -> None:
     tg._cmd_flatten()
-    tg._cmd_confirm([])
-    assert [c["type"] for c in _pending_commands(bot)] == ["flatten"]
+    tg._cmd_mode(["defense"])
+    out = asyncio.run(tg._handle_callback(keyboards.encode(keyboards.ACT_MODE_CANCEL, "defense")))
+    assert "defense" in out and "cancelled" in out
+    assert cf.peek(bot) is not None and cf.peek(bot).kind == "flatten"
+
+
+def test_mode_confirm_button_never_confirms_a_staged_order(bot: Path) -> None:
+    tg._cmd_flatten()
+    tg._cmd_mode(["defense"])
+    asyncio.run(tg._handle_callback(keyboards.encode(keyboards.ACT_MODE_CONFIRM, "defense")))
+    assert [c["type"] for c in _pending_commands(bot)] == []
+
+
+def test_typed_cancel_clears_both(bot: Path) -> None:
+    tg._cmd_flatten()
+    tg._cmd_mode(["defense"])
+    out = tg._cmd_cancel()
+    assert "flatten" in out and "defense" in out
+    assert cf.peek(bot) is None
+
+
+def test_exit_larger_than_the_ceiling_is_confirmed_not_refused(bot: Path) -> None:
+    """A halted operator must be able to close a big position by name."""
+    pos = Position(
+        instrument=Instrument(symbol="NVDA", asset_class=AssetClass.EQUITY),
+        quantity=300,
+        avg_price=150.0,
+        unrealized_pnl=300 * 30.0,  # 54,000 of 100,000
+    )
+    RunnerStore(bot / "runner.db").save_snapshot(
+        AccountSnapshot(ts=T0, cash=46_000, equity=100_000, positions={pos.instrument.key: pos})
+    )
+    tg._cmd_halt(["loss limit"])
+    for out in (
+        tg._cmd_close(["NVDA"]),
+        tg._cmd_sell(["NVDA", "all"]),
+        tg._cmd_sell(["NVDA", "300"]),
+    ):
+        assert "refused" not in out and "Confirm" in out
+    assert "refused" in tg._cmd_sell(["NVDA", "400"])  # beyond the position: adds a short
+
+
+def test_sizes_are_converted_to_the_base_currency(bot: Path) -> None:
+    pos = Position(
+        instrument=Instrument(symbol="NVDA", asset_class=AssetClass.EQUITY, currency="USD"),
+        quantity=250,
+        avg_price=200.0,
+        unrealized_pnl=0.0,  # 50,000 USD
+    )
+    RunnerStore(bot / "runner.db").save_snapshot(
+        AccountSnapshot(
+            ts=T0,
+            cash=50_000,
+            equity=100_000,
+            positions={pos.instrument.key: pos},
+            base_currency="CHF",
+            fx_rates={"USD": 0.8},
+        )
+    )
+    a = tg._cmd_close(["NVDA"])
+    b = tg._cmd_sell(["NVDA", "250"])
+    assert "40.0%" in a and "40.0%" in b  # 50,000 USD x 0.8 = 40,000 CHF
+
+
+def test_missing_fx_rate_is_treated_as_large(bot: Path) -> None:
+    RunnerStore(bot / "runner.db").save_snapshot(
+        AccountSnapshot(ts=T0, cash=100_000, equity=100_000, positions={}, base_currency="CHF")
+    )
+    out = tg._cmd_buy(["AAPL", "1", "150"])  # tiny, but unconvertible
+    assert "size unknown" in out and _pending_commands(bot) == []
+
+
+def test_resume_refuses_if_the_halt_changed_after_staging(bot: Path) -> None:
+    tg._cmd_halt(["first"])
+    tg._cmd_resume()
+    token = cf.peek(bot).token
+    tg._cmd_halt(["second, newer"])
+    out = tg._cmd_confirm([token])
+    assert "halt changed" in out
+    assert json.loads((bot / "halt.json").read_text())["halted"] is True
+
+
+def test_unreadable_halt_file_still_needs_confirmation(bot: Path) -> None:
+    (bot / "halt.json").write_text("{corrupt")
+    out = tg._cmd_resume()
+    assert "Resume trading?" in out
+
+
+def test_expired_stage_does_not_block_anything(bot: Path) -> None:
+    staged = cf.stage(bot, "flatten", {}, "flatten", now=T0 - timedelta(days=2))
+    assert cf.peek(bot, now=T0) is None
+    out = cf.take(bot, staged.token, now=T0)
+    assert isinstance(out, str) and "expired" in out
 
 
 def test_button_is_bound_to_its_token(bot: Path) -> None:

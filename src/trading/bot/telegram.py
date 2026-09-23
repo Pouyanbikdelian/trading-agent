@@ -1351,14 +1351,19 @@ def _cmd_resume() -> str:
     reason. One word used to do it; now it shows the halt reason and
     needs `/confirm TOKEN` (or the button). Not halted → the old reply.
     """
-    halted, reason = _halt_state()
+    # Fail-closed read: an unreadable halt.json is treated as a halt by
+    # the risk manager, so it must not be cleared by an unconfirmed word.
+    halted, reason = _execution_halt_state()
     if not halted:
         return _resume_now()
     from trading.bot import confirmations
     from trading.bot.keyboards import command_confirm_keyboard
 
     staged = confirmations.stage(
-        settings.state_dir, "resume", {}, f"resume trading (halt: {reason or 'no reason recorded'})"
+        settings.state_dir,
+        "resume",
+        {"halt_fingerprint": _halt_fingerprint()},
+        f"resume trading (halt: {reason or 'no reason recorded'})",
     )
     return ButtonReply(
         "⚠️ *Resume trading?*\n"
@@ -1367,6 +1372,21 @@ def _cmd_resume() -> str:
         f"Tap Confirm or reply `/confirm {staged.token}` within 5 min.",
         command_confirm_keyboard(staged.token),
     )
+
+
+def _halt_fingerprint() -> str:
+    """Identity of the halt the operator was shown (content hash).
+
+    A staged /resume confirms lifting THAT halt. If a kill switch fires a
+    new halt before the tap, the confirmation must not clear it unseen.
+    """
+    import hashlib
+
+    try:
+        raw = (settings.state_dir / "halt.json").read_bytes()
+    except OSError:
+        raw = b""
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def _resume_now() -> str:
@@ -1698,19 +1718,19 @@ def _cmd_confirm(args: list[str] | None = None) -> str:
     from trading.bot import confirmations
 
     args = args or []
-    staged_cmd = confirmations.peek(settings.state_dir)
     if args:
         return _confirm_staged_command(args[0])
-    if staged_cmd is not None:
-        from trading.runtime.mode import read_pending as _read_mode_pending
+    # A bare /confirm means the mode preview, never a staged order: those
+    # must be confirmed by token or by their own button, so /confirm typed
+    # for one thing can never execute another.
+    from trading.runtime.mode import read_pending as _read_mode_pending
 
-        if _read_mode_pending(_mode_paths()[1]) is not None:
-            return (
-                "two things are waiting: a mode change and "
-                f"`{staged_cmd.kind}`. Reply `/confirm {staged_cmd.token}` for the "
-                f"{staged_cmd.kind}, or `/cancel` and re-stage the one you want."
-            )
-        return _confirm_staged_command(staged_cmd.token)
+    staged_cmd = confirmations.peek(settings.state_dir)
+    if staged_cmd is not None and _read_mode_pending(_mode_paths()[1]) is None:
+        return (
+            f"`{staged_cmd.summary}` needs its token: reply `/confirm {staged_cmd.token}` "
+            "or tap its Confirm button."
+        )
     return _confirm_mode_change()
 
 
@@ -1721,6 +1741,11 @@ def _confirm_staged_command(token: str) -> str:
     if isinstance(result, str):
         return result
     if result.kind == "resume":
+        if result.payload.get("halt_fingerprint") != _halt_fingerprint():
+            return (
+                "⚠️ the halt changed after that /resume was staged — nothing was "
+                "resumed. Check `/status`, then `/resume` again."
+            )
         return _resume_now()
     queued = _queue_command(result.kind, result.payload)
     if queued is not None:
@@ -1773,10 +1798,14 @@ def _cmd_cancel() -> str:
     from trading.runtime.mode import clear_pending, read_pending
 
     dropped = confirmations.discard(settings.state_dir)
-    if dropped is not None:
-        return f"❌ `{dropped.summary}` cancelled — nothing was sent."
     _, pending_path, _ = _mode_paths()
     pending = read_pending(pending_path)
+    if dropped is not None:
+        lines = [f"❌ `{dropped.summary}` cancelled — nothing was sent."]
+        if pending is not None:
+            clear_pending(pending_path)
+            lines.append(f"❌ pending `{pending.new_mode.value}` change cancelled.")
+        return "\n".join(lines)
     if pending is None:
         return (
             "nothing to cancel — no mode change is staged.\n"
@@ -2015,10 +2044,16 @@ def _cmd_flatten() -> str:
     snap = _latest_snapshot_or_none()
     detail = ""
     if snap is not None and snap.positions:
-        value = sum(abs(_position_value(p) or 0.0) for p in snap.positions.values())
+        values = [_position_value_base(p, snap) for p in snap.positions.values()]
+        base = str(getattr(snap, "base_currency", "") or "USD").upper()
+        total = (
+            f"~{sum(abs(v) for v in values if v is not None):,.0f} {base}"
+            if all(v is not None for v in values)
+            else "value unknown (missing FX rate)"
+        )
         detail = (
-            f"{len(snap.positions)} position(s), ~{value:,.0f} "
-            f"{snap.base_currency or ''} at the last snapshot, pinned holdings included.\n"
+            f"{len(snap.positions)} position(s), {total} at the last snapshot, "
+            "pinned holdings included.\n"
         )
     staged = confirmations.stage(settings.state_dir, "flatten", {}, "flatten every position")
     return ButtonReply(
@@ -2038,16 +2073,44 @@ def _latest_snapshot_or_none() -> Any:
         return None
 
 
-def _position_value(position: Any) -> float | None:
-    """Base-currency-ish market value from the snapshot's own mark."""
+def _to_base(amount: float, currency: str, snap: Any) -> float | None:
+    """Convert ``amount`` in ``currency`` to the snapshot's base currency.
+
+    ``fx_rates`` maps a currency to base-currency units per one unit of it
+    (the convention the managed view and the risk manager use). A missing
+    rate returns None — an order that cannot be sized is treated as large,
+    never as small.
+    """
+    ccy = (currency or "USD").upper()
+    base = str(getattr(snap, "base_currency", "") or "USD").upper() if snap is not None else "USD"
+    if ccy == base:
+        return amount
+    rates = (getattr(snap, "fx_rates", None) or {}) if snap is not None else {}
+    rate = rates.get(ccy)
+    try:
+        return amount * float(rate) if rate else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _position_mark(position: Any) -> float | None:
+    """Per-share mark in the instrument's own currency, from the snapshot."""
     try:
         qty = float(position.quantity)
         if qty == 0:
-            return 0.0
+            return None
         mark = float(position.avg_price) + float(position.unrealized_pnl or 0.0) / qty
-        return qty * mark
+        return mark if mark > 0 else None
     except Exception:
         return None
+
+
+def _position_value_base(position: Any, snap: Any) -> float | None:
+    mark = _position_mark(position)
+    if mark is None:
+        return None
+    currency = getattr(position.instrument, "currency", "USD") or "USD"
+    return _to_base(float(position.quantity) * mark, currency, snap)
 
 
 def _last_close(symbol: str) -> float | None:
@@ -2068,11 +2131,12 @@ def _last_close(symbol: str) -> float | None:
 
 def _estimate_manual_notional(
     symbol: str, qty: str, limit: str | None
-) -> tuple[float | None, float | None, str]:
-    """(notional in the account's base currency, account equity, how).
+) -> tuple[float | None, float | None, str, float | None]:
+    """(notional in base currency, account equity, how, shares held).
 
     Best effort by design; every unknown returns None, which the gate
-    treats as "too large to wave through".
+    treats as "too large to wave through". Equities default to USD, the
+    currency the command processor submits them in.
     """
     snap = _latest_snapshot_or_none()
     equity = float(snap.equity) if snap is not None and snap.equity else None
@@ -2082,49 +2146,70 @@ def _estimate_manual_notional(
             if pos.instrument.symbol.upper() == symbol.upper():
                 position = pos
                 break
+    held = float(position.quantity) if position is not None else None
+    currency = (getattr(position.instrument, "currency", "USD") if position else "USD") or "USD"
     if str(qty).lower() == "all":
         if position is None:
-            return None, equity, "no position in the last snapshot"
-        value = _position_value(position)
-        return (abs(value) if value is not None else None), equity, "position value"
+            return None, equity, "no position in the last snapshot", held
+        value = _position_value_base(position, snap)
+        how = "position value" if value is not None else "no mark or FX rate"
+        return (abs(value) if value is not None else None), equity, how, held
     try:
         shares = float(qty)
     except ValueError:
-        return None, equity, "unparseable quantity"
+        return None, equity, "unparseable quantity", held
     price: float | None = None
-    source = ""
+    how = ""
     if limit is not None:
-        price, source = float(limit), "limit price"
+        price, how = float(limit), "limit price"
     elif position is not None:
-        value = _position_value(position)
-        if value is not None and float(position.quantity):
-            price, source = abs(value / float(position.quantity)), "snapshot mark"
+        price = _position_mark(position)
+        how = "snapshot mark" if price is not None else ""
     if price is None:
         price = _last_close(symbol)
-        source = "last cached close" if price is not None else ""
+        how = "last cached close" if price is not None else ""
     if price is None:
-        return None, equity, "no price available"
-    notional = shares * price
-    base = str(getattr(snap, "base_currency", "") or "USD").upper() if snap is not None else "USD"
-    rates = getattr(snap, "fx_rates", None) or {}
-    if base != "USD" and rates.get("USD"):
-        notional *= float(rates["USD"])
-    return notional, equity, source
+        return None, equity, "no price available", held
+    notional = _to_base(shares * price, currency, snap)
+    if notional is None:
+        return None, equity, f"no {currency} FX rate", held
+    return notional, equity, how, held
+
+
+def _is_reduce_only(kind: str, qty: str, held: float | None) -> bool:
+    """A sell that can only shrink an existing long: never refused."""
+    if kind == "close":
+        return held is not None and held > 0
+    if kind != "sell" or held is None or held <= 0:
+        return False
+    if str(qty).lower() == "all":
+        return True
+    try:
+        return float(qty) <= held + 1e-9
+    except ValueError:
+        return False
 
 
 def _gate_manual_order(
     kind: str, payload: dict[str, Any], *, symbol: str, qty: str, limit: str | None
 ) -> str | None:
-    """Queue small manual orders directly; stage large or unsized ones."""
+    """Queue small manual orders directly; stage large or unsized ones.
+
+    The ceiling applies only to orders that can ADD exposure. An exit of a
+    position larger than the ceiling is exactly the order a halted operator
+    needs; it is confirmed, never refused.
+    """
     from trading.bot import confirmations
     from trading.bot.keyboards import command_confirm_keyboard
 
     confirm_pct = float(getattr(settings, "manual_order_confirm_pct", 0.05))
     max_pct = float(getattr(settings, "manual_order_max_pct", 0.50))
-    notional, equity, how = _estimate_manual_notional(symbol, qty, limit)
+    notional, equity, how, held = _estimate_manual_notional(symbol, qty, limit)
     decision, share = confirmations.needs_confirmation(
         notional, equity, confirm_pct=confirm_pct, max_pct=max_pct
     )
+    if decision == "refuse" and _is_reduce_only(kind, qty, held):
+        decision = "confirm"
     if decision == "direct":
         return _queue_command(kind, payload)
     if decision == "refuse":
@@ -3929,11 +4014,10 @@ async def _handle_callback(data: str) -> str:
     if action == keyboards.ACT_CMD_CANCEL:
         from trading.bot import confirmations
 
-        current = confirmations.peek(settings.state_dir)
-        if current is None or current.token != tokentail:
+        dropped = confirmations.discard_if_token(settings.state_dir, tokentail)
+        if dropped is None:
             return "that request is no longer waiting — nothing to cancel."
-        confirmations.discard(settings.state_dir)
-        return f"❌ `{current.summary}` cancelled — nothing was sent."
+        return f"❌ `{dropped.summary}` cancelled — nothing was sent."
 
     if action in (keyboards.ACT_DESK_APPROVE, keyboards.ACT_DESK_CANCEL):
         # The proposal id is the binding token.  A button from an old chat
@@ -3989,7 +4073,13 @@ async def _handle_callback(data: str) -> str:
                 f"that button was for `{tokentail}`, but `{staged_mode}` is staged now. "
                 "Use the newest preview."
             )
-        return _cmd_confirm() if action == keyboards.ACT_MODE_CONFIRM else _cmd_cancel()
+        # Mode-only handlers: this button must never reach a staged order.
+        if action == keyboards.ACT_MODE_CONFIRM:
+            return _confirm_mode_change()
+        from trading.runtime.mode import clear_pending
+
+        clear_pending(pending_path)
+        return f"❌ pending `{staged_mode}` change cancelled."
 
     return "unrecognised button."
 
