@@ -761,7 +761,11 @@ function renderPM(){
 // One currency for every line on a chart. USDCHF (francs per dollar),
 // carried forward from the last close on or before each day; a day before
 // the series starts has no rate and is dropped, not priced at a guess.
-function fxLookup(){const s=(D.usdchf||[]).map(p=>[String(p.t).slice(0,10),+p.v]).filter(p=>p[1]>0).sort((x,y)=>x[0]<y[0]?-1:1);
+// Two sources: the USDCHF close cache (when the data dir has one) and the
+// rate IBKR valued each daily snapshot at. The close wins where both exist.
+function fxLookup(){const m={};((D.equity||{}).days||[]).forEach(d=>{if(d.usdchf>0)m[d.t]=+d.usdchf;});
+ (D.usdchf||[]).forEach(p=>{if(+p.v>0)m[String(p.t).slice(0,10)]=+p.v;});
+ const s=Object.entries(m).sort((x,y)=>x[0]<y[0]?-1:1);
  const f=(t)=>{let lo=0,hi=s.length-1,a=null;while(lo<=hi){const m=(lo+hi)>>1;if(s[m][0]<=t){a=s[m][1];lo=m+1;}else hi=m-1;}return a;};
  f.ok=s.length>1;f.last=s.length?s[s.length-1][0]:null;return f;}
 // Time-weighted index of one book. adj(row) is the part of a day's change

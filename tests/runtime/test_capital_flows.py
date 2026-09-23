@@ -182,6 +182,27 @@ def test_equity_block_treats_a_manual_pinned_buy_as_a_transfer(tmp_path: Path) -
     assert pinned_pnl == pytest.approx(-200)  # 100 shares fell 102 -> 100
     assert desk_pnl + pinned_pnl == pytest.approx(d1["account"] - d0["account"])
     assert "_pins" not in d1
+    assert d1["usdchf"] is None  # no USD rate on that snapshot
+
+
+def test_equity_days_carry_the_broker_usd_rate(tmp_path: Path) -> None:
+    from trading.core.types import AccountSnapshot
+    from trading.dashboard.cockpit import equity_block
+    from trading.runner.state import RunnerStore
+
+    rs = RunnerStore(tmp_path / "runner.db")
+    rs.save_snapshot(
+        AccountSnapshot(
+            ts=datetime.fromisoformat("2026-08-18T20:00:00+00:00"),
+            cash=1.0,
+            equity=1.0,
+            base_currency="CHF",
+            fx_rates={"USD": 0.8132},
+        )
+    )
+    rs.close()
+    (day,) = equity_block(tmp_path / "runner.db", tmp_path)["days"]
+    assert day["usdchf"] == pytest.approx(0.8132)
 
 
 def test_movers_value_each_position_in_the_base_currency(tmp_path: Path) -> None:

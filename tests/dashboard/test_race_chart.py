@@ -140,6 +140,10 @@ class TestTheSeriesSayWhatTheyAre:
         assert "$('raceSub').textContent=`${to} ·" in APP
         assert 'id="perfCcy"' in APP
 
+    def test_the_broker_rate_on_each_snapshot_is_an_fx_source(self) -> None:
+        """No USDCHF cache on the VPS left every CHF/USD view unconverted."""
+        assert "((D.equity||{}).days||[]).forEach(d=>{if(d.usdchf>0)m[d.t]=+d.usdchf;});" in APP
+
     def test_a_book_that_cannot_be_converted_is_labelled(self) -> None:
         assert "no FX series — shown in its own currency" in APP
 

@@ -341,12 +341,22 @@ def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
             pin_units = {s: (q, view.excluded[s]) for s, q in qty.items()}
         except Exception:
             desk = None
+        # The broker's own dollar rate for that day. The dashboard has no
+        # USDCHF price cache on the VPS (the Live tab said "USDCHF
+        # unavailable" for weeks); every snapshot already carries the rate
+        # IBKR valued the book at, which is the one the account felt.
+        usdchf = None
+        if base == "CHF" and rates.get("USD"):
+            usdchf = float(rates["USD"])
+        elif base == "USD" and rates.get("CHF"):
+            usdchf = 1.0 / float(rates["CHF"])
         days.append(
             {
                 "t": day,
                 "account": round(float(r["equity"]), 2),
                 "desk": None if desk is None else round(desk, 2),
                 "cash": round(float(r["cash"]), 2),
+                "usdchf": None if usdchf is None else round(usdchf, 5),
                 "_pins": pin_units,
             }
         )
