@@ -78,7 +78,10 @@ _FRESHNESS: dict[str, tuple[str, float]] = {
 _JOURNAL_CADENCE: dict[str, tuple[str, float]] = {
     "committee": ("committee debate", 96.0),  # 2x/week
     "agent_pm": ("agent PM run", 240.0),  # weekly
-    "historian": ("historian distillation", 120.0),  # Tuesday + Friday
+    # Weekly (Friday 19:00 New York, runner._historian_trigger). This was
+    # 120 h from the twice-weekly era, which raised a false "historian
+    # dead" alarm every Wednesday-Friday once the cadence became weekly.
+    "historian": ("historian distillation", 192.0),  # weekly + 1 day slack
     "daily": ("nightly memory pass", 48.0),  # nightly
 }
 

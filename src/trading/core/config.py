@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     # ---- Notifications ----
     telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str | None = Field(default=None, alias="TELEGRAM_CHAT_ID")
+    # External dead-man's switch (e.g. a healthchecks.io check URL). The
+    # runner pings it every few minutes; the external service alerts when the
+    # pings stop. Every other alert originates inside the container, so a
+    # dead VPS is otherwise silent. Unset = disabled.
+    healthcheck_ping_url: str | None = Field(default=None, alias="HEALTHCHECK_PING_URL")
 
     # ---- Storage ----
     data_dir: Path = Field(default=PROJECT_ROOT / "data" / "parquet", alias="DATA_DIR")

@@ -764,15 +764,31 @@ class Runner:
             max_instances=1,
         )
 
-        # Heartbeat watchdog: every 6h, check that we've had a successful
-        # cycle in the last HEARTBEAT_WATCHDOG_HOURS. Sends a Telegram
-        # nudge if we haven't. Does NOT halt — that's the operator's call.
+        # Watchdog: hourly liveness + cycle-outcome checks (missed cycle,
+        # stuck desk, no trades). Alerts are deduplicated per incident in
+        # cycle_watch.json, so hourly is cheap. Does NOT halt.
         self._scheduler.add_job(
             self._watchdog,
-            IntervalTrigger(hours=6),
+            IntervalTrigger(hours=1),
             id="watchdog",
             replace_existing=True,
+            max_instances=1,
+            coalesce=True,
         )
+
+        # External dead-man's switch. Silence is the alarm, raised by the
+        # external monitor, so this is the one alert that survives the VPS.
+        if settings.healthcheck_ping_url:
+            from trading.runtime.deadman import PING_INTERVAL_MINUTES
+
+            self._scheduler.add_job(
+                self._deadman_ping_async,
+                IntervalTrigger(minutes=PING_INTERVAL_MINUTES),
+                id="deadman_ping",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
 
         # Live snapshot refresh: every 60s, pull a fresh broker account
         # snapshot and persist it. Without this the Telegram /balances and
@@ -1285,7 +1301,7 @@ class Runner:
                 self.alerts.info(f"✅ cycle recovered (after {self._consecutive_errors} errors)")
             self._consecutive_errors = 0
             self._save_error_counter()
-            self._last_success_ts = datetime.now()
+            self._last_success_ts = datetime.now(tz=timezone.utc)
             with contextlib.suppress(Exception):
                 from trading.memory.store import default_store
 
@@ -1451,14 +1467,20 @@ class Runner:
         # is alive AND the broker is talking back — operationally a better
         # liveness signal than "last cycle completed", which between
         # weekly rebalances always reads 6+ days stale.
+        # Atomic: the Docker healthcheck and the bot read this file
+        # concurrently, and a torn write read as corrupt is a false red.
+        # Cycle outcomes are watched separately (runtime/cycle_watch.py);
+        # this file only ever meant "broker alive".
         try:
             hb_path = settings.state_dir / "heartbeat.json"
             hb_path.parent.mkdir(parents=True, exist_ok=True)
-            hb_path.write_text(
-                '{"ts": "'
-                + datetime.now(tz=timezone.utc).isoformat()
-                + '", "source": "snapshot_refresh"}'
+            tmp = hb_path.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(
+                    {"ts": datetime.now(tz=timezone.utc).isoformat(), "source": "snapshot_refresh"}
+                )
             )
+            os.replace(tmp, hb_path)
         except Exception as e:
             logger.bind(component="runner").debug(
                 f"heartbeat touch failed: {type(e).__name__}: {e!r}"
@@ -1558,26 +1580,57 @@ class Runner:
         self._last_risk_monitor_reject_reason = None
 
     async def _watchdog(self) -> None:
-        """Daily: if we haven't completed a successful cycle in
-        ``HEARTBEAT_WATCHDOG_HOURS``, alert the operator. Not a halt —
-        just a nudge. The runner could be stuck without ever raising,
-        which silent-mode would hide."""
+        """Hourly: liveness AND achievement. Alerts only; never halts.
+
+        Two separate questions, because until 2026-09-23 they were one
+        and the wrong one won. ``heartbeat.json`` is rewritten by every
+        60 s snapshot, so "no successful cycle in 25 h" really measured
+        broker liveness while a desk that had not traded for five weeks
+        stayed green. Liveness stays here with an honest label; cycle
+        outcomes (missed, stuck, not trading) come from ``cycle_watch``,
+        which reads the cycles table and alerts once per incident.
+        """
         try:
             hb_path = settings.state_dir / "heartbeat.json"
-            if not hb_path.exists():
-                if self._last_success_ts is None:
-                    # Bootstrapping — no heartbeat yet; ignore for now.
-                    return
-                age_s = (datetime.now() - self._last_success_ts).total_seconds()
+            now = datetime.now(tz=timezone.utc)
+            age_s: float | None
+            if hb_path.exists():
+                age_s = now.timestamp() - hb_path.stat().st_mtime
+            elif self._last_success_ts is not None:
+                age_s = (now - self._last_success_ts).total_seconds()
             else:
-                age_s = datetime.now().timestamp() - hb_path.stat().st_mtime
-            if age_s > self.HEARTBEAT_WATCHDOG_HOURS * 3600.0:
+                age_s = None  # bootstrapping — no heartbeat yet
+            if age_s is not None and age_s > self.HEARTBEAT_WATCHDOG_HOURS * 3600.0:
                 self.alerts.warning(
-                    f"⏰ Watchdog: no successful cycle in {age_s / 3600:.1f}h. "
-                    "Check `/health` and broker connection."
+                    f"⏰ Watchdog: no successful broker snapshot in {age_s / 3600:.1f}h. "
+                    "Check `/health` and the gateway."
                 )
         except Exception:
-            logger.bind(component="runner").exception("watchdog poll failed")
+            logger.bind(component="runner").exception("watchdog liveness poll failed")
+
+        try:
+            from trading.runtime import cycle_watch
+
+            cycles = self.cycle.runner_store.recent_cycles(limit=20)
+            findings = cycle_watch.evaluate(
+                cycles,
+                cron=self.config.schedule_cron,
+                tz=self.config.schedule_tz,
+                now=datetime.now(tz=timezone.utc),
+            )
+            for finding in cycle_watch.unalerted(settings.state_dir, findings):
+                if finding.level == "critical":
+                    self.alerts.critical(finding.message)
+                else:
+                    self.alerts.warning(finding.message)
+        except Exception:
+            logger.bind(component="runner").exception("cycle outcome watch failed")
+
+    async def _deadman_ping_async(self) -> None:
+        """Tell the external dead-man monitor this process is alive."""
+        from trading.runtime.deadman import ping
+
+        await asyncio.to_thread(ping, settings.healthcheck_ping_url)
 
     async def _run_hmm_advisor_async(self) -> None:
         """Daily: refit a 3-state Gaussian HMM on the last ~5 years of

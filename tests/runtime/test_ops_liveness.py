@@ -76,14 +76,24 @@ class TestLoopLiveness:
         issues = check_learning_loops(memdb, now=NOW)
         assert any("nightly memory pass" in i and "9.0d ago" in i for i in issues)
 
-    def test_twice_weekly_historian_alerts_after_five_days(self, memdb: Path) -> None:
+    def test_weekly_historian_is_not_dead_after_five_days(self, memdb: Path) -> None:
+        """It runs Fridays only; the old 120 h limit alarmed every Wednesday."""
         for kind in ("committee", "agent_pm", "daily"):
             _journal(memdb, kind, days_ago=1)
         _journal(memdb, "historian", days_ago=5.1)
 
         issues = check_learning_loops(memdb, now=NOW)
 
-        assert any("historian distillation" in i and "5.1d ago" in i for i in issues)
+        assert not any("historian distillation" in i for i in issues)
+
+    def test_weekly_historian_alerts_after_eight_days(self, memdb: Path) -> None:
+        for kind in ("committee", "agent_pm", "daily"):
+            _journal(memdb, kind, days_ago=1)
+        _journal(memdb, "historian", days_ago=8.1)
+
+        issues = check_learning_loops(memdb, now=NOW)
+
+        assert any("historian distillation" in i and "8.1d ago" in i for i in issues)
 
     def test_missing_database_is_not_an_issue(self, tmp_path: Path) -> None:
         """Before the first run there is nothing to complain about."""
