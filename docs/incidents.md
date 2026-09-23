@@ -14,6 +14,38 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-09-23 — Latent defects found in a code review (no production incident)
+
+Not an outage: a read-through of the order path and the bot, after the
+2026-09-21 release, found defects that had not yet fired but would have
+fired at the worst moment. Recorded here because each one breaks a
+promise an operator relies on under stress.
+
+- **The emergency brake could be lost.** `/halt it's bad data` raised
+  `ValueError` in `shlex.split`; nothing caught it, the poll loop died,
+  and the Telegram offset had already been saved, so the restarted bot
+  never saw the message. The desk was not halted and nobody was told.
+- **Editing an old message re-sent it.** `edited_message` was dispatched
+  like a new command: correcting a typo in last week's `/flatten`
+  would have flattened the account.
+- **Every `/flatten` shared one ledger id** (`flatten-SYM-xxxxxxxx`) and
+  `save_order` is `INSERT OR REPLACE`.
+- **Nothing measured achievement.** Every health signal was broker
+  liveness; the desk sat in halted reviews and no-order cycles for five
+  weeks with all lights green.
+- **Fills were only reconciled inside submitting cycles**, from a cache
+  the gateway wipes nightly; nothing ever asked the broker what became of
+  an order, and no row stored IBKR's permId.
+- **An approved basket was submitted as sized**, minutes after it was
+  built, without re-reading the book.
+- **The live gate trusted the port number**, not the account id.
+
+Fix: branch `claude/robustness-wave-1` (see TODO.md "Robustness wave 1").
+
+Lesson: a safety control has to be tested under the input a panicking
+human actually types (apostrophes, edits, re-sends), not the input the
+developer types.
+
 ## 2026-09-18 — Managed equity compared with a whole-account peak
 
 **Symptoms.** The continuous monitor reported a −36.17% drawdown on

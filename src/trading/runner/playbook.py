@@ -38,8 +38,8 @@ What the playbook does NOT do
 * Doesn't change the broker or the risk-manager limits — those stay
   constant. The playbook is about *strategy mix*, not risk appetite.
   (You absolutely can lower ``max_position_pct`` for risk-off regimes;
-  do it via ``config/risk.yaml`` and accept the constraint applies to
-  every regime.)
+  do it via ``MAX_POSITION_PCT`` in .env and accept the constraint
+  applies to every regime.)
 * Doesn't auto-fit anything. The YAML is hand-authored — that's
   intentional. A regime-switching system that auto-tunes itself is the
   fastest way to overfit yourself into a hole.

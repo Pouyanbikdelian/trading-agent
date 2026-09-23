@@ -112,7 +112,7 @@ When APScheduler fires (e.g. every Friday at market close):
 ├── .env                 # secrets — gitignored, never leaves the VPS
 ├── docker-compose.yml   # IB Gateway + trader + Telegram bot containers
 ├── src/trading/         # source
-├── config/              # universes.yaml, risk.yaml (editable)
+├── config/              # universes.yaml, watchlist.yaml, playbook examples (risk limits: .env)
 ├── data/parquet/        # cached market data
 ├── logs/                # runner + bot log files
 └── state/

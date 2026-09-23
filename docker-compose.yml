@@ -200,7 +200,7 @@ services:
       - data:/app/data
       - logs:/app/logs
       - state:/app/state
-      # Mount config/ read-only so universes.yaml + risk.yaml are editable
+      # Mount config/ read-only so universes.yaml + watchlist.yaml are editable
       # from the host without rebuilding.
       - ./config:/app/config:ro
       # Docker socket access: the trader is the only process that can

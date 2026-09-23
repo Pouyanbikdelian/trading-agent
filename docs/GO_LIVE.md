@@ -52,7 +52,7 @@ Code / config audit:
       at the username (`grep -n "for live" .env` must be empty).
 - [x] Risk limits sanity — PRECEDENCE RESOLVED 2026-07-09: the risk
       manager reads limits from .env ONLY; config/risk.yaml's limit
-      numbers are never loaded (its header was wrong; fixed). Values
+      numbers were never loaded (file removed 2026-09-23). Values
       confirmed for paper: 0.10 / 1.0 / 0.02 / 0.15. Live-day values
       are set in §3 (sized down). Yan still owns the final "yes these
       are my live numbers" on live day.
@@ -87,7 +87,10 @@ Code / config audit:
       a ghost pin (no position) that had silently eaten a basket slot;
       MU/SNDK released and promptly trailing-stopped at a profit. Code
       fix: pins without positions no longer reserve slots.
-- [x] Clock/timezone audit (2026-07-14): CRON=5 21 * * FRI (UTC) =
+- [x] Clock/timezone — SUPERSEDED 2026-09-23: the cycle and market-hours
+      jobs are anchored on New York time (`CRON=5 17 * * FRI`,
+      `SCHEDULE_TZ=America/New_York`), so no seasonal .env edit is needed.
+      Original audit (2026-07-14): CRON=5 21 * * FRI (UTC) =
       17:05 ET in summer (fine, 65 min after close) but 16:05 ET in
       winter — only 5 min after close, when the daily bar may not be
       final. RECOMMENDATION before November: set `CRON=5 22 * * FRI` in

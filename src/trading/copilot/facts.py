@@ -413,9 +413,9 @@ def config_now(state_dir: Path) -> dict[str, Any]:
             "never liquidate. Nothing in this system reduces exposure "
             "automatically except the position guards."
         ),
-        "_config_risk_yaml_is_NOT_read": (
-            "config/risk.yaml is reference only — no loader exists. .env is "
-            "the single source for these numbers."
+        "_where_limits_live": (
+            ".env is the single source for these numbers. config/risk.yaml "
+            "was never loaded and was removed on 2026-09-23."
         ),
     }
 

@@ -100,7 +100,7 @@ class TestTheThingsThatMisledTheOperatorBefore:
     def test_it_states_that_risk_yaml_is_not_read(self, monkeypatch) -> None:
         c = _cfg(monkeypatch)
 
-        assert "no loader exists" in c["risk_limits"]["_config_risk_yaml_is_NOT_read"]
+        assert ".env is the single source" in c["risk_limits"]["_where_limits_live"]
 
     def test_it_warns_that_compose_overrides_env(self, monkeypatch) -> None:
         """The phantom disarm."""

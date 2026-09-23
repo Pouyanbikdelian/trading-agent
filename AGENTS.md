@@ -27,7 +27,7 @@ This is not a scaffold. Assume every change can reach a real broker account, and
 5. **Timezone-aware datetimes only.** `Bar.ts` validates this. Use `trading.core.clock`, not `datetime.utcnow()`.
 6. **Never commit `.env`, `data/`, `logs/`, `state/`.** All gitignored.
 7. **A state directory belongs to one `TRADING_ENV`.** `core/state_env.py` stamps and verifies it. A paper baseline read by a live process once halted the desk — do not remove the stamp check.
-8. **The agent layer is advisory.** Committee, PM, historian/curator and copilot write to memory and Telegram. Only the risk manager and the guards may move exposure. Do not give an LLM a direct order path.
+8. **The agent layer is advisory.** Committee, PM, historian/curator and copilot write to memory and Telegram. Only the risk manager and the guards may move exposure. Do not give an LLM a direct order path. *Fact check (2026-09-23): with `AGENT_PM_SLEEVE_PCT > 0` the PM's target weights are executable targets — they reach orders only through `pm_signal` → risk manager → approval. The Sept 19 audit found live at PM sleeve 1.0 / strategy sleeve 0.0. "Advisory" means no direct order path, not no influence.*
 9. **Operator blocklists bind in code, not in a prompt.** `/exclude` is a hard filter. A charter sentence asking an LLM nicely is not an enforcement mechanism.
 
 ## Architecture (settled)
@@ -52,7 +52,7 @@ src/trading/
   dashboard/    read-only web view of live + PM state
   reporting/    digests and scorecards
   cli.py        single Typer CLI; subcommand groups
-config/         universes.yaml, risk.yaml, playbook + portfolio examples
+config/         universes.yaml, watchlist.yaml, playbook + portfolio examples (risk limits live in .env)
 scripts/        backfills, analyses, one-off audits
 tests/          pytest, fast smoke tests on every change
 docs/           system_map, LEARNING_ARCHITECTURE, GO_LIVE, DRILLS, incidents, deploy
@@ -64,14 +64,14 @@ Full argument in `docs/LEARNING_ARCHITECTURE.md`.
 
 - **Memory** (`state/memory/memory.db`) holds the journal, graded episodes, lessons, predictions, the source-trust ledger and the shadow book.
 - **Lessons** move `candidate → established → challenged → retired`, and nothing is ever deleted. Only `established` lessons reach agent context.
-- **The Learning Curator** (`agents/historian.py`) runs a twice-weekly evidence-gated pass: it reviews lessons against measured outcomes, proposes candidates, promotes and challenges, and *recommends* archiving challenged machine lessons. Each pass is persisted immutably to `curator_runs` / `curator_actions`.
+- **The Learning Curator** (`agents/historian.py`) runs a weekly (Friday 19:00 New York) evidence-gated pass: it reviews lessons against measured outcomes, proposes candidates, promotes and challenges, and *recommends* archiving challenged machine lessons. Each pass is persisted immutably to `curator_runs` / `curator_actions`.
 - **Archiving a challenged lesson needs a human.** The curator only recommends. Restoration (`/lesson restore`) returns a lesson to `candidate`, never straight back to `established` — a prior belief must re-earn its place on fresh evidence.
 - **Operator-stated lessons are protected** from machine archiving.
 
 ## Design decisions (don't relitigate)
 
 - **Python 3.10–3.12, managed by `uv`.** Not poetry, not pip-tools.
-- **Pandas + NumPy + numba** for the data and backtester. Polars considered, rejected for v1 (ecosystem fit).
+- **Pandas + NumPy** for the data and backtester (numba is declared but currently unused). Polars considered, rejected for v1 (ecosystem fit).
 - **pydantic v2 + pydantic-settings** for types and config. All domain models are `frozen=True`.
 - **loguru** (not stdlib logging) for the logging sink.
 - **typer** (not click directly, not argparse) for the CLI. Single `trading` entry point with subcommand groups.
@@ -80,7 +80,7 @@ Full argument in `docs/LEARNING_ARCHITECTURE.md`.
 - **Parquet local cache** under `data/parquet/{asset_class}/{symbol}/{freq}.parquet`. Partition layout fixed.
 - **Strategy interface emits target weights** (not orders). Combiner aggregates; risk manager sizes.
 - **Risk manager is hard-blocking**. Cannot be bypassed by a strategy. Returns `RiskDecision(action, reason, scale_factor)`.
-- **Slow momentum config (126/21/63) stays.** Walk-forward says it wins; see `docs/winning_config.md`. Do not speed it up to make the agents look more active.
+- **Slow momentum config (126/21/63) stays.** Walk-forward says it wins; see `docs/winning_config.md`. Do not speed it up to make the agents look more active. *Caveat (2026-09-23): the evidence in the repo is full-sample on today's index members, with no in-fold parameter selection; the honest rebuild is wave 2. Note the compose command passes `-p rebalance=${REBALANCE:-5}`, i.e. weekly unless .env says otherwise.*
 
 ## How to work
 
@@ -102,9 +102,9 @@ make typecheck  # mypy strict
 
 # Operating
 uv run trading data fetch <universe> --from 2018-01-01 --freq 1d
-uv run trading backtest <strategy> <universe>
-uv run trading paper
-uv run trading live   # refuses unless ALLOW_LIVE_TRADING=true AND TRADING_ENV=live
+uv run trading backtest run <strategy> <universe> --from 2018-01-01
+uv run trading paper run <universe>
+uv run trading live run <universe>   # refuses unless ALLOW_LIVE_TRADING=true AND TRADING_ENV=live
 python3 scripts/audit_committee_repetition.py   # is the committee saying anything new?
 ```
 
@@ -133,7 +133,7 @@ See `TODO.md` — it is current. Phases 0–9 complete; **Phase 10 (go-live) in 
 ## What NOT to do without checking with Yan first
 
 - Add a new paid data source.
-- Change risk limit defaults in `.env.example` or `config/risk.yaml`.
+- Change risk limit defaults in `.env.example` (the only source; the unread `config/risk.yaml` was removed 2026-09-23).
 - Loosen the live-trading gates.
 - Pick a different broker abstraction.
 - Switch off the test markers.

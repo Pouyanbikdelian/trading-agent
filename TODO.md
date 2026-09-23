@@ -97,19 +97,40 @@ Order of operations:
       (MAX_POSITION_PCT=0.05, MAX_GROSS_EXPOSURE=0.50), gates flipped by
       Yan only (GO_LIVE.md §3). NOTE stale `trader-live` compose service
       needs rework first (shares paper state dir + bridged networking).
-- [ ] Agent PM: sim observation window ENDED ~2026-07-12 — review
-      PM-vs-SPY record, then build the PM→Signal bridge (through the
-      real risk manager; $20K cap via PM_SLEEVE_CAPITAL_USD), then 30d
-      as ~20% paper sleeve — NOT part of the first live wave (§4)
-- [ ] Before November: `CRON=5 22 * * FRI` in VPS .env (winter DST —
-      21:05 UTC is only 5 min after the close in winter; see GO_LIVE §2)
+- [x] Agent PM → Signal bridge — BUILT 2026-08-07 (PM-1…6, `57df269`);
+      the Sept 19 audit found live running AGENT_PM_SLEEVE_PCT=1.0 /
+      STRATEGY_SLEEVE_PCT=0.0, i.e. the PM's targets are the live targets.
+      Whether it should stay that way is the wave-2 selection race.
+- [x] DST: schedule anchored on New York time (2026-09-23, wave 1). VPS
+      .env must be edited at deploy: `CRON=5 17 * * FRI`,
+      `SCHEDULE_TZ=America/New_York` (replaces the `5 22` winter chore).
+
+## Robustness wave 1 (2026-09-23, branch `claude/robustness-wave-1`)
+
+- [x] Bot: `/halt` with an apostrophe crashed the poll loop (shlex) and was
+      silently lost; edited messages re-executed; handler errors killed the
+      bot. `/flatten` reused one client order id.
+- [x] Cycle-outcome watchdog (missed / stuck / no trades) + optional
+      external dead-man (`HEALTHCHECK_PING_URL`).
+- [x] Daily read-only broker reconciliation (executions, completed orders,
+      permIds, broker-side cancels) Mon–Fri 16:30 New York.
+- [x] Market-hours jobs and the cycle on New York time.
+- [x] Approved basket re-proved against the broker book before submission;
+      `/flatten`, `/resume` and large manual orders need `/confirm TOKEN`;
+      broker account kind (paper `D…` vs real) must match TRADING_ENV.
+- [x] Dead `config/risk.yaml` removed; docs corrected.
+- [ ] Deploy (owner-approved restart). VPS .env: CRON, SCHEDULE_TZ,
+      optionally HEALTHCHECK_PING_URL, MANUAL_ORDER_CONFIRM_PCT/MAX_PCT.
+- [ ] Waves 2–4: escalation ladder + committee on demand; PM-vs-momentum
+      race and PM veto mode; honest backtest (point-in-time members, split
+      handling, next-open fills, in-fold selection); ranker fixes +
+      market-stretch cash dial; new signals. See docs/ROADMAP_WAVES.md.
 
 ## Phase 11 — Telegram bot v2 (backlog, added 2026-07-09 per Yan)
 
-- [ ] **"No trades in N cycles" watchdog** — alert when the cycle
-      produces no orders for N consecutive runs ("verify this is
-      intentional"). Would have caught the June dead month in week one.
-      Small; do first.
+- [x] **"No trades in N cycles" watchdog** — DONE 2026-09-23
+      (`runtime/cycle_watch.py`): missed scheduled cycle, 2 cycles that
+      could not trade, 4 cycles with zero orders; once per incident.
 - [ ] **Execution upgrade** — IBKR Adaptive algo or marketable-limit
       orders instead of raw market orders (protects against bad opens;
       TWAP/VWAP overkill at current size).
@@ -118,14 +139,17 @@ Order of operations:
       state/telegram_offset.json BEFORE dispatch; crash-restart can no
       longer replay an executed command. Corrupt/missing file degrades
       to the old behavior.
-- [ ] **Order status never promoted for overnight fills** (found via
+- [x] **Order status never promoted for overnight fills** — fixed in
+      `2bb21c0` (reconcile from the oldest open order); the daily
+      read-only broker reconciliation (2026-09-23) closes the rest. (found via
       copilot 2026-07-16) — the cycle marks FILLED only for fills that
       arrive within the submitting cycle; after-hours orders that fill
       at the next open stay 'submitted' in orders.db forever (all of
       June 10 + July 14 rows). Fix: reconcile fills since the LAST
       cycle, not since this cycle's start; backfill existing rows.
       Copilot flags these as stale meanwhile.
-- [ ] **Single execution lock** (external review 2026-07-15) — cron
+- [x] **Single execution lock** — shipped in `f832a14`
+      (`core/exec_lock.py`). Original note: (external review 2026-07-15) — cron
       cycle, trigger cycle, approval flow and manual commands lack one
       mutual-exclusion primitive. Mitigated by per-job locks, the 10s
       cooldown and the new submit-gate re-checks; a proper cross-path

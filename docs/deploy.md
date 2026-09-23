@@ -198,8 +198,8 @@ Do not flip `ALLOW_LIVE_TRADING=true` until **all** of these are true:
       'SELECT ts, equity FROM account_snapshots ORDER BY ts;'`.
 - [ ] You've manually run [restore.md](./restore.md) at least once and
       know it works.
-- [ ] You've sized `max_position_pct` and `max_gross_exposure` in
-      `config/risk.yaml` to start small. Doubling later is easy; recovering
+- [ ] You've sized `MAX_POSITION_PCT` and `MAX_GROSS_EXPOSURE` in
+      `.env` to start small. Doubling later is easy; recovering
       from a sized-too-big day is not.
 
 When that day comes:
@@ -354,6 +354,34 @@ operation: use a fresh reconciled account snapshot, prove the managed
 book and currency, and retain the previous reference and reset provenance.
 A code deployment cannot reconstruct true historical drawdown from the
 corrupted high-water mark.
+
+## 16. Wave-1 release notes (2026-09-23)
+
+`.env` changes on the VPS (the compose defaults changed too, but `.env`
+sets these explicitly and wins):
+
+```bash
+CRON=5 17 * * FRI                 # Friday 17:05 New York, both DST seasons
+SCHEDULE_TZ=America/New_York
+HEALTHCHECK_PING_URL=https://hc-ping.com/<your-check-uuid>   # optional, recommended
+MANUAL_ORDER_CONFIRM_PCT=0.05     # optional; defaults shown
+MANUAL_ORDER_MAX_PCT=0.50
+```
+
+New behaviour an operator will notice:
+
+- `/flatten`, `/resume` (while halted) and manual orders of 5%+ of equity
+  reply with a Confirm button / `/confirm TOKEN` (5-minute expiry).
+- A basket approved after the book changed is refused with a critical
+  alert; `/cycle` re-plans.
+- Weekday 16:30 New York: broker reconciliation message when the ledger
+  changed or the set of unresolved rows changed.
+- Hourly watchdog: missed cycle, desk-cannot-trade streak, no-trade streak.
+- A submission on an account whose kind contradicts TRADING_ENV (paper
+  ids start with `D`) is refused by the broker adapter.
+
+Deploy with the maintenance sequence in §15; this release changes no risk
+limit, arming flag or baseline.
 
 ## Troubleshooting
 
