@@ -223,6 +223,43 @@ def risk_block(state_dir: Path, settings: Any, snapshot: Any) -> dict[str, Any]:
     return out
 
 
+def _pin_transfers(days: list[dict[str, Any]]) -> None:
+    """Split each runner day into desk and pinned books, with manual trades
+    in pinned names counted as transfers, not P&L.
+
+    ``desk = account − pinned`` is exact on any one day, but the day-to-day
+    CHANGE is not a return: when the operator buys 20 more NVDA by hand,
+    cash leaves the desk and the same value lands in the pinned book, and
+    the naive split books it as a desk loss and a pinned gain of equal
+    size. The quantity change in each pinned symbol, valued at that day's
+    unit value, is that transfer. What remains is price P&L (up to the
+    fill-vs-close difference on the trade day, which is small and real).
+
+    Adds ``pinned`` (account − desk) and ``pin_transfer`` (base currency,
+    positive = cash moved from the desk into pinned names) and removes the
+    private ``_pins`` scratch field.
+    """
+    prev: dict[str, tuple[float, float]] | None = None
+    for d in days:
+        cur = d.pop("_pins", {})
+        d["pinned"] = None if d.get("desk") is None else round(d["account"] - d["desk"], 2)
+        if d.get("desk") is None:
+            d["pin_transfer"] = None
+            prev = None
+            continue
+        transfer = 0.0
+        if prev is not None:
+            for sym in {*cur, *prev}:
+                q1, v1 = cur.get(sym, (0.0, 0.0))
+                q0, v0 = prev.get(sym, (0.0, 0.0))
+                if q1 == q0:
+                    continue
+                unit = v1 / q1 if q1 else (v0 / q0 if q0 else 0.0)
+                transfer += (q1 - q0) * unit
+        d["pin_transfer"] = round(transfer, 2)
+        prev = cur
+
+
 def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
     """Daily account NetLiq, the desk book, and capital actually contributed.
 
@@ -284,6 +321,7 @@ def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
         rates = json.loads(r["fx_rates_json"] or "{}")
         last_rates = rates or last_rates
         desk: float | None = None
+        pin_units: dict[str, tuple[float, float]] = {}
         try:
             snap = AccountSnapshot(
                 ts=ts,
@@ -293,7 +331,14 @@ def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
                 base_currency=base,
                 fx_rates=rates,
             )
-            desk = float(managed_view(snap, pins, fx_rates=rates).account.equity)
+            view = managed_view(snap, pins, fx_rates=rates)
+            desk = float(view.account.equity)
+            qty: dict[str, float] = {}
+            for p in snap.positions.values():
+                sym = p.instrument.symbol.upper()
+                if sym in view.excluded:
+                    qty[sym] = qty.get(sym, 0.0) + float(p.quantity)
+            pin_units = {s: (q, view.excluded[s]) for s, q in qty.items()}
         except Exception:
             desk = None
         days.append(
@@ -302,8 +347,10 @@ def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
                 "account": round(float(r["equity"]), 2),
                 "desk": None if desk is None else round(desk, 2),
                 "cash": round(float(r["cash"]), 2),
+                "_pins": pin_units,
             }
         )
+    _pin_transfers(days)
     # Pre-bot history from IBKR Flex statements (runtime/account_history):
     # NAV for days before the first snapshot, and deposits/withdrawals as
     # the broker recorded them. Flex flows are authoritative for the days
@@ -317,9 +364,21 @@ def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
         out["note"] = (
             out["note"] + " · " if out["note"] else ""
         ) + f"account_history.json unreadable ({e})"
+    if not days:
+        # No runner snapshot yet: the statement is the only source of the
+        # base currency. Defaulting to USD labelled a franc account "USD".
+        base = str(hist.get("base_currency") or base).upper()
     first_snap = days[0]["t"] if days else None
     pre = [
-        {"t": d, "account": round(float(v), 2), "desk": None, "cash": None, "source": "ibkr_flex"}
+        {
+            "t": d,
+            "account": round(float(v), 2),
+            "desk": None,
+            "pinned": None,
+            "pin_transfer": None,
+            "cash": None,
+            "source": "ibkr_flex",
+        }
         for d, v in sorted(hist["nav"].items())
         if first_snap is None or d < first_snap
     ]
@@ -335,6 +394,17 @@ def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
     for d in days:
         d["source"] = "runner"
     days = pre + days
+    # An account opened long before it was funded (13 francs from 2025-09
+    # to the first deposit in 2026-02) is not history: months of a near-zero
+    # NAV flatten every chart into a line on the floor. Leading statement
+    # days below 1,000 with no transfer on them are dropped.
+    while (
+        len(days) > 1
+        and days[0].get("source") == "ibkr_flex"
+        and not by_day.get(days[0]["t"])
+        and days[0]["account"] < 1000
+    ):
+        days.pop(0)
     contributed = 0.0
     for d in days:
         f = by_day.get(d["t"])
@@ -363,6 +433,102 @@ def equity_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
     out["days"] = days
     out["currency"] = base
     out["pinned_now"] = sorted(pins)
+    return out
+
+
+def movers_block(runner_db: Path, state_dir: Path) -> dict[str, Any]:
+    """Which position carried or hurt the account since the last close.
+
+    Replaces the Live tab's attribution, which mixed currencies: IBKR's
+    ``unrealizedPNL`` is in each contract's currency, and on a CHF book
+    those dollars were divided by USDCHF as if they were francs. Here every
+    position is valued in the BASE currency at each snapshot's own FX rate,
+    so a US stock's line includes the dollar's move — which is what the
+    franc account actually made or lost on it.
+
+    Per symbol: ``Δ value − Δ quantity × today's unit value``. The second
+    term is a trade, not a result. ``residual`` is whatever the positions
+    do not explain: FX on non-base cash, interest, fees, a deposit.
+    """
+    from trading.core.types import AccountSnapshot
+    from trading.core.valuation import position_value_base
+    from trading.runner.holds import load_holds
+    from trading.runner.state import _positions_from_json
+
+    out: dict[str, Any] = {"rows": [], "currency": None}
+    conn = _ro_connect(runner_db)
+    if conn is None:
+        return out
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(account_snapshots)")}
+        fx_col = "fx_rates_json" if "fx_rates_json" in cols else "'{}' AS fx_rates_json"
+        ccy_col = "base_currency" if "base_currency" in cols else "'USD' AS base_currency"
+        sel = f"SELECT ts, cash, equity, positions_json, {fx_col}, {ccy_col} FROM account_snapshots"
+        now = conn.execute(sel + " ORDER BY ts DESC LIMIT 1").fetchone()
+        if now is None:
+            return out
+        day0 = datetime.fromtimestamp(float(now["ts"]), tz=timezone.utc).date()
+        cutoff = datetime(day0.year, day0.month, day0.day, tzinfo=timezone.utc).timestamp()
+        prev = conn.execute(sel + " WHERE ts < ? ORDER BY ts DESC LIMIT 1", (cutoff,)).fetchone()
+    finally:
+        conn.close()
+    if prev is None:
+        return out
+
+    def _book(r: Any) -> tuple[str, dict[str, tuple[float, float]], float]:
+        base = str(r["base_currency"] or "USD").upper()
+        rates = json.loads(r["fx_rates_json"] or "{}")
+        snap = AccountSnapshot(
+            ts=datetime.fromtimestamp(float(r["ts"]), tz=timezone.utc),
+            cash=float(r["cash"]),
+            equity=float(r["equity"]),
+            positions=_positions_from_json(r["positions_json"]),
+            base_currency=base,
+            fx_rates=rates,
+        )
+        per: dict[str, tuple[float, float]] = {}
+        for p in snap.positions.values():
+            value, _clean = position_value_base(p, base_currency=base, fx_rates=rates)
+            q0, v0 = per.get(p.instrument.symbol.upper(), (0.0, 0.0))
+            per[p.instrument.symbol.upper()] = (q0 + float(p.quantity), v0 + value)
+        return base, per, float(r["equity"])
+
+    try:
+        base, cur, eq1 = _book(now)
+        _b, old, eq0 = _book(prev)
+    except Exception as e:
+        out["note"] = f"snapshots unreadable ({e})"
+        return out
+    try:
+        pins = load_holds(state_dir)
+    except Exception:
+        pins = set()
+    rows = []
+    for sym in sorted({*cur, *old}):
+        q1, v1 = cur.get(sym, (0.0, 0.0))
+        q0, v0 = old.get(sym, (0.0, 0.0))
+        unit = v1 / q1 if q1 else (v0 / q0 if q0 else 0.0)
+        pnl = (v1 - v0) - (q1 - q0) * unit
+        rows.append(
+            {
+                "symbol": sym,
+                "pnl": round(pnl, 2),
+                "pct": round(pnl / v0, 4) if v0 else None,
+                "value": round(v1, 2),
+                "traded": q1 != q0,
+                "pinned": sym in pins,
+            }
+        )
+    rows.sort(key=lambda r: r["pnl"])
+    explained = sum(r["pnl"] for r in rows)
+    out.update(
+        rows=rows,
+        currency=base,
+        since=datetime.fromtimestamp(float(prev["ts"]), tz=timezone.utc).isoformat(),
+        as_of=datetime.fromtimestamp(float(now["ts"]), tz=timezone.utc).isoformat(),
+        account_change=round(eq1 - eq0, 2),
+        residual=round(eq1 - eq0 - explained, 2),
+    )
     return out
 
 

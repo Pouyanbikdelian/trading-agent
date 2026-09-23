@@ -102,8 +102,9 @@ Order of operations:
       STRATEGY_SLEEVE_PCT=0.0, i.e. the PM's targets are the live targets.
       Whether it should stay that way is the wave-2 selection race.
 - [x] DST: schedule anchored on New York time (2026-09-23, wave 1). VPS
-      .env must be edited at deploy: `CRON=5 17 * * FRI`,
-      `SCHEDULE_TZ=America/New_York` (replaces the `5 22` winter chore).
+      .env edited at deploy to `CRON=0 15 * * FRI`,
+      `SCHEDULE_TZ=America/New_York` — the existing 0 19 UTC in New York
+      time (the compose default 5 17 is after the close; not adopted).
 
 ## Robustness wave 1 (2026-09-23, branch `claude/robustness-wave-1`)
 

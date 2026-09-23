@@ -45,7 +45,7 @@ class TestNoHardcodedPaperLabels:
         tests/dashboard/test_race_chart.py.
         """
         assert "'momentum top-k (paper)'" not in PAGE
-        assert "'account NetLiq ('+(D.env||'paper')+' · '+ccy+')'" in PAGE
+        assert "label:'Your account · '+(D.env||'paper')" in PAGE
 
     def test_every_env_label_is_filled_from_the_payload(self) -> None:
         assert "document.querySelectorAll('.envlbl')" in PAGE

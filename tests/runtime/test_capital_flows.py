@@ -139,3 +139,84 @@ def test_flow_commands_refuse_bad_input(tmp_path: Path, monkeypatch) -> None:
     future = (datetime.now(tz=timezone.utc).date() + timedelta(days=3)).isoformat()
     assert "future" in tg._cmd_flow(["100", "CHF", future], +1)
     assert not (tmp_path / "capital_flows.json").exists()
+
+
+def test_equity_block_treats_a_manual_pinned_buy_as_a_transfer(tmp_path: Path) -> None:
+    """Buying more of a pinned name by hand moves cash out of the desk and
+    the same value into the pinned book. Neither is a return."""
+    from trading.core.types import AccountSnapshot, AssetClass, Instrument, Position
+    from trading.dashboard.cockpit import equity_block
+    from trading.runner.state import RunnerStore
+
+    inst = Instrument(symbol="NVDA", asset_class=AssetClass.EQUITY, currency="CHF")
+    (tmp_path / "holds.json").write_text(json.dumps({"symbols": ["NVDA"]}))
+    rs = RunnerStore(tmp_path / "runner.db")
+    # day, cash, NVDA qty, NVDA mark
+    for day, cash, qty, mark in [
+        ("2026-08-18", 50_000, 100, 100.0),
+        ("2026-08-19", 50_000, 100, 102.0),  # +200 pinned price move
+        ("2026-08-20", 40_000, 200, 100.0),  # bought 100 @100 by hand, mark -2
+        ("2026-08-21", 40_000, 200, 101.0),  # +200 pinned price move
+    ]:
+        pos = Position(
+            instrument=inst, quantity=qty, avg_price=100.0, unrealized_pnl=qty * (mark - 100)
+        )
+        rs.save_snapshot(
+            AccountSnapshot(
+                ts=datetime.fromisoformat(day + "T20:00:00+00:00"),
+                cash=cash,
+                equity=cash + qty * mark,
+                positions={inst.key: pos},
+                base_currency="CHF",
+            )
+        )
+    rs.close()
+    by = {d["t"]: d for d in equity_block(tmp_path / "runner.db", tmp_path)["days"]}
+    assert by["2026-08-18"]["pin_transfer"] == 0
+    assert by["2026-08-20"]["pin_transfer"] == pytest.approx(10_000)
+    # desk: 50k -> 40k, but 10k of that moved into NVDA: zero desk P&L.
+    d0, d1 = by["2026-08-19"], by["2026-08-20"]
+    desk_pnl = d1["desk"] - d0["desk"] + d1["pin_transfer"]
+    pinned_pnl = d1["pinned"] - d0["pinned"] - d1["pin_transfer"]
+    assert desk_pnl == pytest.approx(0)
+    assert pinned_pnl == pytest.approx(-200)  # 100 shares fell 102 -> 100
+    assert desk_pnl + pinned_pnl == pytest.approx(d1["account"] - d0["account"])
+    assert "_pins" not in d1
+
+
+def test_movers_value_each_position_in_the_base_currency(tmp_path: Path) -> None:
+    """A dollar stock on a franc book: the line is francs, FX included."""
+    from trading.core.types import AccountSnapshot, AssetClass, Instrument, Position
+    from trading.dashboard.cockpit import movers_block
+    from trading.runner.state import RunnerStore
+
+    nvda = Instrument(symbol="NVDA", asset_class=AssetClass.EQUITY, currency="USD")
+    (tmp_path / "holds.json").write_text(json.dumps({"symbols": ["NVDA"]}))
+    rs = RunnerStore(tmp_path / "runner.db")
+    # 10 NVDA: 100 -> 110 USD while USDCHF 0.80 -> 0.79; plus 1,000 USD cash.
+    for ts, mark, fx in [
+        ("2026-09-22T20:00:00+00:00", 100.0, 0.80),
+        ("2026-09-23T15:00:00+00:00", 110.0, 0.79),
+    ]:
+        pos = Position(
+            instrument=nvda, quantity=10, avg_price=100.0, unrealized_pnl=10 * (mark - 100)
+        )
+        rs.save_snapshot(
+            AccountSnapshot(
+                ts=datetime.fromisoformat(ts),
+                cash=1_000 * fx,
+                equity=1_000 * fx + 10 * mark * fx,
+                positions={nvda.key: pos},
+                base_currency="CHF",
+                fx_rates={"USD": fx},
+            )
+        )
+    rs.close()
+    out = movers_block(tmp_path / "runner.db", tmp_path)
+    (row,) = out["rows"]
+    assert out["currency"] == "CHF"
+    assert row["pnl"] == pytest.approx(1100 * 0.79 - 1000 * 0.80)  # 69 CHF, not 10 or 12.66
+    assert row["pinned"] is True and row["traded"] is False
+    # The USD cash lost 10 CHF to the dollar's move; no position owns it.
+    assert out["residual"] == pytest.approx(-10.0)
+    assert out["account_change"] == pytest.approx(row["pnl"] + out["residual"])

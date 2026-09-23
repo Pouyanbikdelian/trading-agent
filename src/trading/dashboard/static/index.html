@@ -111,6 +111,7 @@ table.t tr.clickable:hover td{background:rgba(124,196,255,.05)}
 table.t tr.focus td{background:rgba(124,196,255,.09)}
 .sym{font:600 13px var(--sans);color:var(--text)}
 .tag{display:inline-block;font:600 10px var(--display);letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--line-2);border-radius:4px;padding:1px 5px;color:var(--muted);margin-left:6px;vertical-align:1px}
+.lg{display:inline-block;width:10px;height:4px;border-radius:2px;margin-right:8px;vertical-align:3px}
 .tag.pin{color:var(--violet);border-color:rgba(167,139,250,.45)}
 .tag.ok{color:var(--up);border-color:rgba(61,220,151,.4)}.tag.warn{color:var(--warn);border-color:rgba(246,185,77,.45)}.tag.bad{color:var(--crit);border-color:rgba(255,77,109,.45)}
 .bar52{position:relative;width:90px;height:6px;background:var(--line);border-radius:3px;display:inline-block;vertical-align:middle}
@@ -174,6 +175,12 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
   <div class="panel kpi c3"><div class="label">Cash</div><div class="value" id="kCash">–</div><div class="delta" id="kCashD"></div></div>
   <div class="panel kpi c3"><div class="label">P&amp;L vs money put in</div><div class="value" id="kRet">–</div><div class="delta" id="kRetD"></div></div>
 
+  <div class="panel c12">
+   <h2>Performance <span class="sub" id="perfSub">time-weighted: deposits, withdrawals and your own trades in pinned names removed</span><span class="right" id="perfCcy"></span></h2>
+   <div class="tscroll"><table class="t" id="perfT"></table></div>
+   <div class="note" id="perfNote"></div>
+   <div class="read" id="rdPerf"></div>
+  </div>
   <div class="panel c8">
    <h2>Kill switches <span class="sub" id="ksSub"></span></h2>
    <div class="grid" style="gap:8px">
@@ -188,7 +195,6 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <h2>Needs attention</h2>
    <div class="alist" id="attention"></div>
   </div>
-
   <div class="panel c8">
    <h2>Equity (<span class="envlbl">paper</span>) <span class="sub" id="eqret"></span>
     <span class="right" id="eqRanges"></span></h2>
@@ -199,16 +205,31 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <h2>Coming up <span class="sub">server-computed, New York time</span></h2>
    <div class="sched" id="sched"></div>
   </div>
-
   <div class="panel c8">
-   <h2>Cycle history <span class="sub">last 16 runs · bar height = orders sent</span></h2>
-   <div class="ribbon" id="ribbon"></div>
-   <div class="legend"><span><i style="background:var(--up)"></i>traded</span><span><i style="background:var(--ice-dim)"></i>no orders needed</span><span><i style="background:var(--warn)"></i>halted / review only</span><span><i style="background:var(--crit)"></i>error</span><span><i style="background:var(--violet)"></i>skipped (lock)</span></div>
-   <div class="read" id="rdCyc"></div>
+   <h2>Race · rebased to 100 <span class="sub" id="raceSub"></span><span class="right" id="raceRanges"></span></h2>
+   <div class="chart tall" id="raceChart"></div><div class="empty" id="raceEmpty" hidden></div>
+   <div class="note" id="raceNote"></div>
+   <div class="read" id="rdRace"></div>
+  </div>
+  <div class="panel c4">
+   <h2>Today's movers <span class="sub" id="movSub"></span></h2>
+   <div class="tscroll"><table class="t" id="movT"></table></div>
+   <div class="read" id="rdMov"></div>
+  </div>
+  <div class="panel c8">
+   <h2>Daily P&amp;L <span class="sub" id="pnlSub"></span></h2>
+   <div class="chart tall" id="pnlChart"></div>
+   <div class="read" id="rdPnl"></div>
   </div>
   <div class="panel c4">
    <h2>Costs <span class="sub">broker-recorded net commissions</span></h2>
    <div id="lvCosts"></div>
+  </div>
+  <div class="panel c12">
+   <h2>Cycle history <span class="sub">last 16 runs · bar height = orders sent</span></h2>
+   <div class="ribbon" id="ribbon"></div>
+   <div class="legend"><span><i style="background:var(--up)"></i>traded</span><span><i style="background:var(--ice-dim)"></i>no orders needed</span><span><i style="background:var(--warn)"></i>halted / review only</span><span><i style="background:var(--crit)"></i>error</span><span><i style="background:var(--violet)"></i>skipped (lock)</span></div>
+   <div class="read" id="rdCyc"></div>
   </div>
  </div>
 </section>
@@ -243,13 +264,6 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <div id="pmBox"></div>
   </div>
 
-  <div class="panel c12">
-   <h2>Strategy race · USD, normalized to 100</h2>
-   <div class="note" style="margin:-4px 0 6px">every series rebased on the SAME day; stated deposits and withdrawals removed (a deposit is not a return); the account line is the whole NetLiq, not a strategy sleeve</div>
-   <div class="chart" id="raceChart"></div><div class="empty" id="raceEmpty" hidden></div>
-   <div class="note" id="raceNote"></div>
-   <div class="read" id="rdRace"></div>
-  </div>
  </div>
 </section>
 
@@ -414,6 +428,10 @@ const rebase100=(series)=>{
  const dates=[...new Set(usable.flatMap(s=>s.pts.map(p=>p.t)))].filter(t=>t>=start).sort();
  const sets=usable.map(s=>{
   const m={};s.pts.forEach(p=>{m[p.t]=p.v;});  // last same-day point wins
+  // No mark ON the start day (SPY on a weekend or holiday): base it on its
+  // last mark before, so every line starts at the same instant instead of
+  // some of them skipping the next session's move.
+  if(m[start]==null){const prior=s.pts.map(p=>p.t).filter(t=>t<start).sort().pop();if(prior!=null)m[start]=m[prior];}
   const first=dates.find(t=>m[t]!=null);
   const base=first==null?null:m[first];
   if(!(base>0)){dropped.push(s.label);return null;}
@@ -475,7 +493,7 @@ const rangeButtons=(id,cur,on)=>{const el=$(id);if(!el)return;el.innerHTML=RANGE
 
 // ------------------------------------------------------------------ state
 let D={};
-const UI={tab:'cockpit',eqRange:'1y',cmpRange:'6m',cmpSel:null,rrgIdx:null,rrgTrail:8,holdSort:'value_base',holdDir:-1};
+const UI={tab:'cockpit',perfCcy:null,raceRange:'all',raceOff:new Set(),eqRange:'1y',cmpRange:'6m',cmpSel:null,rrgIdx:null,rrgTrail:8,holdSort:'value_base',holdDir:-1};
 try{const h=location.hash.replace('#','');if(['cockpit','portfolio','market','agents'].includes(h))UI.tab=h;}catch(e){}
 
 function setTab(t){UI.tab=t;
@@ -534,7 +552,7 @@ function renderCockpit(){
  $('kCashD').innerHTML=acct.cash!=null?`<span class="muted">${num(acct.cash)} ${esc(ccy)} of the account</span>`:'';
  $('kRet').innerHTML=B.pnl==null?'–':`<span class="${cls(B.pnl)}">${B.pnl>=0?'+':'−'}${num(Math.abs(B.pnl))}</span><small>${esc(ccy)}</small>`;
  $('kRetD').innerHTML=B.last?`<span class="${cls(B.pnlPct)}">${pct(B.pnlPct,1)}</span> <span class="muted">on ${num(B.last.contributed)} put in since ${esc(B.days[0].t)} · time-weighted ${pct(B.twr,1)}</span>`:'';
- renderGauges();renderAttention();renderEquity();renderSchedule();renderRibbon();renderCosts();renderBrief();
+ renderPerf();renderGauges();renderAttention();renderEquity();renderSchedule();renderRace();renderMovers();renderPnl();renderRibbon();renderCosts();renderBrief();
 }
 function renderBrief(){
  const st=D.status||{},r=D.risk||{},B=book(),cyc=D.cycles||[],pos=D.positions||[],ccy=B.ccy;
@@ -686,7 +704,7 @@ function renderPortfolio(){
  const nearStop=rows.filter(r=>r.stop_distance_pct!=null&&r.stop_distance_pct<.05);
  $('rdHold').innerHTML=rows.length?`${rows.length} positions worth ${money(tot,ccy)}; <b>${pinN}</b> pinned (yours, never traded by the desk). Largest: <b>${esc(big.symbol)}</b> at ${pctU(big.weight,1)} of the account. Best open P&L ${esc(best.symbol)} ${pct(best.unrealized_pct,0)}, worst ${esc(worst.symbol)} ${pct(worst.unrealized_pct,0)}.`+
   (nearStop.length?` <span class="warn">Within 5% of a trailing stop: ${esc(nearStop.map(r=>r.symbol).join(', '))}.</span>`:' No position is near a trailing stop.'):'No positions.';
- renderAlloc(rows);renderCompare();renderWatch();renderPM();renderRace();
+ renderAlloc(rows);renderCompare();renderWatch();renderPM();
 }
 function renderAlloc(rows){
  const r=D.risk||{};const bySec={};let tot=0;
@@ -739,36 +757,202 @@ function renderPM(){
  $('pmBox').innerHTML=`<div class="tscroll"><table class="t"><thead><tr><th>Target</th><th>Weight</th></tr></thead><tbody>${w.map(([s,v])=>`<tr><td><span class="sym">${esc(s)}</span></td><td><span class="wbar" style="width:${Math.round(120*v/Math.max(.01,w[0][1]))}px;background:var(--violet)"></span>${pctU(v,1)}</td></tr>`).join('')}</tbody></table></div>`+
   (lr.watch?`<div class="note">watching: ${esc(stripMd(String(lr.watch)).slice(0,240))}</div>`:'');
 }
-function renderRace(){
- const todayISO=new Date().toISOString().slice(0,10);
+// ------------------------------------------------------------ performance
+// One currency for every line on a chart. USDCHF (francs per dollar),
+// carried forward from the last close on or before each day; a day before
+// the series starts has no rate and is dropped, not priced at a guess.
+function fxLookup(){const s=(D.usdchf||[]).map(p=>[String(p.t).slice(0,10),+p.v]).filter(p=>p[1]>0).sort((x,y)=>x[0]<y[0]?-1:1);
+ const f=(t)=>{let lo=0,hi=s.length-1,a=null;while(lo<=hi){const m=(lo+hi)>>1;if(s[m][0]<=t){a=s[m][1];lo=m+1;}else hi=m-1;}return a;};
+ f.ok=s.length>1;f.last=s.length?s[s.length-1][0]:null;return f;}
+// Time-weighted index of one book. adj(row) is the part of a day's change
+// that is NOT a return: a deposit, or cash that moved between the desk and
+// your pinned names because you traded one by hand (cockpit._pin_transfers).
+// A day with no value restarts the chain at 0% instead of bridging it.
+function twrIndex(rows,key,adj){const out=[];let idx=100,prev=null;
+ for(const r of rows){const v=r[key];if(v==null||!isFinite(v)){prev=null;continue;}
+  if(prev!=null&&prev[key]>0){let x=(v-adj(r))/prev[key]-1;if(Math.abs(x)>FLOW_THRESHOLD)x=0;idx*=1+x;}
+  out.push({t:r.t,v:idx});prev=r;}
+ return out;}
+// The runner snapshots on weekends too. A Saturday row is a flat day that
+// makes Monday's "last day" read 0% and dilutes "days up", so weekend rows
+// are dropped and anything they carried (a deposit, a pinned-name
+// transfer) is added to the next weekday. The final row is always kept.
+function weekdays(all){const out=[];let cf=0,ct=0;
+ const wk=(t)=>{const g=new Date(t+'T12:00:00Z').getUTCDay();return g===0||g===6;};
+ all.forEach((r,i)=>{if(wk(r.t)&&i<all.length-1){cf+=r.flow||0;ct+=r.pin_transfer||0;return;}
+  out.push(Object.assign({},r,{flow:((r.flow||0)+cf)||null,pin_transfer:(r.pin_transfer==null&&!ct)?r.pin_transfer:(r.pin_transfer||0)+ct}));cf=0;ct=0;});
+ return out;}
+// Every book, native currency, as a time-weighted index.
+function perfBooks(){
+ const B=book();const base=B.ccy||'USD';const todayISO=new Date().toISOString().slice(0,10);
+ const rows=weekdays(B.days),last=rows.length?rows[rows.length-1]:{};
+ const acct=twrIndex(rows,'account',r=>r.flow||0);
+ const desk=twrIndex(rows,'desk',r=>(r.flow||0)-(r.pin_transfer||0));
+ const pinned=twrIndex(rows,'pinned',r=>r.pin_transfer||0);
  const pmH=((D.agent_pm||{}).history||[])
   .map(h=>({t:String(h.t).slice(0,10),v:+h.equity,spy:h.spy?+h.spy:null}))
   .filter(h=>h.t<todayISO);
- const daily=(D.equity_curve||[]).map(p=>({t:p.t,v:+p.v}));
- const usd=(D.equity_curve_usd||[]).length?D.equity_curve_usd:daily;
- // Stated flows are in the base currency; scale them into USD with the
- // same day's conversion the curve itself used.
- const baseBy={},usdBy={};daily.forEach(p=>baseBy[p.t]=p.v);usd.forEach(p=>usdBy[p.t]=+p.v);
- const acct=withoutFlows(usd.map(p=>({t:p.t,v:+p.v})),flowMap(),(t)=>baseBy[t]>0&&usdBy[t]?usdBy[t]/baseBy[t]:1);
- const pm=pmH;
- const spy=pmH.filter(h=>h.spy!=null).map(h=>({t:h.t,v:h.spy}));
- const ccy=D.equity_usd_ok===false?(D.equity_currency||'USD'):'USD';
- // NOT a strategy: at STRATEGY_SLEEVE_PCT=0.0 the momentum book places no
- // orders, so this line is the whole account's NetLiq, pins included.
- const r=rebase100([
-  {label:'account NetLiq ('+(D.env||'paper')+' · '+ccy+')',pts:flowAdjustedCurve(acct),color:C.up},
-  {label:'agent PM (sim)',pts:flowAdjustedCurve(pm),color:C.violet},
-  {label:'SPY',pts:spy,color:C.muted}]);
+ const pm=flowAdjustedCurve(pmH);
+ const mk=((D.market||{}).spy_series||[]).map(p=>({t:String(p.t).slice(0,10),v:+p.v})).filter(p=>p.t<todayISO);
+ // SPY is a price index: never flow-adjusted.
+ const spy=mk.length>1?mk:pmH.filter(h=>h.spy!=null).map(h=>({t:h.t,v:h.spy}));
+ return {base,start:(B.hist||{}).bot_first||null,list:[
+  {key:'acct',short:'Account',label:'Your account · '+(D.env||'paper'),ccy:base,pts:acct,value:last.account,color:C.up},
+  {key:'desk',short:'Desk',label:'Desk · what the bot manages',ccy:base,pts:desk,value:last.desk,color:C.ice},
+  {key:'pinned',short:'Pinned',label:'Your pinned holdings',ccy:base,pts:pinned,value:last.pinned,color:C.teal,dash:[4,3]},
+  {key:'pm',short:'PM sim',label:'Agent PM · simulation',ccy:'USD',pts:pm,value:pmH.length?pmH[pmH.length-1].v:null,color:C.violet,sim:true},
+  {key:'spy',short:'SPY',label:'SPY',ccy:'USD',pts:spy,value:null,color:C.muted}]};}
+// A USD index in francs is the index times that day's USDCHF (and the
+// reverse); any constant factor cancels when the chart rebases.
+function inCcy(pts,from,to,fx){if(from===to)return pts;
+ if(!fx.ok||!((from==='USD'&&to==='CHF')||(from==='CHF'&&to==='USD')))return null;
+ const out=[];for(const p of pts){const r=fx(p.t);if(r==null)continue;out.push({t:p.t,v:from==='USD'?p.v*r:p.v/r});}return out;}
+function perfCcyOptions(base,fx){return base==='CHF'&&fx.ok?['CHF','USD']:base==='USD'&&fx.ok?['USD','CHF']:[base];}
+function ccyButtons(opts){const el=$('perfCcy');if(!el)return;
+ if(!opts.includes(UI.perfCcy))UI.perfCcy=opts[0];
+ el.innerHTML=opts.length>1?opts.map(c=>`<button class="chipbtn${c===UI.perfCcy?' on':''}" data-c="${c}">${c}</button>`).join(''):'';
+ el.querySelectorAll('button').forEach(b=>b.onclick=()=>{UI.perfCcy=b.dataset.c;renderPerf();renderRace();});}
+// Return between the last point on or before `cut` and the series end.
+// A series that starts after `cut` has no honest number for that window.
+function winRet(pts,cut){if(!pts||pts.length<2)return null;const end=pts[pts.length-1];let st=null;
+ for(const p of pts){if(p.t<=cut)st=p;else break;}
+ return st&&st!==end&&st.v>0?end.v/st.v-1:null;}
+function dayRet(pts){return pts&&pts.length>1&&pts[pts.length-2].v>0?pts[pts.length-1].v/pts[pts.length-2].v-1:null;}
+function isoMinus(days){return new Date(Date.now()-days*864e5).toISOString().slice(0,10);}
+function renderPerf(){
+ const P=perfBooks();const fx=fxLookup();const opts=perfCcyOptions(P.base,fx);ccyButtons(opts);const to=UI.perfCcy||P.base;
+ const firstT=(l)=>l.map(b=>b.pts.length?b.pts[0].t:null).filter(Boolean).sort().slice(-1)[0];
+ const since=P.start||firstT(P.list.filter(b=>b.key!=='spy'));
+ const cols=[['Last day',null],['1W',isoMinus(7)],['1M',isoMinus(31)],['3M',isoMinus(92)],['YTD',new Date().getFullYear()+'-01-01'],['1Y',isoMinus(366)]];
+ if(since)cols.push(['Since '+since.slice(5).replace('-','/'),since]);
+ const books=P.list.map(b=>{const pts=inCcy(b.pts,b.ccy,to,fx);const conv=pts!=null;
+  const use=conv?pts:b.pts;const lastT=b.pts.length?b.pts[b.pts.length-1].t:null;
+  let value=b.value;if(value!=null&&b.ccy!==to){const r=lastT?fx(lastT):null;value=r?(b.ccy==='USD'?value*r:value/r):null;}
+  return Object.assign({},b,{use,conv,value,rets:cols.map(([k,cut])=>cut==null?dayRet(use):winRet(use,cut))});});
+ const cell=(x)=>`<td class="${cls(x)}">${x==null?'<span class="faint">–</span>':pct(x,1)}</td>`;
+ $('perfT').innerHTML=`<thead><tr><th>Book</th><th>Value · ${esc(to)}</th>${cols.map(c=>`<th>${esc(c[0])}</th>`).join('')}</tr></thead><tbody>`+
+  books.map(b=>`<tr><td><span class="lg" style="background:${b.color}"></span>${esc(b.label)}${b.sim?'<span class="tag warn">sim</span>':''}${!b.conv?`<span class="tag bad">${esc(b.ccy)}</span>`:''}</td>`+
+   `<td>${b.value==null?'<span class="faint">–</span>':num(b.value)}</td>${b.rets.map(cell).join('')}</tr>`).join('')+'</tbody>';
+ const unconv=books.filter(b=>!b.conv).map(b=>b.label);
+ $('perfNote').textContent=[`every figure in ${to}`+(to!==P.base?` (the account is ${P.base}; converted at each day's USDCHF close)`:''),
+  fx.ok&&fx.last?`FX through ${fx.last}`:'',
+  unconv.length?`⚠ no FX series — shown in its own currency: ${unconv.join(', ')}`:'',
+  '“–” = that book did not exist yet at the start of the window'].filter(Boolean).join(' · ');
+ // READ: one window every book shares.
+ const k=cols.length-1;const get=(key)=>(books.find(b=>b.key===key)||{}).rets?.[k];
+ const a=get('acct'),d=get('desk'),pn=get('pinned'),pm=get('pm'),sp=get('spy');
+ if(a==null&&d==null){$('rdPerf').textContent='Not enough daily closes yet.';return;}
+ const said=[['your account',a],['the desk',d],['your pinned holdings',pn],['SPY',sp]].filter(x=>x[1]!=null).map(([n,v])=>`${n} <b>${pct(v,1)}</b>`);
+ const bits=[`Since ${esc(since)}, in ${esc(to)}: ${said.join(', ')}.`];
+ // Who made the money: contributions in currency, from the daily split.
+ const R=pnlRows().filter(r=>r.t>since&&r.desk!=null);
+ const cd=R.reduce((x,r)=>x+r.desk,0),cp=R.reduce((x,r)=>x+r.pin,0);
+ if(R.length)bits.push(`In money that is desk <b>${cd>=0?'+':'−'}${num(Math.abs(cd))} ${esc(P.base)}</b> and pinned <b>${cp>=0?'+':'−'}${num(Math.abs(cp))} ${esc(P.base)}</b>`+
+  (Math.abs(cp)>2*Math.abs(cd)?' — your own holdings drove the result; the desk barely moved.':Math.abs(cd)>2*Math.abs(cp)?' — the desk drove the result.':'.'));
+ if(d!=null&&sp!=null)bits.push(d>=sp?`The desk is <b>ahead of SPY by ${pctU(d-sp,1)}</b>.`:`The desk is <b>behind SPY by ${pctU(sp-d,1)}</b>`+((D.risk||{}).gross_exposure!=null&&(D.risk||{}).gross_exposure<.5?' — expected while it sits mostly in cash.':'.'));
+ // The franc effect, stated in words.
+ const spyB=P.list.find(b=>b.key==='spy');
+ if(fx.ok&&P.base==='CHF'&&spyB){const u=winRet(spyB.pts,since),c=winRet(inCcy(spyB.pts,'USD','CHF',fx),since);
+  if(u!=null&&c!=null&&Math.abs(u-c)>.003)bits.push(`FX matters here: SPY made ${pct(u,1)} in dollars but ${pct(c,1)} in francs, because the dollar ${c<u?'fell':'rose'} against the franc. The CHF view is what your account felt.`);}
+ if(pm!=null)bits.push(`The PM line is a frictionless paper simulation (${pct(pm,1)}); a lead of a few percent over it or SPY within a few months is noise.`);
+ $('rdPerf').innerHTML=bits.join(' ');
+}
+function renderRace(){
+ rangeButtons('raceRanges',UI.raceRange,(r)=>{UI.raceRange=r;renderRace();});
+ const P=perfBooks();const fx=fxLookup();const to=UI.perfCcy||P.base;const cut=cutFor(UI.raceRange);
+ const all=P.list.map(b=>{const pts=inCcy(b.pts,b.ccy,to,fx)||b.pts;return {key:b.key,label:b.short,color:b.color,dash:b.dash,pts:pts.filter(p=>!cut||p.t>=cut)};});
+ const shown=all.filter(s=>!UI.raceOff.has(s.label));
+ const r=rebase100(shown);
  const ok=r.sets.length&&r.dates.length>1;
+ $('raceSub').textContent=`${to} · click a name in the legend to drop that line; the chart re-bases on the latest start among the lines shown`;
  $('raceChart').hidden=!ok;$('raceEmpty').hidden=!!ok;
- $('raceEmpty').textContent=pmH.length?'not enough overlapping daily closes yet':'no sim book yet — /pm run in Telegram starts one';
- rebaseNote('raceNote',ok?r:null,(acct.length&&D.equity_usd_ok===false)?
-  '⚠ USDCHF unavailable — the '+ccy+' account line is UNCONVERTED, so FX moves show as performance':'');
- if(ok)rebasedLines('raceChart',r);
- const endOf=(lbl)=>{const x=r.sets.find(z=>z.label.startsWith(lbl));if(!x)return null;const v=[...x.data].reverse().find(y=>y!=null);return v==null?null:v/100-1;};
- const a=endOf('account'),p=endOf('agent PM'),sp=endOf('SPY');
- $('rdRace').innerHTML=ok?`Since ${esc(r.start)}: your account <b>${pct(a,1)}</b>, the PM simulation <b>${pct(p,1)}</b>, SPY <b>${pct(sp,1)}</b> (all in USD). `+
-  `<b>The PM line is a paper simulation</b>: it fills at the decision-time price with fractional shares and a flat 0.10% cost, no spread, no FX, no taxes, and it keeps trading while the real desk is halted — so it will look better than any real account. Treat a lead of a few percent over a few months as noise.`:'';
+ $('raceEmpty').textContent=shown.length?'not enough overlapping daily closes in this window':'every line is switched off — click a legend name';
+ rebaseNote('raceNote',ok?r:null,'');
+ const c=chart('raceChart');if(!c)return;
+ const sel={};all.forEach(s=>sel[s.label]=!UI.raceOff.has(s.label));
+ const byLabel={};r.sets.forEach(x=>byLabel[x.label]=x);
+ c.off('legendselectchanged');
+ c.setOption(base({tooltip:Object.assign({},TT,{valueFormatter:(v)=>v==null?'–':Number(v).toFixed(1)}),
+  legend:{top:0,data:all.map(s=>s.label),selected:sel,textStyle:{color:C['text-2'],fontSize:11},inactiveColor:C.faint,icon:'roundRect',itemWidth:10,itemHeight:4},
+  grid:{left:44,right:14,top:34,bottom:56},
+  xAxis:Object.assign({type:'category',data:r.dates,boundaryGap:false},AX),
+  yAxis:Object.assign({type:'value',scale:true},AX),
+  dataZoom:[{type:'inside'},{type:'slider',height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(124,196,255,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
+  series:all.map(s=>{const x=byLabel[s.label];return {name:s.label,type:'line',showSymbol:false,connectNulls:true,data:x?x.data:[],
+   lineStyle:{width:s.key==='spy'?1.2:1.8,color:s.color,type:(s.dash||[]).length?'dashed':'solid'},itemStyle:{color:s.color},
+   markLine:{silent:true,symbol:'none',lineStyle:{color:C.faint,type:'dotted'},label:{show:false},data:[{yAxis:100}]}};})}),true);
+ c.on('legendselectchanged',(e)=>{UI.raceOff=new Set(Object.entries(e.selected).filter(([,v])=>!v).map(([k])=>k));renderRace();});
+ if(!ok){$('rdRace').textContent='';return;}
+ const ends=r.sets.map(x=>{const v=[...x.data].reverse().find(y=>y!=null);return {l:x.label,v:v==null?null:v/100-1};}).filter(x=>x.v!=null).sort((p,q)=>q.v-p.v);
+ const lateStart=all.filter(s=>UI.raceOff.has(s.label)===false&&s.pts.length&&s.pts[0].t===r.start).map(s=>s.label);
+ $('rdRace').innerHTML=`From ${esc(r.start)} in ${esc(to)}: `+ends.map((x,i)=>`${i===0?'<b>':''}${esc(x.l)} ${pct(x.v,1)}${i===0?'</b>':''}`).join(' · ')+'. '+
+  (lateStart.length&&lateStart.length<shown.length?`The chart starts on ${esc(r.start)} because ${esc(lateStart.join(' and '))} ${lateStart.length>1?'start':'starts'} there — switch ${lateStart.length>1?'them':'it'} off in the legend to see the other lines further back.`:'');
+}
+// Each day's P&L in the account currency, split into the two books.
+// desk + pinned = account − deposits on every day the split exists.
+function pnlRows(){const d=weekdays(book().days);const out=[];
+ const cand=new Set(((D.equity||{}).flow_candidates||[]).map(c=>c.t));
+ for(let i=1;i<d.length;i++){const a=d[i-1],b=d[i];const f=b.flow||0;let acct=b.account-a.account-f;
+  let odd=null;if(a.account>0&&Math.abs(acct)/a.account>FLOW_THRESHOLD){odd=acct;acct=0;}  // same guard as the curves
+  const split=!odd&&a.desk!=null&&b.desk!=null&&a.pinned!=null&&b.pinned!=null;const tr=b.pin_transfer||0;
+  out.push({t:b.t,acct,desk:split?b.desk-a.desk-f+tr:null,pin:split?b.pinned-a.pinned-tr:null,flow:b.flow||null,odd,cand:cand.has(b.t)});}
+ return out;}
+function renderPnl(){
+ const B=book();const ccy=B.ccy;const R=pnlRows();const c=chart('pnlChart');if(!c)return;
+ if(!R.length){c.clear();$('rdPnl').textContent='';$('pnlSub').textContent='';return;}
+ let cum=0;const cumS=R.map(r=>+(cum+=r.acct).toFixed(2));
+ const flows=R.map((r,i)=>r.flow?{value:[i,0],flow:r.flow,kind:'flow'}:r.cand?{value:[i,0],flow:null,kind:'cand'}:r.odd!=null?{value:[i,0],flow:r.odd,kind:'odd'}:null).filter(Boolean);
+ const from=Math.max(0,R.length-60);
+ $('pnlSub').textContent=`${ccy} · bars = one session · blue desk, teal your pinned holdings, grey before the bot recorded positions`;
+ c.setOption(base({legend:{top:0,textStyle:{color:C['text-2'],fontSize:11},icon:'roundRect',itemWidth:10,itemHeight:6},
+  tooltip:Object.assign({},TT,{formatter:(ps)=>{const i=ps[0].dataIndex;const r=R[i];
+   const L=[`<b>${esc(r.t)}</b>`,`account ${r.acct>=0?'+':''}${num(r.acct)} ${esc(ccy)}`];
+   if(r.desk!=null)L.push(`desk ${r.desk>=0?'+':''}${num(r.desk)} · pinned ${r.pin>=0?'+':''}${num(r.pin)}`);
+   if(r.flow)L.push(`<span style="color:${C.violet}">${r.flow>0?'deposit':'withdrawal'} ${num(Math.abs(r.flow))} — not P&amp;L</span>`);
+   if(r.cand)L.push(`<span style="color:${C.warn}">cash and equity jumped together — a deposit? record it with /deposit</span>`);
+   if(r.odd!=null)L.push(`<span style="color:${C.warn}">${num(r.odd)} move &gt;${100*FLOW_THRESHOLD}% treated as a transfer</span>`);
+   L.push(`cumulative ${cumS[i]>=0?'+':''}${num(cumS[i])}`);return L.join('<br>');}}),
+  grid:{left:56,right:56,top:30,bottom:56},
+  xAxis:Object.assign({type:'category',data:R.map(r=>r.t)},AX),
+  yAxis:[Object.assign({type:'value',name:'day',nameTextStyle:{color:C.muted,fontSize:10}},AX,{axisLabel:{color:C.muted,fontSize:10,fontFamily:'IBM Plex Mono',formatter:(v)=>kfmt(v)}}),
+   Object.assign({type:'value',name:'cumulative',nameTextStyle:{color:C.muted,fontSize:10},splitLine:{show:false}},AX,{splitLine:{show:false},axisLabel:{color:C.muted,fontSize:10,fontFamily:'IBM Plex Mono',formatter:(v)=>kfmt(v)}})],
+  dataZoom:[{type:'inside',startValue:from},{type:'slider',startValue:from,height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(124,196,255,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
+  series:[
+   {name:'Desk',type:'bar',stack:'p',data:R.map(r=>r.desk==null?null:+r.desk.toFixed(2)),itemStyle:{color:C.ice},barMaxWidth:14},
+   {name:'Your pinned holdings',type:'bar',stack:'p',data:R.map(r=>r.pin==null?null:+r.pin.toFixed(2)),itemStyle:{color:C.teal},barMaxWidth:14},
+   {name:'Account (not split)',type:'bar',stack:'p',data:R.map(r=>r.desk==null?+r.acct.toFixed(2):null),itemStyle:{color:C['line-2']},barMaxWidth:14},
+   {name:'Cumulative',type:'line',yAxisIndex:1,showSymbol:false,data:cumS,lineStyle:{width:1.4,color:C['text-2']},itemStyle:{color:C['text-2']}},
+   {name:'Deposit / withdrawal',type:'scatter',symbol:'diamond',symbolSize:11,data:flows,
+    itemStyle:{color:(p)=>p.data.kind==='flow'?C.violet:C.warn}}]}),true);
+ // READ over what is on screen by default: the last 60 sessions.
+ const W=R.slice(from);const tot=W.reduce((x,r)=>x+r.acct,0);const sp=W.filter(r=>r.desk!=null);
+ const dk=sp.reduce((x,r)=>x+r.desk,0),pn=sp.reduce((x,r)=>x+r.pin,0);
+ const best=W.reduce((x,r)=>r.acct>x.acct?r:x,W[0]),worst=W.reduce((x,r)=>r.acct<x.acct?r:x,W[0]);
+ const up=W.filter(r=>r.acct>0).length;
+ $('rdPnl').innerHTML=`Last ${W.length} sessions: <b>${tot>=0?'+':'−'}${num(Math.abs(tot))} ${esc(ccy)}</b> after removing deposits`+
+  (sp.length?` — desk ${dk>=0?'+':'−'}${num(Math.abs(dk))}, your pinned holdings ${pn>=0?'+':'−'}${num(Math.abs(pn))}`:'')+`. `+
+  `${up} of ${W.length} days were up. Best ${esc(best.t)} (${best.acct>=0?'+':''}${num(best.acct)}), worst ${esc(worst.t)} (${num(worst.acct)}). `+
+  (R.some(r=>r.cand)?'<span class="warn">Orange diamonds are jumps that look like deposits but are not recorded — until you /deposit them they count as profit.</span> ':'')+
+  (R.some(r=>r.desk==null)?'<span class="faint">Grey bars predate position records, so they cannot be split between the desk and your holdings.</span>':'');
+}
+function renderMovers(){
+ const M=D.movers||{};const rows=(M.rows||[]).slice();const ccy=M.currency||book().ccy||'';
+ if(!rows.length){$('movT').innerHTML='';$('movSub').textContent='';$('rdMov').textContent='No two snapshots on different days yet.';return;}
+ $('movSub').textContent=`${ccy} · since ${M.since?fmtNY(M.since,{day:'2-digit',month:'short'}):'the last close'} NY`;
+ const top=rows.slice().sort((x,y)=>Math.abs(y.pnl)-Math.abs(x.pnl)).slice(0,12).sort((x,y)=>y.pnl-x.pnl);
+ const exp=rows.reduce((x,r)=>x+r.pnl,0);
+ $('movT').innerHTML='<thead><tr><th>Symbol</th><th>P&amp;L</th><th>%</th></tr></thead><tbody>'+
+  top.map(r=>`<tr><td><span class="sym">${esc(r.symbol)}</span>${r.pinned?'<span class="tag pin">pin</span>':''}${r.traded?'<span class="tag">traded</span>':''}</td><td class="${cls(r.pnl)}">${r.pnl>=0?'+':''}${num(r.pnl)}</td><td class="${cls(r.pct)}">${pct(r.pct,1)}</td></tr>`).join('')+
+  `<tr><td class="faint">positions</td><td class="${cls(exp)}">${exp>=0?'+':''}${num(exp)}</td><td></td></tr>`+
+  `<tr><td class="faint">cash, FX &amp; fees</td><td class="${cls(M.residual)}">${M.residual>=0?'+':''}${num(M.residual)}</td><td></td></tr>`+
+  `<tr><td><b>account</b></td><td class="${cls(M.account_change)}"><b>${M.account_change>=0?'+':''}${num(M.account_change)}</b></td><td></td></tr></tbody>`;
+ const pinSum=rows.filter(r=>r.pinned).reduce((x,r)=>x+r.pnl,0),deskSum=exp-pinSum;
+ const b=rows[rows.length-1],w=rows[0];
+ const still=rows.every(r=>Math.abs(r.pnl)<1);
+ $('rdMov').innerHTML=(still?'No position has moved since the last close — the market is shut or fresh marks have not arrived. ':
+  `${b.pnl>0?`<b>${esc(b.symbol)}</b> carried the day (+${num(b.pnl)})`:'Nothing gained'}${w.pnl<0?`; <b>${esc(w.symbol)}</b> hurt most (${num(w.pnl)})`:''}. `)+
+  `Pinned names ${pinSum>=0?'+':'−'}${num(Math.abs(pinSum))}, desk positions ${deskSum>=0?'+':'−'}${num(Math.abs(deskSum))} ${esc(ccy)}. `+
+  `<span class="faint">Each line is valued in ${esc(ccy)}, so a US stock's line includes the dollar's move; a traded line is price change only, the trade itself is excluded.</span>`;
 }
 
 // ------------------------------------------------------------------- market

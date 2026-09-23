@@ -116,6 +116,7 @@ def _add_cockpit_blocks(out: dict[str, Any], state_dir: Path, data_dir: Path) ->
         "risk": lambda: cockpit.risk_block(state_dir, settings_obj, snapshot),
         "positions": lambda: cockpit.positions_block(state_dir, snapshot),
         "equity": lambda: cockpit.equity_block(state_dir / "runner.db", state_dir),
+        "movers": lambda: cockpit.movers_block(state_dir / "runner.db", state_dir),
         "cycles": lambda: cockpit.cycles_block(runner_store) if runner_store else [],
         "watch": lambda: (
             cockpit.watch_block(state_dir, runner_store, cron=cron, tz=tz)
@@ -196,6 +197,11 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
         out["equity_currency"] = "USD"
         out["equity_curve_usd"] = out["equity_curve"]
         out["equity_usd_ok"] = False
+    # The raw rate, so the Performance panel can price every line in ONE
+    # currency. A franc investor comparing a CHF book with SPY in dollars
+    # reads the USDCHF move as skill (or as a loss); the page converts
+    # both ways from this one series, the same one the curve above used.
+    out["usdchf"] = [{"t": t, "v": round(v, 5)} for t, v in sorted(fx.items())[-1300:]]
 
     # Agent PM (simulated sleeve): daily-marked equity history + book.
     try:

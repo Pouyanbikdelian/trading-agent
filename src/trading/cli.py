@@ -966,9 +966,14 @@ def _history_import_flex(
     """
     from pathlib import Path
 
+    from trading.dashboard.live import fetch_usdchf
     from trading.runtime.account_history import merge_and_save, parse_flex
 
-    parsed = [parse_flex(Path(f).read_bytes()) for f in files]
+    fx = fetch_usdchf(settings.data_dir)
+    parsed = [parse_flex(Path(f).read_bytes(), usdchf=fx) for f in files]
+    for h in parsed:
+        for note in dict.fromkeys(h.notes):
+            console.print(f"[yellow]note[/yellow]: {note}")
     _print_history_summary(merge_and_save(settings.state_dir, parsed, source="file"))
 
 
@@ -989,10 +994,13 @@ def _history_fetch_flex() -> None:
     token, query = os.getenv("FLEX_TOKEN", ""), os.getenv("FLEX_QUERY_ID", "")
     if not token or not query:
         raise typer.BadParameter("set FLEX_TOKEN and FLEX_QUERY_ID in .env first")
+    from trading.dashboard.live import fetch_usdchf
+
     xml = fetch_flex(token, query, send_url=os.getenv("FLEX_SEND_URL") or DEFAULT_SEND_URL)
-    _print_history_summary(
-        merge_and_save(settings.state_dir, [parse_flex(xml)], source="web_service")
-    )
+    parsed = parse_flex(xml, usdchf=fetch_usdchf(settings.data_dir))
+    for note in dict.fromkeys(parsed.notes):
+        console.print(f"[yellow]note[/yellow]: {note}")
+    _print_history_summary(merge_and_save(settings.state_dir, [parsed], source="web_service"))
 
 
 mirror_app = typer.Typer(help="Read-only LIVE-account mirror for the dashboard.")

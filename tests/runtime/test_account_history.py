@@ -132,3 +132,62 @@ def test_dashboard_prepends_history_and_counts_broker_deposits(tmp_path: Path) -
     assert days[-1]["net_flows"] == pytest.approx(90_000.0)  # 88k opening + 2k (USD 2.5k)
     assert out["history"]["flex_first"] == "2026-01-02"
     assert out["flow_candidates"] == []
+
+
+# ------------------------------------------ queries without the Type column
+
+UNTYPED = b"""<FlexQueryResponse queryName="q" type="AF"><FlexStatements count="1">
+<FlexStatement accountId="U0000000" fromDate="20260205" toDate="20260605">
+<EquitySummaryInBase>
+<EquitySummaryByReportDateInBase currency="CHF" reportDate="20260206" total="13.13" />
+<EquitySummaryByReportDateInBase currency="CHF" reportDate="20260209" total="52181.48" />
+<EquitySummaryByReportDateInBase currency="CHF" reportDate="20260603" total="54216.58" />
+<EquitySummaryByReportDateInBase currency="CHF" reportDate="20260604" total="89027.85" />
+</EquitySummaryInBase>
+<CashTransactions>
+<CashTransaction currency="USD" amount="68088" dateTime="20260209" reportDate="20260209" />
+<CashTransaction currency="USD" amount="107.46" dateTime="20260603" reportDate="20260603" />
+<CashTransaction currency="USD" amount="-21.49" dateTime="20260603" reportDate="20260604" />
+<CashTransaction currency="CHF" amount="35000" dateTime="20260604" reportDate="20260604" />
+</CashTransactions></FlexStatement></FlexStatements></FlexQueryResponse>"""
+
+
+def test_untyped_cash_rows_are_transfers_only_when_nav_moves_by_their_size() -> None:
+    """The operator's real query (2026-09-23) had no Type column: interest,
+    withholding tax and both deposits all arrived as bare amounts."""
+    h = parse_flex(UNTYPED)
+    got = {(f["day"], f["currency"]): f for f in h.flows}
+    assert set(got) == {("2026-02-09", "USD"), ("2026-06-04", "CHF")}
+    assert got[("2026-06-04", "CHF")]["amount_base"] == 35_000
+    assert all(f["inferred"] for f in h.flows)
+    assert any("no Type column" in n for n in h.notes)
+
+
+def test_a_dollar_deposit_is_never_booked_as_francs() -> None:
+    """No fxRateToBase used to mean rate 1.0: 68,088 USD as 68,088 CHF."""
+    h = parse_flex(UNTYPED)
+    usd = next(f for f in h.flows if f["currency"] == "USD")
+    assert usd["amount_base"] == pytest.approx(52_168.35, abs=0.01)  # IBKR's own NAV jump
+    assert usd["basis"] == "NAV jump"
+    h2 = parse_flex(UNTYPED, usdchf={"2026-02-06": 0.77})
+    usd2 = next(f for f in h2.flows if f["currency"] == "USD")
+    assert usd2["amount_base"] == pytest.approx(68_088 * 0.77)
+    assert usd2["basis"] == "USDCHF close"
+
+
+def test_dormant_months_before_the_first_deposit_are_not_charted(tmp_path: Path) -> None:
+    from trading.dashboard.cockpit import equity_block
+
+    merge_and_save(tmp_path, [parse_flex(UNTYPED)], source="file")
+    days = equity_block(tmp_path / "runner.db", tmp_path)["days"]
+    assert days[0]["t"] == "2026-02-09"
+    assert days[0]["flow"] == pytest.approx(52_168.35, abs=0.01)
+    assert days[-1]["net_flows"] == pytest.approx(87_168.35, abs=0.01)
+
+
+def test_a_statement_alone_keeps_its_base_currency(tmp_path: Path) -> None:
+    """Before the first runner snapshot the page labelled a CHF account USD."""
+    from trading.dashboard.cockpit import equity_block
+
+    merge_and_save(tmp_path, [parse_flex(UNTYPED)], source="file")
+    assert equity_block(tmp_path / "runner.db", tmp_path)["currency"] == "CHF"

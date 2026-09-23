@@ -361,7 +361,7 @@ corrupted high-water mark.
 sets these explicitly and wins):
 
 ```bash
-CRON=5 17 * * FRI                 # Friday 17:05 New York, both DST seasons
+CRON=0 15 * * FRI                 # keep the hour you had, in New York time (0 19 UTC = 15:00 EDT)
 SCHEDULE_TZ=America/New_York
 HEALTHCHECK_PING_URL=https://hc-ping.com/<your-check-uuid>   # optional, recommended
 MANUAL_ORDER_CONFIRM_PCT=0.05     # optional; defaults shown
@@ -382,6 +382,12 @@ New behaviour an operator will notice:
 
 Deploy with the maintenance sequence in §15; this release changes no risk
 limit, arming flag or baseline.
+
+Correction (2026-09-23): the first version of these notes said to set
+`5 17`, which silently moved the live cycle from 15:00 New York (during
+the session, fills the same afternoon) to 17:05 (after the close, fills
+Monday). Converting the existing UTC hour is the no-surprise migration;
+changing the hour is a separate decision.
 
 ## Troubleshooting
 

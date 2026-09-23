@@ -1811,7 +1811,10 @@ class Runner:
             os.environ["FLEX_QUERY_ID"],
             send_url=os.getenv("FLEX_SEND_URL") or DEFAULT_SEND_URL,
         )
-        return merge_and_save(settings.state_dir, [parse_flex(xml)], source="web_service")
+        from trading.dashboard.live import fetch_usdchf
+
+        parsed = parse_flex(xml, usdchf=fetch_usdchf(settings.data_dir))
+        return merge_and_save(settings.state_dir, [parsed], source="web_service")
 
     async def _run_flex_history_async(self) -> None:
         """Daily Flex import. A new deposit is announced once, when it lands."""

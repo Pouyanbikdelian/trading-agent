@@ -456,6 +456,12 @@ def _momentum_sleeve(state_dir: Path, fx: dict[str, float], label: str) -> dict[
 
     attribution = attribution_today(runner_db, fills)
     for row in attribution:
+        # Known defect (2026-09-23), kept only because nothing renders it
+        # any more: IBKR's unrealizedPNL is in each CONTRACT's currency, so
+        # on a CHF book with US stocks these rows are dollars that the line
+        # below divides by USDCHF as if they were francs. The Cockpit's
+        # "Today's movers" uses cockpit.movers_block, which values every
+        # position in the base currency at each snapshot's own FX rate.
         row["pnl"] = to_usd(row["pnl"])
         row["fees"] = to_usd(row["fees"])
 

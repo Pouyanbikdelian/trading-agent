@@ -57,6 +57,7 @@ class FlexHistory:
     base_currency: str | None = None
     nav: dict[str, float] = field(default_factory=dict)  # ISO day -> NAV in base
     flows: list[dict[str, Any]] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
 def _parse_day(raw: str | None) -> date | None:
@@ -81,7 +82,50 @@ def _num(raw: str | None) -> float | None:
         return None
 
 
-def parse_flex(xml: bytes | str) -> FlexHistory:
+def _rate_to_base(
+    el: Any, currency: str, base: str, day: date, usdchf: dict[str, float] | None
+) -> tuple[float | None, str]:
+    """IBKR's own rate when the query carries it; never a silent 1.0.
+
+    The first version fell back to 1.0 for a missing ``fxRateToBase``,
+    which would have booked a 68,088-dollar deposit as 68,088 francs.
+    """
+    rate = _num(el.get("fxRateToBase"))
+    if rate:
+        return rate, "fxRateToBase"
+    if not base or currency == base:
+        return 1.0, "same currency"
+    if usdchf and {currency, base} == {"USD", "CHF"}:
+        known = [d for d in usdchf if d <= day.isoformat()]
+        if known:
+            r = float(usdchf[max(known)])
+            return (r if currency == "USD" else 1.0 / r), "USDCHF close"
+    return None, "none"
+
+
+def _plausible(amount: float, rate: float | None, jump: float) -> bool:
+    if rate is not None:
+        est = amount * rate
+        return est != 0 and 0.6 <= jump / est <= 1.4
+    # Unknown rate: any real FX rate is within a factor of three of 1.
+    return 0.3 <= jump / amount <= 3.0
+
+
+def _as_transfer(
+    amount: float, rate: float | None, jump: float | None, nav_before: float
+) -> float | None:
+    """Base-currency amount if this untyped cash row is a transfer, else None."""
+    if jump is None:
+        return None
+    size = abs(amount * rate) if rate is not None else abs(jump)
+    if size < max(500.0, 0.01 * max(nav_before, 0.0)):
+        return None
+    if not _plausible(amount, rate, jump):
+        return None
+    return round(amount * rate, 2) if rate is not None else round(jump, 2)
+
+
+def parse_flex(xml: bytes | str, *, usdchf: dict[str, float] | None = None) -> FlexHistory:
     """Read NAV-by-day and deposits/withdrawals from one Flex statement.
 
     Tolerant by design: unknown sections are ignored, and a statement with
@@ -108,25 +152,70 @@ def parse_flex(xml: bytes | str) -> FlexHistory:
         out.nav[day.isoformat()] = total
         out.base_currency = out.base_currency or el.get("currency")
         out.account = out.account or el.get("accountId")
+    base = str(out.base_currency or "").upper()
+    days_sorted = sorted(out.nav)
+
+    def nav_jump(day: date) -> tuple[float | None, float]:
+        """NAV change into ``day`` and the NAV before it (base currency)."""
+        key = day.isoformat()
+        prior = [d for d in days_sorted if d < key]
+        on_or_after = [d for d in days_sorted if d >= key]
+        if not prior or not on_or_after:
+            return None, 0.0
+        before = out.nav[prior[-1]]
+        return out.nav[on_or_after[0]] - before, before
+
     for el in root.iter("CashTransaction"):
         seen_cash = True
-        kind = str(el.get("type") or "").lower()
-        if not any(t in kind for t in _TRANSFER_TYPES):
-            continue
         amount = _num(el.get("amount"))
         day = _parse_day(el.get("dateTime") or el.get("reportDate") or el.get("settleDate"))
         if amount is None or day is None or amount == 0:
             continue
-        rate = _num(el.get("fxRateToBase")) or 1.0
+        currency = str(el.get("currency") or "").upper()
+        kind = str(el.get("type") or "").lower()
+        rate, basis = _rate_to_base(el, currency, base, day, usdchf)
+        jump, before = nav_jump(_parse_day(el.get("reportDate")) or day)
+        if kind:
+            if not any(t in kind for t in _TRANSFER_TYPES):
+                continue
+            inferred = False
+            if rate is not None:
+                amount_base = round(amount * rate, 2)
+            elif jump is not None and _plausible(amount, None, jump):
+                amount_base, basis = round(jump, 2), "NAV jump"
+            else:
+                out.notes.append(
+                    f"{day} {amount:,.2f} {currency}: no rate to {base or 'base'} — skipped"
+                )
+                continue
+        else:
+            # The query was built without the "Type" column, so interest,
+            # dividends, withholding tax and transfers all look alike. A
+            # transfer is the one that moves NAV by (about) its own size
+            # on its own day, and is not small: that separates a deposit
+            # from a 107-dollar interest credit without guessing.
+            amount_base = _as_transfer(amount, rate, jump, before)
+            if amount_base is None:
+                continue
+            if rate is None:
+                basis = "NAV jump"
+            inferred = True
         out.flows.append(
             {
                 "day": day.isoformat(),
                 "amount": amount,
-                "currency": str(el.get("currency") or "").upper(),
-                "amount_base": round(amount * rate, 2),
+                "currency": currency,
+                "amount_base": amount_base,
+                "basis": basis,
+                "inferred": inferred,
                 "description": str(el.get("description") or "")[:120],
-                "id": el.get("transactionID") or f"{day.isoformat()}|{amount}|{el.get('currency')}",
+                "id": el.get("transactionID") or f"{day.isoformat()}|{amount}|{currency}",
             }
+        )
+    if seen_cash and any(f["inferred"] for f in out.flows):
+        out.notes.append(
+            "the Cash Transactions section has no Type column — transfers were inferred "
+            "from NAV jumps; add Type to the Flex query to make this exact"
         )
     if not seen_nav and not seen_cash:
         raise FlexError(
