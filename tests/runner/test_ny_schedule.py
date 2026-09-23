@@ -71,6 +71,9 @@ def test_utc_afternoon_cron_warns_and_ny_cron_does_not() -> None:
     assert _cycle_dst_warning("0 3 * * SUN", "UTC") is None
     # The reverse migration slip: SCHEDULE_TZ switched, CRON still in UTC hours.
     assert _cycle_dst_warning("5 21 * * FRI", NYSE_TZ) is not None
+    # Live's in-session choice (0 19 UTC = 15:00 New York) is not an error.
+    assert _cycle_dst_warning("0 15 * * FRI", NYSE_TZ) is None
+    assert _cycle_dst_warning("0 19 * * FRI", "UTC") is not None
 
 
 def test_humanized_cron_names_its_timezone() -> None:

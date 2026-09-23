@@ -215,12 +215,13 @@ def _cycle_dst_warning(cron: str, tz: str) -> str | None:
     if tz == NYSE_TZ:
         # The opposite migration mistake: SCHEDULE_TZ switched to New York
         # while CRON still holds the old UTC hour (5 21 -> 21:05 New York,
-        # i.e. Saturday 01:05 UTC).
-        if not 16 <= hour <= 20:
+        # i.e. Saturday 01:05 UTC). In-session cycles are legitimate: live
+        # ran 0 19 UTC = 15:00 New York, an hour before the close, by choice.
+        if not 9 <= hour <= 20:
             return (
-                f"cycle cron {cron!r} runs at {hour:02d}:xx New York, outside the "
-                "16:00-20:59 post-close window. If CRON still holds a UTC hour, "
-                "convert it (e.g. '5 21' UTC -> '5 17' New York)."
+                f"cycle cron {cron!r} runs at {hour:02d}:xx New York, outside "
+                "09:00-20:59. If CRON still holds a UTC hour, convert it "
+                "(e.g. '0 19' UTC -> '0 15' New York)."
             )
         return None
     if tz.upper() in {"UTC", "ETC/UTC", "GMT"} and 12 <= hour <= 23:
