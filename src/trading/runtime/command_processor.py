@@ -842,7 +842,7 @@ def _h_close(cmd: Command, broker: Broker) -> dict[str, Any]:
     )
 
 
-def _h_flatten(_cmd: Command, broker: Broker) -> dict[str, Any]:
+def _h_flatten(cmd: Command, broker: Broker) -> dict[str, Any]:
     """Panic button — closes everything, ignoring /hold by design.
 
     Still netted against working orders. Flatten stays unconditional in
@@ -850,6 +850,12 @@ def _h_flatten(_cmd: Command, broker: Broker) -> dict[str, Any]:
     names you were trying to exit is not an exit: if a sell for the full
     position is already queued, a second one crosses zero. Netting only
     ever makes flatten sell LESS, never less complete.
+
+    The client order id carries the command id. Until 2026-09-23 it was
+    ``flatten-{SYM}-xxxxxxxx`` for every flatten ever issued, and
+    ``OrderStore.save_order`` is INSERT OR REPLACE: a second flatten of the
+    same name overwrote the first ledger row, and ``settle_status`` then
+    summed both executions' fills under one id.
     """
     from trading.risk.presubmit import sellable_quantity
 
@@ -867,7 +873,7 @@ def _h_flatten(_cmd: Command, broker: Broker) -> dict[str, Any]:
                 continue
             qty = min(qty, r.sellable)
         order = Order(
-            client_order_id=f"flatten-{pos.instrument.symbol}-{_short_id('x' * 8)}",
+            client_order_id=f"flatten-{pos.instrument.symbol}-{_short_id(cmd.id)}",
             instrument=pos.instrument,
             side=side,
             quantity=qty,
@@ -893,6 +899,13 @@ def _h_cancel_order(cmd: Command, broker: Broker) -> dict[str, Any]:
 #: reconciliation, so resolving it would destroy information. Mirrors
 #: ``Cycle.RECONCILE_LOOKBACK``; keep the two in step.
 RESOLVE_MIN_AGE_DAYS = 14.0
+
+
+def _utcnow() -> datetime:
+    """Seam for the resolve window. Its tests pinned a 2026-09-11 "now" while
+    the handler read the real clock, so a "2 days old" fixture silently aged
+    past the 14-day floor and the suite failed on 2026-09-23."""
+    return datetime.now(tz=timezone.utc)
 
 
 def _h_resolve_orders(cmd: Command, broker: Broker) -> dict[str, Any]:
@@ -923,7 +936,7 @@ def _h_resolve_orders(cmd: Command, broker: Broker) -> dict[str, Any]:
 
     requested_age = float(cmd.args.get("older_than_days", RESOLVE_MIN_AGE_DAYS))
     age_days = max(requested_age, RESOLVE_MIN_AGE_DAYS)
-    now = datetime.now(tz=timezone.utc)
+    now = _utcnow()
     cutoff = now - timedelta(days=age_days)
 
     # Evidence first. A raise here fails the command with nothing written,

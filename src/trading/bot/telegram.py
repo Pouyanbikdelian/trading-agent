@@ -3257,7 +3257,16 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         if mandate_reply is not None:
             return mandate_reply
         return await _cmd_copilot(stripped, replied_to=replied_to)
-    parts = shlex.split(text)
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        # An unbalanced quote used to raise out of the poll loop and kill
+        # the bot: `/halt it's bad data` never halted, the process
+        # restarted, and the already-saved offset dropped the message. The
+        # emergency brake is the command most likely to be typed in a
+        # hurry with an apostrophe in it. Whitespace splitting loses only
+        # quoting, which no command needs to be understood.
+        parts = text.split()
     cmd = parts[0].lower().split("@")[0]  # strip "@botname" suffix
     args = parts[1:]
 
@@ -3892,19 +3901,56 @@ async def run_bot() -> None:
                     await _process_callback(client, token, chat_id, cb)
                     continue
 
-                msg = upd.get("message") or upd.get("edited_message")
-                if not msg:
-                    continue
-                # Authorization: ignore anything not from the configured chat.
-                msg_chat = str(msg.get("chat", {}).get("id"))
-                if msg_chat != str(chat_id):
-                    logger.warning(f"telegram unauthorized chat {msg_chat}")
-                    continue
-                text = msg.get("text", "")
-                # Telegram hands us the full original when the operator
-                # replies to a message. That is how "why this alert?"
-                # becomes answerable — otherwise "this" has no referent.
-                replied_to = (msg.get("reply_to_message") or {}).get("text")
-                reply = await _dispatch(text, replied_to=replied_to)
-                if reply is not None:
-                    await _send_reply(client, token, chat_id, reply)
+                await _handle_message_update(client, token, chat_id, upd)
+
+
+_EDIT_IGNORED_REPLY = (
+    "✏️ Edited messages are never executed. Send the command again as a new message."
+)
+
+
+async def _handle_message_update(
+    client: httpx.AsyncClient, token: str, chat_id: str, upd: dict[str, Any]
+) -> None:
+    """Dispatch one message update. Never raises.
+
+    Two failure modes lived in the poll loop until 2026-09-23:
+
+    * **Edits re-executed.** ``edited_message`` was treated as a fresh
+      command, so correcting a typo in last week's `/flatten` or `/buy`
+      sent it again — with the 15-minute command TTL counted from the new
+      queue time. An edit is a correction of history, not an instruction.
+    * **Any handler exception killed the bot.** Nothing caught errors
+      from ``_dispatch``; the offset had already been saved, so the
+      message that crashed the loop was silently lost after the restart.
+      The operator now gets the error text instead of silence.
+    """
+    edited = upd.get("edited_message")
+    msg = upd.get("message") or edited
+    if not msg:
+        return
+    # Authorization: ignore anything not from the configured chat.
+    msg_chat = str(msg.get("chat", {}).get("id"))
+    if msg_chat != str(chat_id):
+        logger.warning(f"telegram unauthorized chat {msg_chat}")
+        return
+    text = msg.get("text", "") or ""
+    if upd.get("message") is None and edited is not None:
+        logger.bind(component="bot").info("ignored an edited message")
+        if text.strip().startswith("/"):
+            await _send_reply(client, token, chat_id, _EDIT_IGNORED_REPLY)
+        return
+    # Telegram hands us the full original when the operator
+    # replies to a message. That is how "why this alert?"
+    # becomes answerable — otherwise "this" has no referent.
+    replied_to = (msg.get("reply_to_message") or {}).get("text")
+    try:
+        reply = await _dispatch(text, replied_to=replied_to)
+    except Exception as e:
+        logger.bind(component="bot").exception("command dispatch failed")
+        reply = f"❌ command failed: `{type(e).__name__}: {e}`"
+    if reply is not None:
+        try:
+            await _send_reply(client, token, chat_id, reply)
+        except Exception:
+            logger.bind(component="bot").exception("could not send reply")

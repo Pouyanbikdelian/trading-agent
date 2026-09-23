@@ -46,6 +46,14 @@ from trading.runtime.commands import Command, CommandType
 NOW = datetime(2026, 9, 11, 17, 20, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _frozen_resolve_clock(monkeypatch):
+    """The fixtures are dated relative to NOW; so is the handler's clock."""
+    import trading.runtime.command_processor as cp
+
+    monkeypatch.setattr(cp, "_utcnow", lambda: NOW)
+
+
 def _order(sym: str, side: Side = Side.SELL, *, days_ago: float, qty: float = 3.0) -> Order:
     return Order(
         client_order_id=f"cmd-{sym}-{days_ago:g}",

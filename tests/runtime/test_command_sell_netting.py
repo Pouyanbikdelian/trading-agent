@@ -111,6 +111,20 @@ def test_flatten_skips_a_name_already_fully_covered(monkeypatch):
     assert any("VST" in s for s in result["skipped"])
 
 
+def test_each_flatten_gets_its_own_ledger_ids(monkeypatch):
+    """Two flattens of the same name used to share `flatten-SYM-xxxxxxxx`,
+    so INSERT OR REPLACE overwrote the first ledger row."""
+    first, second = _Broker([_position("VST", 63)]), _Broker([_position("VST", 63)])
+
+    _h_flatten(_cmd(CommandType.FLATTEN), first)
+    _h_flatten(_cmd(CommandType.FLATTEN), second)
+
+    a, b = first.submitted[0].client_order_id, second.submitted[0].client_order_id
+    assert a != b
+    assert "xxxxxxxx" not in a and "xxxxxxxx" not in b
+    assert a.startswith("flatten-VST-")
+
+
 def test_flatten_still_closes_everything_when_nothing_is_working(monkeypatch):
     broker = _Broker([_position("VST", 63), _position("WMT", 10)])
 
