@@ -782,6 +782,17 @@ function weekdays(all){const out=[];let cf=0,ct=0;
  all.forEach((r,i)=>{if(wk(r.t)&&i<all.length-1){cf+=r.flow||0;ct+=r.pin_transfer||0;return;}
   out.push(Object.assign({},r,{flow:((r.flow||0)+cf)||null,pin_transfer:(r.pin_transfer==null&&!ct)?r.pin_transfer:(r.pin_transfer||0)+ct}));cf=0;ct=0;});
  return out;}
+// Two SPY sources: the price cache (long, refreshed with the data fetch,
+// which a halted desk may skip) and the PM's own daily marks (short,
+// refreshed every PM run). When the cache stops earlier, continue it with
+// the marks' day-to-day moves, so SPY never quietly ends weeks before the
+// other lines and a stale "1W" is never computed from July prices.
+function spliceFresher(a,b){
+ if(a.length<2)return b;if(b.length<2)return a;
+ const end=a[a.length-1].t;if(b[b.length-1].t<=end)return a;
+ const anchor=[...b].reverse().find(p=>p.t<=end);if(!anchor||!(anchor.v>0))return b;
+ const k=a[a.length-1].v/anchor.v;
+ return a.concat(b.filter(p=>p.t>end).map(p=>({t:p.t,v:p.v*k})));}
 // Every book, native currency, as a time-weighted index.
 function perfBooks(){
  const B=book();const base=B.ccy||'USD';const todayISO=new Date().toISOString().slice(0,10);
@@ -795,7 +806,7 @@ function perfBooks(){
  const pm=flowAdjustedCurve(pmH);
  const mk=((D.market||{}).spy_series||[]).map(p=>({t:String(p.t).slice(0,10),v:+p.v})).filter(p=>p.t<todayISO);
  // SPY is a price index: never flow-adjusted.
- const spy=mk.length>1?mk:pmH.filter(h=>h.spy!=null).map(h=>({t:h.t,v:h.spy}));
+ const spy=spliceFresher(mk,pmH.filter(h=>h.spy!=null).map(h=>({t:h.t,v:h.spy})));
  return {base,start:(B.hist||{}).bot_first||null,list:[
   {key:'acct',short:'Account',label:'Your account · '+(D.env||'paper'),ccy:base,pts:acct,value:last.account,color:C.up},
   {key:'desk',short:'Desk',label:'Desk · what the bot manages',ccy:base,pts:desk,value:last.desk,color:C.ice},
@@ -830,8 +841,12 @@ function renderPerf(){
   let value=b.value;if(value!=null&&b.ccy!==to){const r=lastT?fx(lastT):null;value=r?(b.ccy==='USD'?value*r:value/r):null;}
   return Object.assign({},b,{use,conv,value,rets:cols.map(([k,cut])=>cut==null?dayRet(use):winRet(use,cut))});});
  const cell=(x)=>`<td class="${cls(x)}">${x==null?'<span class="faint">–</span>':pct(x,1)}</td>`;
+ // A line that stopped updating says so: its "last day" is not today's.
+ const lastOf=(b)=>b.use.length?b.use[b.use.length-1].t:null;
+ const newest=books.map(lastOf).filter(Boolean).sort().pop();
+ const stale=(b)=>{const l=lastOf(b);return l&&newest&&(new Date(newest)-new Date(l))/864e5>4?l:null;};
  $('perfT').innerHTML=`<thead><tr><th>Book</th><th>Value · ${esc(to)}</th>${cols.map(c=>`<th>${esc(c[0])}</th>`).join('')}</tr></thead><tbody>`+
-  books.map(b=>`<tr><td><span class="lg" style="background:${b.color}"></span>${esc(b.label)}${b.sim?'<span class="tag warn">sim</span>':''}${!b.conv?`<span class="tag bad">${esc(b.ccy)}</span>`:''}</td>`+
+  books.map(b=>`<tr><td><span class="lg" style="background:${b.color}"></span>${esc(b.label)}${b.sim?'<span class="tag warn">sim</span>':''}${!b.conv?`<span class="tag bad">${esc(b.ccy)}</span>`:''}${stale(b)?`<span class="tag warn">as of ${esc(stale(b).slice(5))}</span>`:''}</td>`+
    `<td>${b.value==null?'<span class="faint">–</span>':num(b.value)}</td>${b.rets.map(cell).join('')}</tr>`).join('')+'</tbody>';
  const unconv=books.filter(b=>!b.conv).map(b=>b.label);
  $('perfNote').textContent=[`every figure in ${to}`+(to!==P.base?` (the account is ${P.base}; converted at each day's USDCHF close)`:''),

@@ -178,6 +178,13 @@ class TestCapitalFlowsAreNotPlottedAsReturns:
         assert "flowAdjustedCurve(spy)" not in APP
         assert "{key:'spy',short:'SPY',label:'SPY',ccy:'USD',pts:spy," in APP
 
+    def test_a_stale_spy_cache_is_continued_not_left_behind(self) -> None:
+        """A halted desk can skip the data fetch; SPY then ended in July
+        while every other line ran to yesterday."""
+        assert "function spliceFresher(a,b){" in APP
+        assert "const spy=spliceFresher(mk," in APP
+        assert "as of ${esc(stale(b).slice(5))}" in APP
+
     def test_the_threshold_still_matches_the_server(self) -> None:
         from trading.dashboard.live import FLOW_THRESHOLD
 
