@@ -716,3 +716,45 @@ def test_snapshot_refresh_records_authenticated_broker_liveness(
     payload = json.loads((tmp_path / FILENAME).read_text())
     assert payload["ready"] is True and payload["probe"] == "reqCurrentTime"
     assert len(runner.cycle.runner_store.saved) == 1
+
+
+@pytest.mark.parametrize(("fit", "halted"), [(True, True), (False, False)])
+def test_precycle_funding_check_sizes_the_desk_and_matches_its_severity(
+    monkeypatch, tmp_path: Path, fit: bool, halted: bool
+) -> None:
+    """2026-09-25: the check sized the whole NetLiq (pins included) and sent a
+    critical 'bought nothing' alert although FIT_ORDERS_TO_CASH trims the
+    basket instead. It must pass the pins, and with fit-to-cash it is a
+    warning, not an emergency."""
+    import trading.runtime.broker_ready as br
+
+    (tmp_path / "holds.json").write_text(json.dumps({"symbols": ["NVDA"]}))
+    monkeypatch.setattr(
+        runner_module,
+        "settings",
+        settings.model_copy(
+            update={"state_dir": tmp_path, "fit_orders_to_cash": fit, "max_gross_exposure": 0.7}
+        ),
+    )
+    seen: dict = {}
+
+    def fake_check(broker, **kw):
+        seen.update(kw)
+        return {"ok": False, "fit_to_cash": kw["fit_to_cash"], "shortfall": 1.0}
+
+    monkeypatch.setattr(br, "check_broker_ready", lambda b: {"ready": True, "equity": 1.0})
+    monkeypatch.setattr(br, "check_trade_currency_funding", fake_check)
+    monkeypatch.setattr(br, "format_funding_alert", lambda r, **k: "FUNDING")
+    runner = _bare_runner(tmp_path)
+    runner.cycle = SimpleNamespace(
+        broker=object(),
+        risk_manager=SimpleNamespace(_reload_halt_state=lambda: None, is_halted=lambda: halted),
+    )
+    asyncio.run(runner._check_broker_ready_async())
+
+    assert seen["held_symbols"] == {"NVDA"}
+    assert seen["fit_to_cash"] is fit and seen["gross_exposure_pct"] == 0.7
+    sent = runner.alerts.last_warning if fit else runner.alerts.last_critical
+    assert sent is not None and sent.startswith("FUNDING")
+    assert ("halted" in sent) is halted
+    assert (runner.alerts.last_critical if fit else runner.alerts.last_warning) is None

@@ -2351,20 +2351,38 @@ class Runner:
             # opportunities. Checked here because an hour is enough time
             # to convert; at cycle time it would only be an explanation.
             try:
+                from trading.runner.holds import load_holds
                 from trading.runtime.broker_ready import (
                     check_trade_currency_funding,
                     format_funding_alert,
                 )
 
+                try:
+                    pins = load_holds(settings.state_dir)
+                except Exception:
+                    pins = set()  # sized on the whole account: over-, never under-warns
                 funding = await asyncio.to_thread(
                     check_trade_currency_funding,
                     self.cycle.broker,
                     gross_exposure_pct=settings.max_gross_exposure,
+                    held_symbols=pins,
+                    fit_to_cash=bool(getattr(settings, "fit_orders_to_cash", False)),
                 )
                 if not funding["ok"]:
-                    self.alerts.critical(
-                        format_funding_alert(funding, minutes_to_cycle=self.PRECYCLE_LEAD_MINUTES)
-                    )
+                    msg = format_funding_alert(funding, minutes_to_cycle=self.PRECYCLE_LEAD_MINUTES)
+                    halted = False
+                    with contextlib.suppress(Exception):
+                        rm = self.cycle.risk_manager
+                        rm._reload_halt_state()
+                        halted = bool(rm.is_halted())
+                    if halted:
+                        msg += "\n\n_The desk is halted: this cycle trades nothing until /resume._"
+                    # With fit-to-cash a short wallet shrinks the basket; it no
+                    # longer empties it. That is worth knowing, not an emergency.
+                    if funding.get("fit_to_cash"):
+                        self.alerts.warning(msg)
+                    else:
+                        self.alerts.critical(msg)
                 elif funding.get("reason", "ok") != "ok":
                     logger.bind(component="broker_ready").info(f"funding check {funding['reason']}")
             except Exception:

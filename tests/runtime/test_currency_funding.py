@@ -167,3 +167,83 @@ class TestTheAlert:
         """The operator has to recognise the failure if it happens anyway."""
         r = check_trade_currency_funding(_Broker(balances={"USD": 0.0}), gross_exposure_pct=0.11)
         assert "bought nothing" in format_funding_alert(r, minutes_to_cycle=60)
+
+
+# ------------------------------------------- the 2026-09-25 false alarm
+
+
+class _LiveBroker(_Broker):
+    """The live book on 2026-09-25: 85k CHF NetLiq, of which ~31k CHF is the
+    operator's pinned NVDA; the desk is cash, 42,740 of it in USD."""
+
+    RATE = 0.818
+
+    def get_account(self):
+        from datetime import datetime, timezone
+
+        from trading.core.types import AccountSnapshot, AssetClass, Instrument, Position
+
+        nvda = Instrument(symbol="NVDA", asset_class=AssetClass.EQUITY, currency="USD")
+        pos = Position(instrument=nvda, quantity=200, avg_price=150.0, unrealized_pnl=200 * 40.0)
+        pinned_chf = 200 * 190.0 * self.RATE  # 31,084 CHF
+        cash_chf = 42_740 * self.RATE + 18_900
+        return AccountSnapshot(
+            ts=datetime(2026, 9, 25, 18, tzinfo=timezone.utc),
+            cash=cash_chf,
+            equity=cash_chf + pinned_chf,
+            positions={nvda.key: pos},
+            base_currency="CHF",
+            fx_rates={"USD": self.RATE},
+        )
+
+
+def _live(**kw):
+    b = _LiveBroker(balances={"CHF": 18_900.0, "USD": 42_740.0}, rates={"USD": 0.818})
+    return check_trade_currency_funding(b, gross_exposure_pct=0.70, **kw)
+
+
+class TestItSizesTheDeskNotTheAccount:
+    def test_pinned_holdings_are_not_money_the_desk_can_spend(self) -> None:
+        account = _live()
+        desk = _live(held_symbols={"NVDA"})
+        assert account["book"] == "account" and desk["book"] == "desk"
+        assert desk["book_equity"] == pytest.approx(account["equity"] - 200 * 190.0 * 0.818)
+        assert desk["required"] < account["required"]
+        # 53.9k CHF desk x 70% x buffer at 0.818: ~48.4k USD, not ~76k.
+        assert desk["required"] == pytest.approx(
+            desk["book_equity"] * 0.70 * FUNDING_BUFFER / 0.818, rel=1e-9
+        )
+
+    def test_a_desk_that_cannot_be_valued_falls_back_to_the_account_and_says_so(self) -> None:
+        r = check_trade_currency_funding(
+            _Broker(balances={"USD": 0.0}), gross_exposure_pct=0.11, held_symbols={"NVDA"}
+        )
+        assert r["book"].startswith("account (desk valuation unavailable")
+        assert r["required"] == pytest.approx(88_000.0 * 0.11 * FUNDING_BUFFER / 0.808054)
+
+
+class TestTheAmountIsInTheCurrencyYouConvertFrom:
+    def test_the_usd_gap_is_priced_in_francs(self) -> None:
+        """'convert about 34,247 CHF' was the USD shortfall x 1.02."""
+        r = _live(held_symbols={"NVDA"})
+        assert r["shortfall_base"] == pytest.approx(r["shortfall"] * 0.818)
+        msg = format_funding_alert(r, minutes_to_cycle=60)
+        assert f"`{r['shortfall_base'] * 1.02:,.0f}` CHF to USD" in msg
+        assert f"`{r['shortfall'] * 1.02:,.0f}` CHF" not in msg
+
+
+class TestWithFitToCashTheBasketShrinksItIsNotRefused:
+    def test_the_alert_says_the_basket_is_scaled_not_rejected(self) -> None:
+        r = _live(held_symbols={"NVDA"}, fit_to_cash=True)
+        msg = format_funding_alert(r, minutes_to_cycle=60)
+        assert "scaled down by the same factor" in msg
+        assert "bought nothing" not in msg and "REJECT" not in msg
+        assert "Only if you want a full basket" in msg
+        assert "your pinned holdings excluded" in msg
+
+    def test_it_says_how_much_of_the_desk_the_usd_can_buy(self) -> None:
+        r = _live(held_symbols={"NVDA"}, fit_to_cash=True)
+        assert r["coverage"] == pytest.approx(42_740 * 0.818 / r["book_equity"])
+        assert f"about {r['coverage']:.0%} of the desk" in format_funding_alert(
+            r, minutes_to_cycle=60
+        )

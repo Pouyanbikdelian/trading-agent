@@ -25,6 +25,7 @@ account proves the session is authenticated.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -93,23 +94,36 @@ def check_trade_currency_funding(
     *,
     gross_exposure_pct: float,
     quote_ccy: str = QUOTE_CCY,
+    held_symbols: Iterable[str] | None = None,
+    fit_to_cash: bool = False,
 ) -> dict[str, Any]:
     """Is there enough USD to fund the basket the cycle is about to size?
 
     The account is CHF-based; US equities settle in USD. Buying them from
     a CHF balance creates a USD debit — i.e. borrowing. With
     ``max_margin_borrowing_pct = 0.0`` (the default, and the right setting
-    for a cash account) the risk manager REJECTS any order that pushes a
-    currency's cash below zero.
+    for a cash account) the risk manager will not let any currency's cash
+    go below zero: with ``FIT_ORDERS_TO_CASH`` it scales every buy down by
+    one factor until the basket fits, without it it refuses the basket.
 
-    The failure mode that makes this worth a scheduled check: the cycle
+    The failure mode that made this worth a scheduled check: the cycle
     runs, proposes a full basket, the risk manager refuses all of it, and
     the result is a completed cycle that bought nothing. In a position
     report that is indistinguishable from a strategy that saw no
     opportunities. Paper never showed it, because paper has accumulated
     USD over months of trading.
 
-    Checked an hour ahead so there is still time to convert. Never raises.
+    Sized on the DESK, not the account (2026-09-25). The first version
+    multiplied the whole NetLiq — 31k CHF of pinned holdings the desk can
+    never spend — by the gross limit, asked for 76k USD against a desk
+    that is worth 66k, and told the operator to convert "34,247 CHF": the
+    USD shortfall with a franc label on it. ``held_symbols`` are the pins;
+    without them (or if the desk cannot be valued) the account is used and
+    the result says so.
+
+    Checked an hour ahead so there is still time to convert. It runs
+    before the PM has decided, so the need is an upper bound: the basket
+    at the full gross limit. Never raises.
     """
     out: dict[str, Any] = {"ok": True, "reason": "ok", "quote_ccy": quote_ccy}
     try:
@@ -141,17 +155,44 @@ def check_trade_currency_funding(
     # we assume parity, which OVERSTATES nothing and understates the USD
     # need only if USD is worth less than base — acceptable for a warning.
     rate = rates.get(quote_ccy) or 1.0
+    base_ccy = str(getattr(snap, "base_currency", "") or "").upper() or None
 
-    need_base = equity * max(0.0, gross_exposure_pct) * FUNDING_BUFFER
+    book, book_equity, pinned_value = "account", equity, 0.0
+    pins = {str(s).upper() for s in (held_symbols or ())}
+    if pins:
+        try:
+            from trading.runner.managed_account import managed_view
+
+            view = managed_view(snap, pins, fx_rates=rates or None)
+            book_equity = float(view.account.equity)
+            pinned_value = float(sum(view.excluded.values()))
+            book = "desk"
+        except Exception as e:
+            # The account overstates the need; that errs towards a warning
+            # the operator can dismiss, never towards a silent shortfall.
+            book = f"account (desk valuation unavailable: {type(e).__name__})"
+
+    need_base = book_equity * max(0.0, gross_exposure_pct) * FUNDING_BUFFER
     need_quote = need_base / rate if rate else need_base
     have_quote = balances.get(quote_ccy, 0.0)
+    shortfall = max(0.0, need_quote - have_quote)
 
     out.update(
         {
             "equity": equity,
+            "book": book,
+            "book_equity": book_equity,
+            "pinned_value": pinned_value,
+            "base_ccy": base_ccy,
+            "gross_exposure_pct": gross_exposure_pct,
             "required": need_quote,
             "available": have_quote,
-            "shortfall": max(0.0, need_quote - have_quote),
+            "shortfall": shortfall,
+            # The same gap in the currency the operator converts FROM.
+            "shortfall_base": shortfall * rate,
+            # What the USD on hand can buy, as a share of the book.
+            "coverage": (have_quote * rate / book_equity) if book_equity > 0 else None,
+            "fit_to_cash": bool(fit_to_cash),
             "rate": rate,
             "balances": balances,
         }
@@ -160,7 +201,7 @@ def check_trade_currency_funding(
         out["ok"] = False
         out["reason"] = (
             f"{quote_ccy} cash {have_quote:,.0f} < {need_quote:,.0f} needed "
-            f"for {gross_exposure_pct:.1%} gross"
+            f"for {gross_exposure_pct:.1%} gross of the {book}"
         )
         logger.bind(component="broker_ready").warning(f"funding shortfall: {out['reason']}")
     return out
@@ -168,20 +209,53 @@ def check_trade_currency_funding(
 
 def format_funding_alert(result: dict[str, Any], *, minutes_to_cycle: int) -> str:
     """Names the number to convert, because 'insufficient USD' without an
-    amount still leaves the operator doing arithmetic under time pressure."""
+    amount still leaves the operator doing arithmetic under time pressure.
+
+    The amount is in the currency converted FROM, at the broker's rate —
+    the first version printed the USD gap with a CHF label."""
     ccy = result.get("quote_ccy", QUOTE_CCY)
-    short = result.get("shortfall", 0.0)
-    have = result.get("available", 0.0)
-    need = result.get("required", 0.0)
+    base = result.get("base_ccy") or "base currency"
+    short = float(result.get("shortfall", 0.0) or 0.0)
+    short_base = float(result.get("shortfall_base", short) or 0.0)
+    have = float(result.get("available", 0.0) or 0.0)
+    need = float(result.get("required", 0.0) or 0.0)
+    gross = result.get("gross_exposure_pct")
+    book = str(result.get("book") or "account")
+    book_eq = result.get("book_equity")
+    cov = result.get("coverage")
+    what = (
+        f"the desk (`{book_eq:,.0f}` {base}, your pinned holdings excluded)"
+        if book == "desk" and book_eq is not None
+        else f"the whole account — {book}"
+    )
+    upto = f"{gross:.0%} of " if isinstance(gross, (int, float)) else ""
+    head = (
+        f"have `{have:,.0f}` · a full basket at {upto}{what} needs up to "
+        f"`{need:,.0f}` · short `{short:,.0f}` {ccy}\n\n"
+    )
+    convert = f"convert about `{short_base * 1.02:,.0f}` {base} to {ccy} in Client Portal"
+    if result.get("fit_to_cash"):
+        covers = f"about {cov:.0%} of the desk" if isinstance(cov, (int, float)) else "part of it"
+        return (
+            f"🟡 *{ccy} covers only part of a full basket — cycle in {minutes_to_cycle} min*\n"
+            + head
+            + f"Your {ccy} cash can buy {covers}. The PM has not decided yet, so this is "
+            "the most it could ask for. If its basket is bigger than your "
+            f"{ccy}, every buy is scaled down by the same factor to fit "
+            "(FIT_ORDERS_TO_CASH): a smaller basket, not a refused one, and the "
+            "approval card says so.\n\n"
+            f"*Only if you want a full basket:* {convert} "
+            "(or raise MAX_MARGIN_BORROWING_PCT if you intend to borrow)."
+        )
     return (
         f"🟠 *Not enough {ccy} to fund the basket — cycle in {minutes_to_cycle} min*\n"
-        f"have `{have:,.0f}` · need `{need:,.0f}` · short `{short:,.0f}` {ccy}\n\n"
-        f"The account is CHF-based and US equities settle in {ccy}. With margin "
+        + head
+        + f"The account is {base}-based and US equities settle in {ccy}. With margin "
         "borrowing set to 0, the risk manager will REJECT the whole basket "
         "rather than borrow — the cycle will complete having bought nothing, "
         "which looks exactly like a strategy that saw nothing worth buying.\n\n"
-        f"*Do now:* convert about `{short * 1.02:,.0f}` CHF to {ccy} in Client "
-        "Portal (or raise MAX_MARGIN_BORROWING_PCT if you intend to borrow)."
+        f"*Do now:* {convert} "
+        "(or raise MAX_MARGIN_BORROWING_PCT if you intend to borrow)."
     )
 
 
