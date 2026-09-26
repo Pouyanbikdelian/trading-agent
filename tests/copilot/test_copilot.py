@@ -399,3 +399,29 @@ def test_charter_requires_a_closing_so_what() -> None:
     from trading.copilot.engine import CHARTER
 
     assert "close with the so-what" in CHARTER.lower()
+
+
+def test_copilot_defaults_to_opus_5_5_with_room_to_think(monkeypatch) -> None:
+    """2026-09-26: every agent on Opus 5.5. It always thinks, and max_tokens
+    caps thinking plus the reply — the old 900-token Haiku budget could be
+    spent entirely on thinking and return an empty answer."""
+    from trading.copilot import provider
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.delenv("COPILOT_MODEL", raising=False)
+    monkeypatch.delenv("COPILOT_PROVIDER", raising=False)
+    cfg = provider.ProviderConfig.from_env()
+    assert cfg.model == "claude-opus-5-5"
+    body, timeout_s = provider._anthropic_body("sys", "q", cfg.model)
+    assert body["output_config"] == {"effort": "low"}
+    assert body["max_tokens"] >= 4_000 and timeout_s >= 60
+    assert "thinking" not in body and "temperature" not in body
+
+
+def test_haiku_is_still_sent_without_an_effort_field() -> None:
+    """Haiku 4.5 does not support effort; sending it would be a 400."""
+    from trading.copilot import provider
+
+    body, timeout_s = provider._anthropic_body("sys", "q", "claude-haiku-4-5-20251001")
+    assert "output_config" not in body
+    assert body["max_tokens"] == provider.MAX_TOKENS and timeout_s == provider.TIMEOUT_S

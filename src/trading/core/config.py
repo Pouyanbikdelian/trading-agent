@@ -12,6 +12,7 @@ Usage::
 
 from __future__ import annotations
 
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -67,7 +68,9 @@ class Settings(BaseSettings):
     agents_frontier_effort: Literal["low", "medium", "high"] = Field(
         default="high", alias="AGENTS_FRONTIER_EFFORT"
     )
-    agents_timeout_s: float = Field(default=60.0, alias="AGENTS_TIMEOUT_S", ge=10.0, le=300.0)
+    # 120 s since the specialists moved from Sonnet 5 to Opus 5.5, which is
+    # the slower model; a timed-out voice is a silent seat at the committee.
+    agents_timeout_s: float = Field(default=120.0, alias="AGENTS_TIMEOUT_S", ge=10.0, le=300.0)
     agents_frontier_timeout_s: float = Field(
         default=180.0, alias="AGENTS_FRONTIER_TIMEOUT_S", ge=10.0, le=300.0
     )
@@ -169,6 +172,11 @@ class Settings(BaseSettings):
     pm_pre_cycle_lead_minutes: int = Field(
         default=45, alias="PM_PRE_CYCLE_LEAD_MINUTES", ge=1, le=240
     )
+    # Scheduled cycle cadence on top of CRON (runner/cadence.py). 2 = every
+    # second matching Friday; the anchor is any date in a week that has a
+    # cycle. Manual /cycle runs are unaffected and do not move the schedule.
+    cycle_every_weeks: int = Field(default=1, alias="CYCLE_EVERY_WEEKS", ge=1, le=8)
+    cycle_anchor_date: date | None = Field(default=None, alias="CYCLE_ANCHOR_DATE")
     # How stale a PM decision may be and still be executed. The PM is
     # normally scheduled shortly ahead of the cycle; anything approaching
     # this limit means the two have drifted apart and the decision no longer

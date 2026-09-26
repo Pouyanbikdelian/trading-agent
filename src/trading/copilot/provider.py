@@ -1,8 +1,8 @@
 """LLM provider abstraction for the copilot.
 
-Three providers, one interface. Default is **Anthropic Haiku** — the
-cheapest adequate model, and the API key already exists in the deploy's
-.env. Qwen (Alibaba Model Studio / DashScope) and DeepSeek ride their
+Three providers, one interface. Default is **Anthropic Claude Opus 5.5**
+(Haiku until 2026-09-26; the operator moved every agent to one model), and
+the API key already exists in the deploy's .env. Qwen (Alibaba Model Studio / DashScope) and DeepSeek ride their
 OpenAI-compatible endpoints so they share one code path.
 
 Configuration is env-only (never code):
@@ -28,9 +28,17 @@ import httpx
 
 TIMEOUT_S = 30.0
 MAX_TOKENS = 900
+# Opus/Sonnet 5.x always think, and max_tokens caps thinking PLUS the
+# answer: at 900 a medium-effort think could leave nothing to say. Low
+# effort keeps a chat reply quick; the larger ceiling and timeout give the
+# thinking somewhere to go. Haiku 4.5 rejects the effort field entirely.
+THINKING_MODEL_PREFIXES = ("claude-opus-5", "claude-sonnet-5", "claude-fable-5")
+THINKING_TIMEOUT_S = 90.0
+THINKING_MAX_TOKENS = 4_000
+THINKING_EFFORT = "low"
 
 _DEFAULT_MODELS = {
-    "anthropic": "claude-haiku-4-5-20251001",
+    "anthropic": "claude-opus-5-5",
     "qwen": "qwen-plus",
     "deepseek": "deepseek-chat",
 }
@@ -88,7 +96,24 @@ def complete(system: str, prompt: str, *, config: ProviderConfig | None = None) 
         raise ProviderError(f"{cfg.name} request failed: {type(e).__name__}: {e}") from e
 
 
+def _anthropic_body(system: str, prompt: str, model: str) -> tuple[dict[str, Any], float]:
+    """Request body and timeout for ``model``: thinking models get an
+    explicit low effort and room to think; others keep the old budget."""
+    body: dict[str, Any] = {
+        "model": model,
+        "max_tokens": MAX_TOKENS,
+        "system": system,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if model.startswith(THINKING_MODEL_PREFIXES):
+        body["max_tokens"] = THINKING_MAX_TOKENS
+        body["output_config"] = {"effort": THINKING_EFFORT}
+        return body, THINKING_TIMEOUT_S
+    return body, TIMEOUT_S
+
+
 def _anthropic(system: str, prompt: str, cfg: ProviderConfig) -> str:
+    body, timeout_s = _anthropic_body(system, prompt, cfg.model)
     r = httpx.post(
         (cfg.base_url or "https://api.anthropic.com") + "/v1/messages",
         headers={
@@ -96,13 +121,8 @@ def _anthropic(system: str, prompt: str, cfg: ProviderConfig) -> str:
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
-        json={
-            "model": cfg.model,
-            "max_tokens": MAX_TOKENS,
-            "system": system,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=TIMEOUT_S,
+        json=body,
+        timeout=timeout_s,
     )
     if r.status_code != 200:
         raise ProviderError(f"anthropic HTTP {r.status_code}: {r.text[:200]}")

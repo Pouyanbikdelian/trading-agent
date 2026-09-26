@@ -6,7 +6,7 @@ OpenAI HTTP APIs, chosen by which key is present in the environment:
 * ``ANTHROPIC_API_KEY``  -> Anthropic Messages API
 * ``OPENAI_API_KEY``     -> OpenAI Chat Completions
 
-Model is ``AGENTS_MODEL`` (default Sonnet 5 for specialist research) or
+Model is ``AGENTS_MODEL`` (default Opus 5.5 for specialist research) or
 ``AGENTS_MODEL_FRONTIER`` (default Opus 5.5 for decision nodes).  Adaptive
 thinking is bounded: specialists use medium effort and the manager, PM,
 challenger and Curator use high effort.  Every response records model,
@@ -29,7 +29,11 @@ from typing import Any
 
 from trading.core.logging import logger
 
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
+# Opus 5.5 for the specialists too since 2026-09-26 (operator's call): the
+# whole agent layer costs ~$2-3 a week, so model price is not the constraint
+# and one model everywhere removes a variable from the agent scorecard.
+# Specialists stay at AGENTS_EFFORT (medium), which is 5.5's own default.
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 # Frontier tier for the committee's decision nodes (challenger, manager).
 # Overridable via the AGENTS_MODEL_FRONTIER env var without a code change.
@@ -42,7 +46,7 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 # claude-opus-5 in .env rolls back without a deploy.
 FRONTIER_ANTHROPIC_MODEL = "claude-opus-5-5"
 FRONTIER_OPENAI_MODEL = "gpt-4o"
-DEFAULT_TIMEOUT_S = 60.0
+DEFAULT_TIMEOUT_S = 120.0
 FRONTIER_TIMEOUT_S = 180.0
 DEFAULT_MAX_TOKENS = 4_000
 FRONTIER_MAX_TOKENS = 8_000
