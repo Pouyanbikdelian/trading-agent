@@ -331,9 +331,15 @@ def _frontier_llm(system: str, prompt: str) -> dict[str, Any]:
 # Character ceilings, separate from output-token limits. A production
 # context replay exceeded the old 9k challenger ceiling even after safe
 # compaction. Leave room for all voices, provenance and contrary evidence.
-MANAGER_PROMPT_BUDGET = 18_000
-SPECIALIST_PROMPT_BUDGET = 18_000
-CHALLENGER_PROMPT_BUDGET = 24_000
+# Raised 2026-09-26 (18k/18k/24k): the manager read each voice at 400-800
+# characters and specialists lost headlines on most runs. Opus 5.5 reads
+# 1M tokens; at these sizes a full committee adds well under $1 a week.
+MANAGER_PROMPT_BUDGET = 80_000
+SPECIALIST_PROMPT_BUDGET = 60_000
+CHALLENGER_PROMPT_BUDGET = 120_000
+#: The challenger is told to find every material weakness; five was a cap
+#: on its findings, not on its prompt.
+MAX_OBJECTIONS = 10
 
 
 def _prompt_json(payload: dict[str, Any]) -> str:
@@ -593,8 +599,8 @@ def run_committee(
                 direction=str(pred["direction"]),
                 horizon_days=int(pred["horizon_days"]),
                 confidence=float(pred["confidence"]),
-                statement=str(out.get("take", ""))[:500],
-                sources=[str(s) for s in out.get("sources", [])][:8],
+                statement=str(out.get("take", ""))[:2_000],
+                sources=[str(s) for s in out.get("sources", [])][:16],
             )
             mem.journal("take", {"agent": name, "prediction_id": pid, **out}, actor=name)
         except Exception as e:
@@ -620,8 +626,8 @@ def run_committee(
             CHALLENGER_CHARTER,
             _budgeted_challenger_prompt(context, takes),
         )
-        objections = list(ch.get("objections", []))[:5]
-        market_caveat = str(ch.get("market_phase_caveat", ""))[:300]
+        objections = list(ch.get("objections", []))[:MAX_OBJECTIONS]
+        market_caveat = _clip(str(ch.get("market_phase_caveat", "")), 1_200)
         mem.journal(
             "debate",
             {"objections": objections, "market_caveat": market_caveat},

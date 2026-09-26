@@ -425,3 +425,57 @@ def test_haiku_is_still_sent_without_an_effort_field() -> None:
     body, timeout_s = provider._anthropic_body("sys", "q", "claude-haiku-4-5-20251001")
     assert "output_config" not in body
     assert body["max_tokens"] == provider.MAX_TOKENS and timeout_s == provider.TIMEOUT_S
+
+
+class TestEvidenceBudget:
+    """2026-09-26: a raw 14k slice with NOW_* last — positions, risk and the
+    PM book were cut first on any 'why' question, and the JSON was invalid."""
+
+    @staticmethod
+    def _payload() -> dict:
+        return {
+            "question": "why did we sell NVDA?",
+            "CHAT_recent_turns": [{"role": "user", "text": "t" * 1_500} for _ in range(10)],
+            "THEN_decisions_matching_question": [
+                {"id": f"d{i}", "x": "d" * 3_000} for i in range(8)
+            ],
+            "THEN_transcript_hits": [{"id": f"t{i}", "x": "h" * 3_000} for i in range(8)],
+            "NOW_positions": {"NVDA": 40},
+            "NOW_risk_state": {"drawdown": -0.01},
+        }
+
+    def test_current_state_survives_and_the_json_is_valid(self) -> None:
+        from trading.copilot.engine import _budgeted_evidence
+
+        out = json.loads(_budgeted_evidence(self._payload(), budget=20_000))
+        assert out["NOW_positions"] == {"NVDA": 40} and out["NOW_risk_state"]
+        assert out["question"].startswith("why")
+        assert any(o.startswith("THEN_transcript_hits") for o in out["_evidence_omissions"])
+
+    def test_a_normal_question_fits_the_default_budget_untouched(self) -> None:
+        from trading.copilot.engine import MAX_EVIDENCE_CHARS, _budgeted_evidence
+
+        p = self._payload()
+        p["THEN_decisions_matching_question"] = p["THEN_decisions_matching_question"][:4]
+        p["THEN_transcript_hits"] = p["THEN_transcript_hits"][:4]
+        out = json.loads(_budgeted_evidence(p))  # ~40k: the old 14k slice cut it
+        assert "_evidence_omissions" not in out and MAX_EVIDENCE_CHARS >= 60_000
+
+
+def test_a_cut_off_copilot_answer_says_so(monkeypatch) -> None:
+    from trading.copilot import provider
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {
+                "content": [{"type": "text", "text": "NVDA was sold because"}],
+                "stop_reason": "max_tokens",
+            }
+
+    monkeypatch.setattr(provider.httpx, "post", lambda *a, **k: R())
+    cfg = provider.ProviderConfig(
+        name="anthropic", model="claude-opus-5-5", base_url=None, api_key="k"
+    )
+    assert "answer cut off" in provider._anthropic("s", "q", cfg)

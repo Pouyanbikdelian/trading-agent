@@ -197,6 +197,30 @@ def test_challenger_sees_all_takes_and_market_context(mem: MemoryStore) -> None:
     assert digest["objections"][0]["target_agent"] == "committee"
 
 
+def test_the_challenger_keeps_up_to_ten_objections_and_a_full_caveat(mem: MemoryStore) -> None:
+    """2026-09-26: capped at five objections and a 300-char raw slice, while
+    the charter asks it for every material weakness."""
+    from trading.agents.committee import MAX_OBJECTIONS
+
+    base_llm, _ = make_fake_llm()
+    caveat = "Late-cycle fragility: " + "breadth is narrowing while rates rise. " * 20
+
+    def spy_llm(system: str, prompt: str):
+        if "Challenger" in system and "Fund Manager" not in system:
+            return {
+                "objections": [
+                    {"target_agent": "committee", "objection": f"o{i}", "falsifier": "f"}
+                    for i in range(14)
+                ],
+                "market_phase_caveat": caveat,
+            }
+        return base_llm(system, prompt)
+
+    digest = run_committee({"macro_dial": {"composite": 1.2}}, mem, llm=spy_llm)
+    assert MAX_OBJECTIONS == 10 and len(digest["objections"]) == 10
+    assert len(digest["market_caveat"]) > 300
+
+
 def test_manager_bounds_mapping_takes_without_erasing_dissent() -> None:
     from trading.agents.committee import _budgeted_manager_prompt
 

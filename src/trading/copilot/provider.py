@@ -34,7 +34,7 @@ MAX_TOKENS = 900
 # thinking somewhere to go. Haiku 4.5 rejects the effort field entirely.
 THINKING_MODEL_PREFIXES = ("claude-opus-5", "claude-sonnet-5", "claude-fable-5")
 THINKING_TIMEOUT_S = 90.0
-THINKING_MAX_TOKENS = 4_000
+THINKING_MAX_TOKENS = 8_000
 THINKING_EFFORT = "low"
 
 _DEFAULT_MODELS = {
@@ -127,7 +127,13 @@ def _anthropic(system: str, prompt: str, cfg: ProviderConfig) -> str:
     if r.status_code != 200:
         raise ProviderError(f"anthropic HTTP {r.status_code}: {r.text[:200]}")
     data: dict[str, Any] = r.json()
-    return "".join(b.get("text", "") for b in data.get("content", []))
+    text = "".join(b.get("text", "") for b in data.get("content", []))
+    if data.get("stop_reason") == "max_tokens":
+        # Say so, rather than let a half-sentence read as the whole answer.
+        text = (
+            text.rstrip() + "\n\n_(answer cut off at the length limit — ask a narrower question)_"
+        ).strip()
+    return text
 
 
 def _openai_compatible(system: str, prompt: str, cfg: ProviderConfig) -> str:

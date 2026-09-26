@@ -411,6 +411,30 @@ AGENTS_TIMEOUT_S=120              # specialists now run on Opus 5.5, the slower 
 - The committee still meets Monday and Friday every week; that is the
   learning loop, not the order path.
 
+## 18. Information-limits release notes (2026-09-26)
+
+Audit of every limit on what one agent hands another, and the fixes:
+
+- PM prompt budget 24k -> 200k chars; takes arrive whole with all sources
+  and `cited_lessons`; takes and rulings cover the cadence window (every
+  meeting since the last PM decision), not the last 16 rows. Whatever is
+  still trimmed is named in `_prompt_omissions`.
+- Committee budgets 18k/18k/24k -> 80k/60k/120k (manager/specialist/
+  challenger); up to 10 objections; caveat no longer raw-sliced.
+- Curator budget 72k -> 240k, follows `AGENTS_FRONTIER_MAX_TOKENS`, 25 votes,
+  40 takes a week; graded statements kept to 1,000 / 600 chars (flagged).
+- A cut-off answer (`stop_reason=max_tokens`) is retried once with twice the
+  room instead of the same ceiling; still cut off is an explicit error.
+- News: RSS and Reddit have separate quotas (Reddit was always dropped);
+  agents get 100 headlines balanced across topics; a stale news file is a
+  named `_data_gaps` entry. The weekly style reading counts for 8 days.
+- Copilot: 60k evidence built by whole items with current state protected;
+  turns kept at 2,000 chars; a cut-off answer says so.
+- Sentinel: severity is saved; a false alarm no longer arms the PM's 70%
+  deployment cap. Its prompt keeps vol surface and macro dial.
+- Code defaults now match the `.env` set on 2026-09-26: tokens 12k/24k,
+  timeouts 180/300 s.
+
 ## Troubleshooting
 
 | Symptom                              | Likely cause                              | Action                                                          |

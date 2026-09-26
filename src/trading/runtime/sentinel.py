@@ -92,6 +92,26 @@ def _envf(key: str, default: float) -> float:
         return default
 
 
+#: Serialized prompt ceiling. Was a raw ``[:8000]`` slice with positions
+#: first, so vol_surface and macro_dial — the systemic inputs the charter
+#: puts first — were the ones cut, and the JSON arrived invalid.
+SENTINEL_PROMPT_BUDGET = 40_000
+
+
+def _sentinel_prompt(payload: dict[str, Any], budget: int = SENTINEL_PROMPT_BUDGET) -> str:
+    """Whole-item trimming: positions give way (tail first), named."""
+    p = dict(payload)
+    s = json.dumps(p, default=str)
+    positions = list(p.get("positions") or [])
+    total = len(positions)
+    while len(s) > budget and positions:
+        positions.pop()
+        p["positions"] = positions
+        p["_prompt_omissions"] = [f"positions: kept {len(positions)} of {total} (prompt budget)"]
+        s = json.dumps(p, default=str)
+    return s
+
+
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:
     from trading.agents.llm import complete_json
 
@@ -266,15 +286,14 @@ def run_sentinel(
         ctx = build_context(Path(state_dir), settings.data_dir)
     except Exception:
         ctx = {}
-    prompt = json.dumps(
+    prompt = _sentinel_prompt(
         {
             "triggers": triggers,
             "positions": ctx.get("positions", []),
             "vol_surface": ctx.get("vol_surface", {}),
             "macro_dial": ctx.get("macro_dial", {}),
-        },
-        default=str,
-    )[:8000]
+        }
+    )
     try:
         verdict = llm(SENTINEL_CHARTER, prompt)
     except Exception as e:
@@ -292,6 +311,9 @@ def run_sentinel(
     state["last_alert_ts"] = now.isoformat()
     state["alerted_moves"] = tripped
     state["triggers"] = triggers
+    # The PM's 70% deployment cap is for CAUTION or ALARM. Without the
+    # severity on disk it fired after a false alarm too (2026-09-26).
+    state["last_severity"] = str(verdict.get("severity", "caution")).strip().lower()
     _save_state(state_dir, state)
     return {
         "quiet": False,

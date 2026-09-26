@@ -72,7 +72,7 @@ def test_frontier_timeout_is_telemetried_without_a_completion(monkeypatch) -> No
 
 def test_explicit_token_budget_wins_over_tier_default() -> None:
     assert llm._token_budget("frontier", 1234) == 1234
-    assert llm._token_budget("standard", None) == 4000
+    assert llm._token_budget("standard", None) == 12_000
     assert llm.DEFAULT_ANTHROPIC_MODEL == "claude-opus-5-5"
     assert llm.FRONTIER_ANTHROPIC_MODEL == "claude-opus-5-5"
 
@@ -158,3 +158,43 @@ def test_openai_token_usage_is_normalized_for_telemetry(monkeypatch) -> None:
 
     assert json.loads(result) == {"ok": True}
     assert telemetry["usage"] == {"input_tokens": 123, "output_tokens": 45}
+
+
+def test_a_cut_off_answer_is_retried_once_with_twice_the_room(monkeypatch) -> None:
+    """2026-09-26: a max_tokens stop used to be retried with the SAME
+    ceiling, so it failed again and the voice sat the meeting out."""
+    calls: list[int] = []
+
+    def complete(system: str, prompt: str, *, max_tokens=None, tier=None) -> str:
+        calls.append(max_tokens)
+        if len(calls) == 1:
+            llm._set_stop("max_tokens")
+            return '{"take": "half an ans'
+        llm._set_stop("end_turn")
+        return '{"take": "whole answer"}'
+
+    monkeypatch.setattr(llm, "complete_text", complete)
+    out = llm.complete_json("s", "p", max_tokens=12_000, tier="standard")
+    assert out == {"take": "whole answer"}
+    assert calls == [12_000, 24_000]
+
+
+def test_still_cut_off_after_the_retry_is_an_error_not_a_fragment(monkeypatch) -> None:
+    def complete(system: str, prompt: str, *, max_tokens=None, tier=None) -> str:
+        llm._set_stop("max_tokens")
+        return '{"take": "cut'
+
+    monkeypatch.setattr(llm, "complete_text", complete)
+    with pytest.raises(ValueError, match="cut off at max_tokens=48000"):
+        llm.complete_json("s", "p", max_tokens=24_000, tier="frontier")
+
+
+def test_the_anthropic_stop_reason_is_recorded(monkeypatch) -> None:
+    class Cut(_Response):
+        def json(self) -> dict[str, Any]:
+            return {"content": [], "usage": {}, "stop_reason": "max_tokens"}
+
+    monkeypatch.setattr("httpx.post", lambda *a, **k: Cut())
+    monkeypatch.setattr(llm, "_record_telemetry", lambda **row: None)
+    llm._call_anthropic("s", "p", model="claude-opus-5-5", max_tokens=100, tier=None)
+    assert llm.last_stop_reason() == "max_tokens"

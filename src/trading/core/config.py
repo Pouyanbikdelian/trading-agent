@@ -60,9 +60,12 @@ class Settings(BaseSettings):
     # a larger output budget; an eight-person committee must not silently
     # inherit that cost on every routine observation.
     agents_model_frontier: str | None = Field(default=None, alias="AGENTS_MODEL_FRONTIER")
-    agents_max_tokens: int = Field(default=4_000, alias="AGENTS_MAX_TOKENS", ge=256, le=32_000)
+    # Ceilings, not budgets: output is billed as used. Opus 5.5 always
+    # thinks and the ceiling covers thinking PLUS the answer; decision calls
+    # already reached 6,200 tokens against the old 8,000 (2026-09-26).
+    agents_max_tokens: int = Field(default=12_000, alias="AGENTS_MAX_TOKENS", ge=256, le=32_000)
     agents_frontier_max_tokens: int = Field(
-        default=8_000, alias="AGENTS_FRONTIER_MAX_TOKENS", ge=256, le=64_000
+        default=24_000, alias="AGENTS_FRONTIER_MAX_TOKENS", ge=256, le=64_000
     )
     agents_effort: Literal["low", "medium", "high"] = Field(default="medium", alias="AGENTS_EFFORT")
     agents_frontier_effort: Literal["low", "medium", "high"] = Field(
@@ -70,9 +73,9 @@ class Settings(BaseSettings):
     )
     # 120 s since the specialists moved from Sonnet 5 to Opus 5.5, which is
     # the slower model; a timed-out voice is a silent seat at the committee.
-    agents_timeout_s: float = Field(default=120.0, alias="AGENTS_TIMEOUT_S", ge=10.0, le=300.0)
+    agents_timeout_s: float = Field(default=180.0, alias="AGENTS_TIMEOUT_S", ge=10.0, le=300.0)
     agents_frontier_timeout_s: float = Field(
-        default=180.0, alias="AGENTS_FRONTIER_TIMEOUT_S", ge=10.0, le=300.0
+        default=300.0, alias="AGENTS_FRONTIER_TIMEOUT_S", ge=10.0, le=300.0
     )
     # Hard dollar cap for the agent-PM sleeve IF/WHEN it is bridged into
     # the real order path (GO_LIVE.md §4). The $1M sim book deliberately

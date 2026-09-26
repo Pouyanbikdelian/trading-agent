@@ -114,6 +114,9 @@ Order of operations:
 - [x] Manual `/cycle` refreshes a stale PM decision first, so the PM
       simulation counts manual recycles.
 - [x] All agents on Claude Opus 5.5 (specialists, decision nodes, copilot).
+- [x] Information-limits audit and fixes (docs/deploy.md §18).
+- [ ] Mandates: MAX_ACTIVE=8 hides the NEWEST mandates past eight, and only
+      the first matching clause is stored (copilot/mandates.py).
 - [ ] After two cycles: rerun `scripts/llm_cost.py` for real Opus 5.5
       token use; check specialist latency against `AGENTS_TIMEOUT_S`.
 

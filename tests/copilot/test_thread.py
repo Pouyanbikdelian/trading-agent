@@ -79,9 +79,11 @@ class TestThreadWindow:
 
     def test_long_turns_are_truncated(self, tmp_path: Path) -> None:
         t = Thread(tmp_path)
+        from trading.copilot.thread import MAX_TURN_CHARS
+
         t.append("copilot", "x" * 5000)
         turns, _ = t.load()
-        assert len(turns[0].text) <= 600
+        assert len(turns[0].text) <= MAX_TURN_CHARS == 2_000
 
 
 class TestAnswerBudget:

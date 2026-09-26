@@ -33,7 +33,13 @@ from trading.core.logging import logger
 
 STATE_FILENAME = "news.json"
 MAX_PER_QUERY = 5  # fewer per query so more queries fit in the context budget
-MAX_HEADLINES = 100
+# Separate quotas (2026-09-26). One 100-item cap applied to RSS first and
+# then to RSS + Reddit meant 24 queries x 5 could fill it alone: the last
+# query groups were cut by position, and every Reddit item — the most
+# attribution-trackable signal for source trust — was always dropped.
+MAX_RSS_HEADLINES = 150
+MAX_REDDIT_HEADLINES = 30
+MAX_HEADLINES = MAX_RSS_HEADLINES + MAX_REDDIT_HEADLINES
 TIMEOUT_S = 15.0
 
 # Broad + thematic queries. Tuned for "what is the crowd excited about",
@@ -208,7 +214,7 @@ def fetch_headlines() -> list[dict[str, str]]:
             headlines.extend(_fetch_query(topic, query))
         except Exception as e:
             logger.bind(component="news_watch").info(f"feed '{topic}' failed: {e}")
-    return headlines[:MAX_HEADLINES]
+    return headlines[:MAX_RSS_HEADLINES]
 
 
 def fetch_sector_momentum() -> dict[str, dict[str, float | None]]:
@@ -274,9 +280,9 @@ def collect(state_dir: Path) -> dict[str, Any]:
     """One collection pass; atomic write of state/news.json."""
     rss = fetch_headlines()
     reddit = fetch_reddit_signals()
-    # Reddit entries go after RSS so context truncation loses them last
-    # (they carry the most attribution-trackable signal for trust scoring).
-    all_headlines = (rss + reddit)[:MAX_HEADLINES]
+    # Each source keeps its own quota; context.py balances topics when it
+    # builds the agents' view, so order here no longer decides who is cut.
+    all_headlines = rss[:MAX_RSS_HEADLINES] + reddit[:MAX_REDDIT_HEADLINES]
     reading: dict[str, Any] = {
         "t": datetime.now(tz=timezone.utc).isoformat(),
         "headlines": all_headlines,

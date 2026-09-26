@@ -49,8 +49,10 @@ from trading.core.logging import logger
 _LOG = logger.bind(component="copilot.thread")
 
 THREAD_FILE = "copilot_thread.json"
-MAX_TURNS = 6  # 3 exchanges; enough for "and XLE?" to resolve
-MAX_TURN_CHARS = 600
+MAX_TURNS = 10  # 5 exchanges; enough for "and XLE?" to resolve
+# 2,000 since 2026-09-26: the copilot's own earlier answer was cut to 600
+# characters before it was shown back to it as context.
+MAX_TURN_CHARS = 2_000
 IDLE_EXPIRY_S = 45 * 60.0
 
 # Pushback markers. Tuned for precision over recall: a missed objection is

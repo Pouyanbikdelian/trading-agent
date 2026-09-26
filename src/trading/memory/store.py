@@ -1731,7 +1731,7 @@ class MemoryStore:
                 "outcome": outcome,
                 "realized_move": realized_move,
                 "brier": brier,
-                "statement": str(row["statement"])[:300],
+                "statement": str(row["statement"])[:1_000],
             },
         )
         return outcome
@@ -1868,7 +1868,7 @@ class MemoryStore:
             card = dict(row)
             card["graded"] = datetime.fromtimestamp(card.pop("graded_ts"), tz=timezone.utc)
             card["graded"] = card["graded"].date().isoformat()
-            card["statement"] = str(card["statement"])[:300]
+            card["statement"] = str(card["statement"])[:1_000]
             return card
 
         return {

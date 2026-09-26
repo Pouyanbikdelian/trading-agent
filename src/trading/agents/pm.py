@@ -340,9 +340,21 @@ def _stock_universe() -> tuple[str, ...]:
 # actionable — older than that and it is a lesson, not a trade.
 RULINGS_SEEN = 6
 TAKES_SEEN = 16
+# Since 2026-09-26 the PM decides every second Friday (plus manual cycles),
+# while the committee still meets Monday and Friday every week. "The last 16
+# takes" was two meetings — half of what happened since its last decision.
+# The window is now the cadence plus a day, bounded; the constants above
+# remain the floor when the journal is thin.
+TAKES_MAX = 96
+RULINGS_MAX = 24
 
-# Characters of serialized JSON the PM prompt may occupy.
-PROMPT_BUDGET = 24_000
+# Characters of serialized JSON the PM prompt may occupy. Was 24k: a typical
+# payload is 50-70k, so headlines, then rulings, then takes were cut every
+# run. 200k chars is ~50k tokens — about $0.20 of Opus 5.5 input a decision,
+# and a small fraction of its 1M-token context.
+PROMPT_BUDGET = 200_000
+# A take is several paragraphs; this only stops a runaway, it is not a cut.
+TAKE_TEXT_MAX_CHARS = 4_000
 
 
 # Keys in the shared agent context that describe the OPERATOR'S LIVE
@@ -382,14 +394,49 @@ def _relabel_operator_account(context: dict[str, Any]) -> dict[str, Any]:
     return {OPERATOR_ACCOUNT_KEYS.get(k, k): v for k, v in context.items()}
 
 
+def _evidence_window_days() -> float:
+    """The PM's look-back: its own cadence plus a day."""
+    try:
+        from trading.core.config import settings
+        from trading.runner.cadence import cadence_from
+
+        every, _anchor = cadence_from(settings)
+    except Exception:
+        every = 1
+    return 7.0 * every + 1.0
+
+
+def _recent_rows(mem: MemoryStore, kind: str, *, floor: int, ceiling: int) -> list[dict[str, Any]]:
+    """Journal rows of ``kind`` since the last PM cadence, newest first.
+
+    At least ``floor`` rows even when the window is thin (a first run, a
+    quiet fortnight), at most ``ceiling``.
+    """
+    try:
+        window = mem.journal_window(
+            _evidence_window_days(), kinds=[kind], per_kind_limit=ceiling
+        ).get(kind, [])
+    except Exception:
+        window = []
+    rows = list(reversed(window))  # journal_window is oldest-first
+    if len(rows) < floor:
+        rows = mem.journal_tail(floor, kind=kind)
+    return rows[:ceiling]
+
+
 def _recent_takes(mem: MemoryStore) -> list[dict[str, Any]]:
-    """The specialists' own takes, newest first, compacted for the prompt.
+    """The specialists' own takes, newest first, for the prompt.
 
     Newest-first matters: ``_budgeted_prompt`` trims list tails, so an
     overflow costs the oldest take rather than today's.
+
+    Until 2026-09-26 each take was clipped to 400 characters (about half
+    of the 4-6 sentences a specialist writes), sources to four, and
+    ``cited_lessons`` was never sent although the charter tells the PM to
+    weigh it. All three now arrive whole.
     """
     out: list[dict[str, Any]] = []
-    for row in mem.journal_tail(TAKES_SEEN, kind="take"):
+    for row in _recent_rows(mem, "take", floor=TAKES_SEEN, ceiling=TAKES_MAX):
         payload = row.get("payload") or {}
         if not isinstance(payload, dict):
             continue
@@ -397,9 +444,7 @@ def _recent_takes(mem: MemoryStore) -> list[dict[str, Any]]:
             "ts": str(row.get("ts"))[:16],
             "agent": payload.get("agent") or row.get("actor"),
             "stance": payload.get("stance"),
-            # The full take is several paragraphs; the PM needs the claim,
-            # not the prose around it.
-            "take": clip(str(payload.get("take", "")), 400),
+            "take": clip(str(payload.get("take", "")), TAKE_TEXT_MAX_CHARS),
         }
         pred = payload.get("prediction")
         if isinstance(pred, dict):
@@ -409,7 +454,9 @@ def _recent_takes(mem: MemoryStore) -> list[dict[str, Any]]:
                 k: pred.get(k) for k in ("subject", "direction", "horizon_days", "confidence")
             }
         if payload.get("sources"):
-            take["sources"] = list(payload["sources"])[:4]
+            take["sources"] = list(payload["sources"])
+        if payload.get("cited_lessons"):
+            take["cited_lessons"] = list(payload["cited_lessons"])
         out.append(take)
     return out
 
@@ -512,10 +559,22 @@ def _budgeted_prompt(payload: dict[str, Any], budget: int = PROMPT_BUDGET) -> st
     decide on.
     """
     p = copy.deepcopy(payload)
+    # Whatever is dropped is NAMED in the prompt (2026-09-26). A model that
+    # does not know six rulings are missing reasons as if there were none.
+    omitted: list[str] = []
 
     def fitted() -> str | None:
+        if omitted:
+            p["_prompt_omissions"] = list(omitted)
         s = json.dumps(p, default=str)
         return s if len(s) <= budget else None
+
+    def done(s: str) -> str:
+        if omitted:
+            logger.bind(component="agent_pm").warning(
+                f"PM prompt over {budget:,} chars; trimmed: {'; '.join(omitted)}"
+            )
+        return s
 
     s = fitted()
     if s is not None:
@@ -525,43 +584,54 @@ def _budgeted_prompt(payload: dict[str, Any], budget: int = PROMPT_BUDGET) -> st
     #    block in the context by a wide margin.
     ctx = p.get("today_context")
     if isinstance(ctx, dict) and ctx.get("headlines"):
+        total = len(ctx["headlines"])
         for keep in (16, 6, 0):
             if keep:
                 ctx["headlines"] = list(ctx["headlines"])[:keep]
             else:
                 ctx.pop("headlines", None)
+            omitted[:] = [o for o in omitted if not o.startswith("headlines")]
+            omitted.append(f"headlines: kept {keep} of {total} (prompt budget)")
             s = fitted()
             if s is not None:
-                return s
+                return done(s)
 
     # 2. History, oldest first: rulings, then takes. Both lists are
     #    newest-first, so popping the tail drops the stalest evidence.
     for key in ("recent_committee_rulings", "agent_takes"):
         seq = p.get(key)
+        total = len(seq) if isinstance(seq, list) else 0
         while isinstance(seq, list) and len(seq) > 1:
             seq.pop()
+            omitted[:] = [o for o in omitted if not o.startswith(key)]
+            omitted.append(f"{key}: kept the newest {len(seq)} of {total} (prompt budget)")
             s = fitted()
             if s is not None:
-                return s
+                return done(s)
 
     # 3. Terminal fallback: shed whole keys in reverse-value order until it
     #    fits. Guaranteed to terminate with valid JSON — unlike a slice.
     for key in ("recent_committee_rulings", "agent_takes", "agent_calibration", "dossiers"):
-        p.pop(key, None)
+        if key in p:
+            p.pop(key, None)
+            omitted[:] = [o for o in omitted if not o.startswith(key)]
+            omitted.append(f"{key}: removed (prompt budget)")
         s = fitted()
         if s is not None:
-            return s
+            return done(s)
     if isinstance(ctx, dict):
         # ``established_lessons`` is deliberately NOT in this list. The
         # charter now makes them mandatory to address, and a prompt that
         # silently drops what it then demands an answer about is worse
         # than one that never asked.
         for key in ("dossiers", "source_trust", "economy"):
-            ctx.pop(key, None)
+            if key in ctx:
+                ctx.pop(key, None)
+                omitted.append(f"today_context.{key}: removed (prompt budget)")
             s = fitted()
             if s is not None:
-                return s
-    return json.dumps(p, default=str)
+                return done(s)
+    return done(json.dumps(p, default=str))
 
 
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:
@@ -959,7 +1029,7 @@ def run_agent_pm(
     # at ≥0.70 ⇒ allocate 5%" and the bearish-majority cluster exit — were
     # written against evidence that never reached the prompt, and the
     # calibration table had no takes to weigh. Both are now real inputs.
-    rulings = mem.journal_tail(RULINGS_SEEN, kind="committee")
+    rulings = _recent_rows(mem, "committee", floor=RULINGS_SEEN, ceiling=RULINGS_MAX)
     takes = _recent_takes(mem)
 
     # Sentinel state: the PM must know if a tripwire fired recently so the
@@ -972,6 +1042,7 @@ def run_agent_pm(
             sentinel_state = {
                 "last_alert_ts": raw.get("last_alert_ts"),
                 "triggers": raw.get("triggers", []),
+                "severity": raw.get("last_severity"),
             }
             # The SENTINEL RULE says "fired in the last 24 hours", and the
             # prompt handed the model a bare ISO timestamp to compare
@@ -982,7 +1053,11 @@ def run_agent_pm(
                 alert_ts = datetime.fromisoformat(str(raw.get("last_alert_ts")))
                 hours = (datetime.now(tz=timezone.utc) - alert_ts).total_seconds() / 3600
                 sentinel_state["hours_since_alert"] = round(hours, 1)
-                sentinel_state["fired_within_24h"] = bool(hours <= 24)
+                # A verdict of false_alarm does not arm the 70% cap. An
+                # older file without a severity keeps the old, cautious
+                # reading: a trip is treated as a caution.
+                severity = str(raw.get("last_severity") or "caution").lower()
+                sentinel_state["fired_within_24h"] = bool(hours <= 24 and severity != "false_alarm")
             except (TypeError, ValueError):
                 sentinel_state["fired_within_24h"] = False
     except Exception:

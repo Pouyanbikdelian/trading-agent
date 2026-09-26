@@ -40,7 +40,71 @@ from trading.core.logging import logger
 _LOG = logger.bind(component="copilot")
 
 COOLDOWN_S = 15.0
-MAX_EVIDENCE_CHARS = 14_000  # context cap: cheap model, cheap prompt
+# 60k since 2026-09-26 (was 14k, sized for Haiku). The old cap was a raw
+# slice of the serialized JSON with the current-state NOW_* facts LAST, so
+# on any "why" question positions, risk and the PM book were cut first and
+# the model received invalid JSON. See _budgeted_evidence.
+MAX_EVIDENCE_CHARS = 60_000
+REPLIED_TO_MAX_CHARS = 4_096  # a Telegram message's own maximum
+
+
+def _budgeted_evidence(payload: dict[str, Any], budget: int | None = None) -> str:
+    """Serialize the evidence under ``budget`` by dropping WHOLE items.
+
+    Current state (every ``NOW_*`` source the question's scope selected)
+    and the question itself are kept. What gives way, in order: old
+    transcript hits, then older matching decisions, then the oldest chat
+    turns, then the quoted message. Anything dropped is listed in
+    ``_evidence_omissions`` so the answer can say what it could not see —
+    never valid-looking JSON that silently ends mid-string.
+    """
+    budget = MAX_EVIDENCE_CHARS if budget is None else budget
+    p = dict(payload)
+    omitted: list[str] = []
+
+    def fitted() -> str | None:
+        if omitted:
+            p["_evidence_omissions"] = list(omitted)
+        s = json.dumps(p, default=str)
+        return s if len(s) <= budget else None
+
+    s = fitted()
+    if s is not None:
+        return s
+    for key, from_head in (
+        ("THEN_transcript_hits", False),
+        ("THEN_decisions_matching_question", False),
+        ("CHAT_recent_turns", True),
+    ):
+        seq = p.get(key)
+        if not isinstance(seq, list):
+            continue
+        seq = list(seq)
+        total = len(seq)
+        while seq:
+            seq.pop(0 if from_head else -1)
+            p[key] = seq
+            omitted[:] = [o for o in omitted if not o.startswith(key)]
+            omitted.append(f"{key}: kept {len(seq)} of {total} (evidence budget)")
+            s = fitted()
+            if s is not None:
+                return s
+    if p.get("CHAT_operator_is_replying_to"):
+        p["CHAT_operator_is_replying_to"] = None
+        omitted.append("CHAT_operator_is_replying_to: removed (evidence budget)")
+        s = fitted()
+        if s is not None:
+            return s
+    # Last resort: the least question-specific NOW_ sources, by name.
+    for key in ("NOW_operating_manual", "NOW_operator_interface", "NOW_configuration"):
+        if key in p:
+            p.pop(key)
+            omitted.append(f"{key}: removed (evidence budget)")
+            s = fitted()
+            if s is not None:
+                return s
+    return json.dumps(p, default=str)
+
 
 CHARTER = (
     "You are the read-only Investment Committee Copilot for a systematic "
@@ -607,7 +671,7 @@ def answer(
         source_names = _now_source_names(scope, has_symbol=sym is not None)
         now = {name: providers[name]() for name in source_names}
 
-        evidence = json.dumps(
+        evidence = _budgeted_evidence(
             {
                 "question": question,
                 "symbol": sym,
@@ -616,7 +680,7 @@ def answer(
                 "authoritative_now_sources": list(source_names),
                 # The message being replied to. Quoted data like any other
                 # transcript — it is something the BOT said earlier.
-                "CHAT_operator_is_replying_to": (replied_to or "")[:1500] or None,
+                "CHAT_operator_is_replying_to": (replied_to or "")[:REPLIED_TO_MAX_CHARS] or None,
                 # Conversation, not evidence — see charter rule 1b.
                 "CHAT_recent_turns": [t.to_dict() for t in turns],
                 "THEN_decisions_matching_question": decisions,
@@ -624,8 +688,7 @@ def answer(
                 **now,
                 "generated_at": datetime.now(tz=timezone.utc).isoformat(),
             },
-            default=str,
-        )[:MAX_EVIDENCE_CHARS]
+        )
 
         limiter = _RateLimiter(state_dir)
         if llm is None:

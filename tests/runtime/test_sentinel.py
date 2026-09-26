@@ -159,3 +159,26 @@ def test_long_verdict_is_clipped_at_a_word_boundary(tmp_path: Path) -> None:
     # And the rendered alert carries balanced Markdown.
     alert = format_sentinel_alert(res)
     assert alert.count("*") % 2 == 0 and alert.count("_") % 2 == 0
+
+
+def test_the_sentinel_prompt_keeps_the_systemic_inputs_and_valid_json() -> None:
+    """A raw [:8000] slice with positions first cut vol_surface and
+    macro_dial — the inputs the charter weighs first — and broke the JSON."""
+    import json as _json
+
+    from trading.runtime.sentinel import _sentinel_prompt
+
+    out = _json.loads(
+        _sentinel_prompt(
+            {
+                "triggers": ["SPY -2.1%"],
+                "positions": [{"symbol": f"S{i}", "note": "x" * 400} for i in range(200)],
+                "vol_surface": {"skew": 1.4},
+                "macro_dial": {"composite": -1.2},
+            },
+            budget=20_000,
+        )
+    )
+    assert out["vol_surface"] == {"skew": 1.4} and out["macro_dial"] == {"composite": -1.2}
+    assert 0 < len(out["positions"]) < 200
+    assert out["_prompt_omissions"][0].startswith("positions: kept")

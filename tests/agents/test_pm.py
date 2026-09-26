@@ -155,6 +155,26 @@ class TestSentinelTargetIntegrity:
             )
         )
 
+    def test_a_false_alarm_does_not_arm_the_cap(self, mem: MemoryStore, tmp_path: Path) -> None:
+        """The charter's cap is for CAUTION or ALARM; the severity was never
+        saved, so every trip — false alarms included — capped the book."""
+        (tmp_path / "sentinel.json").write_text(
+            json.dumps(
+                {
+                    "last_alert_ts": datetime.now(tz=timezone.utc).isoformat(),
+                    "triggers": ["SMH -4.0%"],
+                    "last_severity": "false_alarm",
+                }
+            )
+        )
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            return {"target_weights": {"XLE": 0.25, "SPY": 0.25, "SMH": 0.25}, "rationale": "r"}
+
+        result = run_agent_pm({}, mem, tmp_path, llm=llm, prices=PRICES)
+        assert result["sentinel_cap_active"] is False
+        assert fsum(result["weights"].values()) == pytest.approx(0.75)
+
     def test_recent_sentinel_caps_the_persisted_target_deterministically(
         self, mem: MemoryStore, tmp_path: Path
     ) -> None:
@@ -401,6 +421,56 @@ class TestAntiFixation:
         assert [t["agent"] for t in takes] == ["scout"]
         assert takes[0]["prediction"]["confidence"] == 0.8
 
+    def test_takes_arrive_whole_with_sources_and_cited_lessons(
+        self, mem: MemoryStore, tmp_path: Path
+    ) -> None:
+        """2026-09-26: takes were clipped to 400 chars, sources to 4, and the
+        cited_lessons the charter tells the PM to weigh were never sent."""
+        long_take = "Capex is re-accelerating across hyperscalers. " * 25  # ~1.2k chars
+        mem.journal(
+            "take",
+            {
+                "agent": "creative",
+                "stance": "bullish",
+                "take": long_take,
+                "sources": [f"src{i}" for i in range(7)],
+                "cited_lessons": ["L-12", "L-40"],
+            },
+            actor="creative",
+        )
+        seen: dict[str, str] = {}
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            seen["prompt"] = prompt
+            return {"target_weights": {"XLE": 0.2}, "rationale": "r", "watch": "w"}
+
+        run_agent_pm({}, mem, tmp_path, llm=llm, prices=PRICES)
+        (take,) = json.loads(seen["prompt"])["agent_takes"]
+        assert take["take"] == long_take
+        assert len(take["sources"]) == 7
+        assert take["cited_lessons"] == ["L-12", "L-40"]
+
+    def test_the_pm_reads_every_meeting_since_its_last_decision(
+        self, mem: MemoryStore, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Two-week cadence, committee twice a week: four meetings, 32 takes.
+        The old 'last 16 takes' saw two of them."""
+        from trading.agents import pm as pm_module
+
+        monkeypatch.setattr(pm_module, "_evidence_window_days", lambda: 15.0)
+        for i in range(32):
+            mem.journal("take", {"agent": f"a{i % 8}", "take": f"t{i}"}, actor="x")
+        seen: dict[str, str] = {}
+
+        def llm(system: str, prompt: str) -> dict[str, Any]:
+            seen["prompt"] = prompt
+            return {"target_weights": {"XLE": 0.2}, "rationale": "r", "watch": "w"}
+
+        run_agent_pm({}, mem, tmp_path, llm=llm, prices=PRICES)
+        takes = json.loads(seen["prompt"])["agent_takes"]
+        assert len(takes) == 32
+        assert takes[0]["take"] == "t31"  # newest first, so a trim costs the oldest
+
     def test_candidate_ladder_reaches_the_prompt(self, mem: MemoryStore, tmp_path: Path) -> None:
         """The ladder is the PM's only source of names it does not own."""
         ladder = {"strategy": "top_k_momentum", "ranked": [{"rank": 1, "symbol": "NVDA"}]}
@@ -595,13 +665,17 @@ class TestPromptBudget:
         p = {"a": 1, "today_context": {"macro_dial": {"vix": 17.2}}}
         assert json.loads(_budgeted_prompt(p)) == p
 
+    # The trim ORDER is tested at the old 24k ceiling; the production
+    # budget (PROMPT_BUDGET) is now large enough that a normal week fits.
+    SMALL = 24_000
+
     def test_overflow_stays_valid_json(self) -> None:
-        out = _budgeted_prompt(self._payload())
-        assert len(out) <= PROMPT_BUDGET
+        out = _budgeted_prompt(self._payload(), budget=self.SMALL)
+        assert len(out) <= self.SMALL
         json.loads(out)  # would raise on a mid-string slice
 
     def test_overflow_sacrifices_gossip_before_the_decision_inputs(self) -> None:
-        out = json.loads(_budgeted_prompt(self._payload()))
+        out = json.loads(_budgeted_prompt(self._payload(), budget=self.SMALL))
         assert out["today_context"]["candidate_ladder"]  # the new-name feed survives
         assert out["today_context"]["macro_dial"]  # today's market survives
         assert out["sim_portfolio"]["holdings"]  # the book survives
@@ -610,9 +684,27 @@ class TestPromptBudget:
     def test_history_is_trimmed_newest_first(self) -> None:
         # Headlines alone cannot close a very large gap, so rulings must
         # give way too — and the tail (oldest) goes first.
-        out = json.loads(_budgeted_prompt(self._payload(headlines=0, rulings=40)))
+        out = json.loads(
+            _budgeted_prompt(self._payload(headlines=0, rulings=40), budget=self.SMALL)
+        )
         assert 0 < len(out["recent_committee_rulings"]) < 40
         assert out["today_context"]["candidate_ladder"]
+
+    def test_whatever_is_trimmed_is_named_to_the_model(self) -> None:
+        """2026-09-26: the PM reasoned as if missing rulings did not exist."""
+        out = json.loads(_budgeted_prompt(self._payload(rulings=40), budget=self.SMALL))
+        notes = out["_prompt_omissions"]
+        assert any(n.startswith("headlines: kept") for n in notes)
+        assert any(n.startswith("recent_committee_rulings: kept the newest") for n in notes)
+
+    def test_a_normal_fortnight_fits_the_production_budget_untouched(self) -> None:
+        """~50-70k chars of real payload used to lose headlines every run."""
+        p = self._payload(headlines=100, rulings=12)
+        p["agent_takes"] = [{"agent": f"a{i}", "take": "x" * 1_000} for i in range(32)]
+        out = json.loads(_budgeted_prompt(p))
+        assert "_prompt_omissions" not in out
+        assert len(out["today_context"]["headlines"]) == 100
+        assert PROMPT_BUDGET >= 200_000
 
 
 def test_llm_failure_is_reported_not_raised(mem: MemoryStore, tmp_path: Path) -> None:

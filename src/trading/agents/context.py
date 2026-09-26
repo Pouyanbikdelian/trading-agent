@@ -27,6 +27,12 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 MONITOR_MAX_AGE_H = 36.0
+#: The style advisor runs weekly (Sunday), so 36h dropped its reading from
+#: every Friday committee, PM run and Curator run. Its own cadence + a day.
+STYLE_MAX_AGE_H = 8 * 24.0
+#: Headlines handed to the agents, balanced across topics (context-level;
+#: the committee's own budgets decide what each voice finally sees).
+CONTEXT_HEADLINES = 100
 """Hours before a monitor file stops counting as a current reading.
 
 36h matches ``news_watch.load`` and cleanly separates the two real cases:
@@ -34,6 +40,27 @@ the runner is up and these are hours old, or the runner is down and they
 are days old. Resolved per call so a change takes effect without a
 rebuild — the same frozen-at-import trap that bit ``pm_signal``.
 """
+
+
+def balanced_headlines(items: list[Any], limit: int) -> list[Any]:
+    """Up to ``limit`` headlines, taken round-robin across topics.
+
+    ``[:48]`` on a list ordered by query kept the first ~10 topics and never
+    showed the agents quantum, AI capex or institutional-flow news, which
+    starved the scout's standing directives. Each topic now gets a turn, in
+    first-seen order, before any topic gets a second.
+    """
+    by_topic: dict[str, list[Any]] = {}
+    for item in items:
+        topic = str(item.get("topic", "")) if isinstance(item, dict) else ""
+        by_topic.setdefault(topic, []).append(item)
+    out: list[Any] = []
+    queues = list(by_topic.values())
+    while len(out) < limit and any(queues):
+        for q in queues:
+            if q and len(out) < limit:
+                out.append(q.pop(0))
+    return out
 
 
 def _monitor_max_age_h() -> float:
@@ -223,7 +250,12 @@ def build_context(
     ctx["macro_dial"] = _mon(state_dir / "macro_monitor.json", "macro_dial").get("readings", {})
     ctx["vol_surface"] = _mon(state_dir / "options_monitor.json", "vol_surface").get("metrics", {})
     ctx["spy_vix_triggers"] = _mon(state_dir / "advisor.json", "spy_vix_triggers").get("active", [])
-    style = _mon(state_dir / "style_advisor.json", "style_leader")
+    style = _read_fresh_json(
+        state_dir / "style_advisor.json",
+        "style_leader",
+        gaps=gaps,
+        max_age_h=max(_monitor_max_age_h(), STYLE_MAX_AGE_H),
+    )
     ctx["style_leader"] = style.get("leader")
     if gaps:
         ctx["_data_gaps"] = gaps
@@ -347,12 +379,19 @@ def build_context(
     # Collected by news_watch on its own schedule; stale collections are
     # dropped so the scout never reasons over old chatter.
     try:
+        from trading.runtime.news_watch import STATE_FILENAME as NEWS_FILE
         from trading.runtime.news_watch import load as load_news
 
         news = load_news(state_dir)
         if news:
             ctx["sector_momentum_vs_spy_pct"] = news.get("sector_momentum", {})
-            ctx["headlines"] = news.get("headlines", [])[:48]
+            ctx["headlines"] = balanced_headlines(news.get("headlines", []), CONTEXT_HEADLINES)
+        elif (Path(state_dir) / NEWS_FILE).exists():
+            # load() returns {} for a stale file; that used to vanish silently.
+            ctx.setdefault("_data_gaps", []).append(
+                "headlines + sector momentum: news collection older than 36h — DROPPED, "
+                "treat as unknown"
+            )
     except Exception as e:
         logger.bind(component="agents").warning(f"context: news unavailable ({e})")
 

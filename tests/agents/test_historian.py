@@ -277,7 +277,10 @@ class TestWeekEvidence:
 
         journal = build_week_evidence(mem)["week_journal"]
         assert len(journal.get("prediction_graded", [])) == 1
-        assert len(journal.get("take", [])) <= 15  # budgeted, not unbounded
+        from trading.agents.historian import HISTORIAN_KINDS
+
+        # budgeted, not unbounded (40 since 2026-09-26: 16 takes a week)
+        assert len(journal.get("take", [])) <= HISTORIAN_KINDS["take"] < 300
 
     def test_measured_edge_is_included(self, mem: MemoryStore) -> None:
         """The historian could not previously see the one table that

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,14 +47,31 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 # claude-opus-5 in .env rolls back without a deploy.
 FRONTIER_ANTHROPIC_MODEL = "claude-opus-5-5"
 FRONTIER_OPENAI_MODEL = "gpt-4o"
-DEFAULT_TIMEOUT_S = 120.0
-FRONTIER_TIMEOUT_S = 180.0
-DEFAULT_MAX_TOKENS = 4_000
-FRONTIER_MAX_TOKENS = 8_000
+DEFAULT_TIMEOUT_S = 180.0
+FRONTIER_TIMEOUT_S = 300.0
+DEFAULT_MAX_TOKENS = 12_000
+FRONTIER_MAX_TOKENS = 24_000
 
 
 class AgentsDisabledError(RuntimeError):
     """No API key configured — the committee cannot run."""
+
+
+# Why the last completion on THIS thread stopped. Committee voices run in
+# worker threads, so a module global would mix them up.
+_STATE = threading.local()
+#: Hard ceilings for the one roomier retry after a cut-off answer; the same
+#: bounds the settings validate AGENTS_MAX_TOKENS / _FRONTIER_ against.
+_RETRY_CEILING = {"frontier": 64_000, "standard": 32_000}
+
+
+def _set_stop(reason: str | None) -> None:
+    _STATE.stop_reason = reason
+
+
+def last_stop_reason() -> str | None:
+    """``"max_tokens"`` when the last answer on this thread was cut off."""
+    return getattr(_STATE, "stop_reason", None)
 
 
 def _raise_with_body(resp: Any) -> None:
@@ -236,6 +254,7 @@ def _call_anthropic(
         _raise_with_body(resp)
         body = resp.json()
         completion = "".join(b.get("text", "") for b in body.get("content", []))
+        _set_stop(str(body.get("stop_reason")) if body.get("stop_reason") else None)
     except Exception as exc:
         _record_telemetry(
             provider="anthropic",
@@ -290,6 +309,8 @@ def _call_openai(system: str, prompt: str, *, model: str, max_tokens: int, tier:
         body = resp.json()
         choice = body["choices"][0]
         completion = str(choice["message"]["content"])
+        # OpenAI's word for the same cut-off.
+        _set_stop("max_tokens" if choice.get("finish_reason") == "length" else None)
     except Exception as exc:
         _record_telemetry(
             provider="openai",
@@ -370,8 +391,35 @@ def complete_text(
 def complete_json(
     system: str, prompt: str, *, max_tokens: int | None = None, tier: str | None = None
 ) -> dict[str, Any]:
-    """One completion, parsed as JSON; one retry on parse failure."""
-    text = complete_text(system, prompt, max_tokens=max_tokens, tier=tier)
+    """One completion, parsed as JSON.
+
+    Two distinct retries, because they have opposite causes:
+
+    * The answer was CUT OFF (``stop_reason == "max_tokens"``): thinking
+      plus the JSON did not fit. Asking again with the same ceiling — what
+      this did until 2026-09-26 — fails the same way, so the one retry gets
+      twice the room. Still cut off: raise, naming the ceiling, rather than
+      parse a fragment.
+    * The answer was complete but not JSON: one retry with an "ONLY JSON"
+      nudge, as before.
+    """
+    budget = _token_budget(tier, max_tokens)
+    _set_stop(None)
+    text = complete_text(system, prompt, max_tokens=budget, tier=tier)
+    if last_stop_reason() == "max_tokens":
+        roomier = min(budget * 2, _RETRY_CEILING.get(tier or "standard", 32_000))
+        logger.bind(component="agents").warning(
+            f"LLM answer cut off at max_tokens={budget} (tier={tier or 'standard'}); "
+            f"retrying once with {roomier}"
+        )
+        if roomier > budget:
+            budget = roomier
+            _set_stop(None)
+            text = complete_text(system, prompt, max_tokens=budget, tier=tier)
+        if last_stop_reason() == "max_tokens":
+            raise ValueError(
+                f"LLM answer cut off at max_tokens={budget}: thinking plus answer did not fit"
+            )
     try:
         return _extract_json(text)
     except Exception:
@@ -379,7 +427,7 @@ def complete_json(
         text = complete_text(
             system,
             prompt + "\n\nRespond with ONLY a valid JSON object. No prose.",
-            max_tokens=max_tokens,
+            max_tokens=budget,
             tier=tier,
         )
         return _extract_json(text)

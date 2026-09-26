@@ -154,9 +154,11 @@ HISTORIAN_KINDS: dict[str, int] = {
     "operator_objection": 10,
     "operator_mandate": 10,
     "cycle": 10,
-    "take": 15,
+    "take": 40,  # 16 a week at two meetings; 15 lost the first meeting's voices
 }
 HISTORIAN_WINDOW_DAYS = 7.0
+# The voter reviews up to 20 claims (12 + 5 + 3); ten votes threw half away.
+MAX_VOTES = 25
 
 
 # The historian writes the desk's PERMANENT beliefs — the only artifact
@@ -166,13 +168,22 @@ HISTORIAN_WINDOW_DAYS = 7.0
 # the system attached to its most durable output. Two calls a week on the
 # frontier model is a rounding error next to the per-cycle committee; a
 # badly-conditioned lesson costs for months.
+#
+# Follows AGENTS_FRONTIER_MAX_TOKENS since 2026-09-26 (was a hard 8,000 that
+# the .env setting could not raise). This is only the floor.
 HISTORIAN_MAX_TOKENS = 8000
 
 
 def _default_llm(system: str, prompt: str) -> dict[str, Any]:
     from trading.agents.llm import complete_json
 
-    return complete_json(system, prompt, tier="frontier", max_tokens=HISTORIAN_MAX_TOKENS)
+    try:
+        from trading.core.config import settings
+
+        budget = max(HISTORIAN_MAX_TOKENS, int(settings.agents_frontier_max_tokens))
+    except Exception:
+        budget = HISTORIAN_MAX_TOKENS
+    return complete_json(system, prompt, tier="frontier", max_tokens=budget)
 
 
 # This is a character budget (not an output-token setting).  The Curator is
@@ -184,14 +195,18 @@ def _default_llm(system: str, prompt: str) -> dict[str, Any]:
 # deterministic prompt projection.  That is roughly 18k input tokens: small
 # against the frontier model's context window, and warranted for a
 # twice-weekly, permanent-memory decision.
-PROMPT_BUDGET = 72_000
+#
+# 240k since 2026-09-26: twenty lesson cards plus a dossier could crowd the
+# week's evidence out of 72k, and the Curator is the one agent whose output
+# is permanent. ~60k tokens is still small next to a 1M-token context.
+PROMPT_BUDGET = 240_000
 
 # A graded prediction journal row carries the entire original prediction
 # statement.  That is useful for the immutable journal, but repeating sixty
 # 500-character narratives is a poor use of the Curator's scarce context.  A
 # lossless-for-attribution card keeps every measured field and source id while
 # retaining just enough of the contemporaneous thesis to reason about it.
-OUTCOME_STATEMENT_CHARS = 180
+OUTCOME_STATEMENT_CHARS = 600
 
 # Journal buckets in the order they may be sacrificed when the evidence
 # does not fit. Chatter first. The active rulebook and historical dossier
@@ -432,7 +447,7 @@ def run_lesson_vote(
     # missing ``supports`` used to become a real contradiction via bool(),
     # and a malformed later item could leave a partial unaudited vote batch.
     clean_votes: list[tuple[str, dict[str, Any]]] = []
-    for vote in votes[:10]:
+    for vote in votes[:MAX_VOTES]:
         if not isinstance(vote, dict):
             reason = "lesson voter returned a non-object vote"
         elif type(vote.get("supports")) is not bool:
