@@ -53,8 +53,13 @@ _LOG = logger.bind(component="copilot.mandates")
 
 MANDATES_FILE = "operator_mandates.json"
 DEFAULT_TTL_DAYS = 14
-MAX_ACTIVE = 8
-MAX_TEXT_CHARS = 500
+# How many live mandates reach the committee and PM (2026-09-26: was 8,
+# sorted oldest-first within strength, so once prohibitions — which never
+# expire — piled up, the NEWEST instructions silently fell off the end).
+# Now newest-first within strength, 40 of them, and anything past that is
+# named in the context rather than dropped without a word.
+MAX_ACTIVE = 40
+MAX_TEXT_CHARS = 2_000
 
 STRONG = "strong"
 MEDIUM = "medium"
@@ -288,16 +293,24 @@ def _clause_is_mandate(clause: str) -> bool:
     return any(re.search(p, t.lower()) for _s, p in ladder)
 
 
+def mandate_spans(text: str) -> list[str]:
+    """EVERY clause that is an instruction, in the order written.
+
+    "I want GS next round. And never buy PM again." is two standing
+    instructions with opposite polarity. Keeping only the first (as
+    ``mandate_span`` alone did until 2026-09-26) lost the second without
+    telling anyone."""
+    return [clause for clause in _clauses(text) if _clause_is_mandate(clause)]
+
+
 def mandate_span(text: str) -> str | None:
-    """The clause that is actually an instruction, or None.
+    """The first clause that is actually an instruction, or None.
 
     Returning the span rather than a bool means the stored mandate — and
     the echo the operator reads back — quotes the instruction itself
     instead of the whole rambling bubble it arrived in."""
-    for clause in _clauses(text):
-        if _clause_is_mandate(clause):
-            return clause
-    return None
+    spans = mandate_spans(text)
+    return spans[0] if spans else None
 
 
 @dataclass(frozen=True)
@@ -408,12 +421,19 @@ class MandateStore:
                 continue
         return out
 
-    def active(self, now: datetime | None = None) -> list[Mandate]:
-        """Live mandates, strongest first so a truncated prompt keeps them."""
+    def active(self, now: datetime | None = None, *, limit: int | None = None) -> list[Mandate]:
+        """Live mandates, strongest first, newest first within a strength.
+
+        Newest-first because the latest instruction is the one most likely
+        to reflect what the operator wants now — and the one the old
+        oldest-first order dropped when the list was cut. All of them by
+        default; ``limit`` is for callers with a space budget.
+        """
         rank = {STRONG: 0, MEDIUM: 1, SOFT: 2}
         live = [m for m in self._read_all() if m.status == "active" and not m.is_expired(now)]
-        live.sort(key=lambda m: (rank.get(m.strength, 3), m.created_at))
-        return live[:MAX_ACTIVE]
+        live.sort(key=lambda m: m.created_at, reverse=True)
+        live.sort(key=lambda m: rank.get(m.strength, 3))  # stable: keeps newest-first
+        return live if limit is None else live[:limit]
 
     def add(
         self,
@@ -426,6 +446,8 @@ class MandateStore:
     ) -> Mandate:
         now = datetime.now(tz=timezone.utc)
         resolved_polarity = polarity or grade_polarity(text)
+        existing = self._read_all()
+        taken = {x.id for x in existing}
         # A positive mandate is about a market view, and views go stale —
         # a fortnight is a reasonable life for "I want GS next round". A
         # PROHIBITION is not a view about this month; "never buy PM" does
@@ -435,8 +457,14 @@ class MandateStore:
         expires_at = (
             "" if resolved_polarity == NEGATIVE else (now + timedelta(days=ttl_days)).isoformat()
         )
+        # Several clauses of one message are stored in the same millisecond;
+        # the id is what /harden and /mandates drop address, so it must be
+        # unique.
+        n = int(now.timestamp() * 1000) % 10_000_000
+        while f"M{n}" in taken:
+            n = (n + 1) % 10_000_000
         m = Mandate(
-            id=f"M{int(now.timestamp() * 1000) % 10_000_000}",
+            id=f"M{n}",
             text=str(text)[:MAX_TEXT_CHARS],
             strength=strength or grade_strength(text),
             created_at=now.isoformat(),
@@ -449,7 +477,7 @@ class MandateStore:
         # mandate the operator still believed was in force left no trace
         # anywhere he could look. `/mandates` can now show what lapsed.
         kept: list[Mandate] = []
-        for x in self._read_all():
+        for x in existing:
             if x.status == "active" and x.is_expired(now):
                 x = Mandate(**{**x.to_dict(), "status": "expired"})
             kept.append(x)
@@ -517,9 +545,15 @@ class MandateStore:
 
 
 def for_context(state_dir: Path) -> list[dict[str, Any]]:
-    """Active mandates shaped for the committee/PM context."""
+    """Active mandates shaped for the committee/PM context.
+
+    At most MAX_ACTIVE; if there are more, a final entry says how many
+    lower-priority ones are not shown, so an agent never mistakes a cut
+    list for the whole instruction set.
+    """
     try:
-        return [
+        live = MandateStore(state_dir).active()
+        rows: list[dict[str, Any]] = [
             {
                 "id": m.id,
                 "strength": m.strength,
@@ -531,8 +565,18 @@ def for_context(state_dir: Path) -> list[dict[str, Any]]:
                 "symbols": m.symbols,
                 "expires_at": m.expires_at or "never",
             }
-            for m in MandateStore(state_dir).active()
+            for m in live[:MAX_ACTIVE]
         ]
+        if len(live) > MAX_ACTIVE:
+            rows.append(
+                {
+                    "note": (
+                        f"{len(live) - MAX_ACTIVE} further, older or softer mandates are "
+                        "active but not shown here; the operator can review them with /mandates"
+                    )
+                }
+            )
+        return rows
     except Exception:
         _LOG.exception("reading mandates failed")
         return []

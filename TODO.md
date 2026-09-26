@@ -115,8 +115,9 @@ Order of operations:
       simulation counts manual recycles.
 - [x] All agents on Claude Opus 5.5 (specialists, decision nodes, copilot).
 - [x] Information-limits audit and fixes (docs/deploy.md §18).
-- [ ] Mandates: MAX_ACTIVE=8 hides the NEWEST mandates past eight, and only
-      the first matching clause is stored (copilot/mandates.py).
+- [x] Mandates: newest-first within strength, 40 reach the agents (was 8,
+      oldest-first), a note names any hidden; every instruction clause of a
+      message is stored; 2,000-char text.
 - [ ] After two cycles: rerun `scripts/llm_cost.py` for real Opus 5.5
       token use; check specialist latency against `AGENTS_TIMEOUT_S`.
 

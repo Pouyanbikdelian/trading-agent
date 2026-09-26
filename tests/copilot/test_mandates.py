@@ -299,3 +299,51 @@ class TestAllocationPhrasingIsCaught:
     )
     def test_questions_and_hypotheticals_are_still_not_mandates(self, text: str) -> None:
         assert looks_like_mandate(text) is False
+
+
+class TestNothingTheOperatorSaidIsDroppedSilently:
+    """2026-09-26 audit: past 8 live mandates the NEWEST ones fell off (the
+    list was cut oldest-first), and only the first instruction clause of a
+    message was ever stored."""
+
+    def test_the_newest_mandate_survives_a_long_list(self, tmp_path: Path) -> None:
+        import time
+
+        from trading.copilot.mandates import MAX_ACTIVE, for_context
+
+        s = MandateStore(tmp_path)
+        for i in range(12):
+            s.add(f"never buy T{i} again")  # prohibitions never expire
+            time.sleep(0.002)
+        newest = s.add("never buy NEWEST again")
+        ctx = for_context(tmp_path)
+        assert ctx[0]["id"] == newest.id  # newest first within a strength
+        assert len([r for r in ctx if "id" in r]) == 13 <= MAX_ACTIVE
+
+    def test_past_the_cap_the_context_says_how_many_are_hidden(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from trading.copilot import mandates
+
+        monkeypatch.setattr(mandates, "MAX_ACTIVE", 3)
+        s = MandateStore(tmp_path)
+        for i in range(5):
+            s.add(f"consider T{i} next round")
+        ctx = mandates.for_context(tmp_path)
+        assert len(ctx) == 4 and "2 further" in ctx[-1]["note"]
+
+    def test_every_instruction_clause_of_a_message_is_kept(self) -> None:
+        from trading.copilot.mandates import mandate_spans
+
+        spans = mandate_spans("I want GS in the book next round. And never buy PM again. Thanks!")
+        assert spans == ["I want GS in the book next round.", "And never buy PM again."]
+
+    def test_same_millisecond_mandates_get_distinct_ids(self, tmp_path: Path) -> None:
+        s = MandateStore(tmp_path)
+        a, b = s.add("I want GS next round"), s.add("never buy PM again")
+        assert a.id != b.id
+
+    def test_a_long_instruction_is_not_cut_at_500(self, tmp_path: Path) -> None:
+        text = "I want GS next round because " + "the deposit franchise is repricing. " * 30
+        m = MandateStore(tmp_path).add(text)
+        assert m.text == text[:2_000] and len(m.text) > 500

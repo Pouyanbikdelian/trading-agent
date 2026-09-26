@@ -3863,17 +3863,20 @@ def _maybe_capture_mandate(text: str) -> str | None:
     to catch a misreading is now — while the operator is still looking at
     the screen — not after a run has acted on it.
     """
-    from trading.copilot.mandates import MandateStore, mandate_span
+    from trading.copilot.mandates import MandateStore, mandate_spans
 
     # The span is the instruction clause, not the whole bubble. A message
     # can be one thought wrapped in three others; storing the wrapper made
-    # the echo unreadable and the stored mandate vague.
-    span = mandate_span(text)
-    if span is None:
+    # the echo unreadable and the stored mandate vague. Every instruction
+    # clause is stored as its own mandate (2026-09-26): "I want GS. Never
+    # buy PM." used to keep only the first and drop the prohibition.
+    spans = mandate_spans(text)
+    if not spans:
         return None
+    from trading.copilot.thread import extract_symbols
+
     try:
         from trading.copilot.engine import _known_symbols
-        from trading.copilot.thread import extract_symbols
 
         known = _known_symbols(settings.state_dir)
     except Exception:
@@ -3887,6 +3890,12 @@ def _maybe_capture_mandate(text: str) -> str | None:
     except Exception:
         logger.bind(component="bot").warning("mandate: universe unavailable for symbol match")
 
+    blocks = [_capture_one_mandate(span, known, MandateStore, extract_symbols) for span in spans]
+    return "\n\n".join(blocks)
+
+
+def _capture_one_mandate(span: str, known: set[str], store_cls: Any, extract_symbols: Any) -> str:
+    """Store one instruction clause and return its echo."""
     try:
         symbols = extract_symbols(span, known)
         # ``known`` is an anti-hallucination filter for ordinary copilot
@@ -3902,7 +3911,7 @@ def _maybe_capture_mandate(text: str) -> str | None:
             if token == token.upper() and len(cleaned) >= 2 and _looks_like_ticker(cleaned):
                 explicit.add(cleaned.upper())
         symbols = sorted(set(symbols) | explicit)
-        m = MandateStore(settings.state_dir).add(span, symbols=symbols)
+        m = store_cls(settings.state_dir).add(span, symbols=symbols)
     except Exception as e:
         logger.exception("mandate capture failed")
         return f"couldn't save that instruction: `{type(e).__name__}: {e}`"

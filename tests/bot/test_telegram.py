@@ -1074,6 +1074,25 @@ def test_mandate_is_captured_without_an_llm_call(tmp_path: Path, monkeypatch) ->
     assert len(active) == 1 and "GS" in active[0].symbols
 
 
+def test_two_instructions_in_one_message_are_both_stored(tmp_path: Path, monkeypatch) -> None:
+    """Only the first clause used to be kept, so the prohibition was lost."""
+    stub = _settings_stub(tmp_path)
+    stub.data_dir = tmp_path / "data"
+    monkeypatch.setattr(telegram_module, "settings", stub)
+
+    async def boom(*a, **k):
+        raise AssertionError("copilot must not be called for a mandate")
+
+    monkeypatch.setattr(telegram_module, "_cmd_copilot", boom)
+    out = asyncio.run(_dispatch("I want GS in the book next round. And never buy PM again.")) or ""
+    assert out.count("Noted for the next run") == 2 and "prohibition" in out
+
+    from trading.copilot.mandates import MandateStore
+
+    polarities = sorted(m.polarity for m in MandateStore(tmp_path).active())
+    assert polarities == ["negative", "positive"]
+
+
 def test_mandate_echoes_the_strength_it_was_read_as(tmp_path: Path, monkeypatch) -> None:
     """Tone parsing is deterministic but not infallible; the moment to
     catch a misread is while the operator is still looking at the screen."""
