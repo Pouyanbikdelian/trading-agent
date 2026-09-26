@@ -2682,7 +2682,11 @@ def _cmd_cycle_now() -> str:
             "lower risk, you get a reduce-only basket to `/approve` or `/reject`; otherwise "
             "it lands as a read-only review._"
         )
-    return "🔄 cycle triggered — basket preview + approval in ~4 minutes."
+    return (
+        "🔄 cycle triggered. If the PM has not decided in the last 6h it decides first "
+        "(the simulation rebalances with it), then the basket preview + approval — "
+        "~5–10 minutes."
+    )
 
 
 def _cmd_review() -> str:

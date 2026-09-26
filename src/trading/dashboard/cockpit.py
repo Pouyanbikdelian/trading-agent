@@ -608,17 +608,27 @@ def cycles_block(runner_store: Any, limit: int = 16) -> list[dict[str, Any]]:
 
 
 def watch_block(
-    state_dir: Path, runner_store: Any, *, cron: str, tz: str, now: datetime | None = None
+    state_dir: Path,
+    runner_store: Any,
+    *,
+    cron: str,
+    tz: str,
+    now: datetime | None = None,
+    settings: Any = None,
 ) -> dict[str, Any]:
     """What the watchdogs would say right now (evaluated, never alerted)."""
+    from trading.runner.cadence import cadence_from
     from trading.runtime import cycle_watch
 
     now = now or _now()
+    every, anchor = cadence_from(settings)
     findings: list[dict[str, str]] = []
     try:
         cycles = runner_store.recent_cycles(limit=200)
         if cron:
-            for f in cycle_watch.evaluate(cycles, cron=cron, tz=tz, now=now):
+            for f in cycle_watch.evaluate(
+                cycles, cron=cron, tz=tz, now=now, every_weeks=every, anchor=anchor
+            ):
                 findings.append({"level": f.level, "message": f.message, "key": f.key})
     except Exception as e:
         logger.bind(component="dashboard").warning(f"cycle watch failed: {e}")
@@ -643,20 +653,27 @@ def schedule_block(
     """
     from apscheduler.triggers.cron import CronTrigger
 
+    from trading.runner.cadence import cadence_from, gate
     from trading.runner.runner import _historian_trigger, _precycle_trigger
 
     now = now or _now()
     jobs: list[tuple[str, str, Any]] = []
+    every, anchor = cadence_from(settings)
+
+    def gated(trig: Any) -> Any:
+        return gate(trig, every_weeks=every, anchor=anchor, tz=tz)
+
     if cron:
         try:
-            jobs.append(("cycle", "Rebalance cycle", CronTrigger.from_crontab(cron, timezone=tz)))
+            label = "Rebalance cycle" + (f" (every {every} weeks)" if every > 1 else "")
+            jobs.append(("cycle", label, gated(CronTrigger.from_crontab(cron, timezone=tz))))
             lead = int(getattr(settings, "pm_pre_cycle_lead_minutes", 45) or 45)
             pm = _precycle_trigger(cron, tz, lead_minutes=lead)
             if pm is not None:
-                jobs.append(("pm", "Agent PM decision", pm))
+                jobs.append(("pm", "Agent PM decision", gated(pm)))
             ready = _precycle_trigger(cron, tz, lead_minutes=60)
             if ready is not None:
-                jobs.append(("broker_ready", "Broker readiness check", ready))
+                jobs.append(("broker_ready", "Broker readiness check", gated(ready)))
         except Exception as e:
             logger.bind(component="dashboard").warning(f"cycle schedule failed: {e}")
     jobs.extend(

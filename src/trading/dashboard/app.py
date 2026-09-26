@@ -119,7 +119,7 @@ def _add_cockpit_blocks(out: dict[str, Any], state_dir: Path, data_dir: Path) ->
         "movers": lambda: cockpit.movers_block(state_dir / "runner.db", state_dir),
         "cycles": lambda: cockpit.cycles_block(runner_store) if runner_store else [],
         "watch": lambda: (
-            cockpit.watch_block(state_dir, runner_store, cron=cron, tz=tz)
+            cockpit.watch_block(state_dir, runner_store, cron=cron, tz=tz, settings=settings_obj)
             if runner_store
             else {"findings": [], "reconcile_attention": []}
         ),

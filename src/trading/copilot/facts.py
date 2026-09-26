@@ -485,8 +485,13 @@ def config_now(state_dir: Path) -> dict[str, Any]:
     out["schedule"] = {
         "cycle_cron": _os.getenv("CRON", "(compose default)"),
         "cycle_cron_timezone": _os.getenv("SCHEDULE_TZ", "UTC"),
-        "agent_pm_runs": "45 minutes before the cycle, derived from the same cron",
-        "broker_readiness_check": "1 hour before the cycle",
+        "cycle_every_weeks": _os.getenv("CYCLE_EVERY_WEEKS", "1"),
+        "cycle_anchor_date": _os.getenv("CYCLE_ANCHOR_DATE", "(default 2026-10-09)"),
+        "agent_pm_runs": (
+            "45 minutes before each scheduled cycle (same weeks), and before a manual "
+            "/cycle when its last decision is older than 6h"
+        ),
+        "broker_readiness_check": "1 hour before each scheduled cycle",
         "_all_jobs_live_in_the_runner": (
             "Every scheduled job — snapshots, macro, rotation, historian, "
             "lessons, guards, PM, committee — runs inside the trader "

@@ -389,6 +389,28 @@ the session, fills the same afternoon) to 17:05 (after the close, fills
 Monday). Converting the existing UTC hour is the no-surprise migration;
 changing the hour is a separate decision.
 
+## 17. Cadence and model release notes (2026-09-26)
+
+`.env` lines on the VPS:
+
+```bash
+CYCLE_EVERY_WEEKS=2               # scheduled cycle every second Friday, same CRON time
+CYCLE_ANCHOR_DATE=2026-10-09      # a Friday that HAS a cycle: 9 Oct, 23 Oct, 6 Nov ...
+AGENTS_TIMEOUT_S=120              # specialists now run on Opus 5.5, the slower model
+```
+
+- The PM decision (45 min before) and the broker readiness check (60 min
+  before) follow the same weeks; the missed-cycle watchdog does not flag
+  the off-week Fridays.
+- A manual `/cycle` lets the PM decide first when its last decision is
+  older than `AGENT_PM_SIGNAL_MAX_AGE_H` (6h), so the simulation rebalances
+  at every manual cycle too. `/review` never runs the PM.
+- Every agent (specialists, decision nodes, copilot) defaults to
+  `claude-opus-5-5`. `AGENTS_MODEL`, `AGENTS_MODEL_FRONTIER` and
+  `COPILOT_MODEL` in `.env` override without a deploy.
+- The committee still meets Monday and Friday every week; that is the
+  learning loop, not the order path.
+
 ## Troubleshooting
 
 | Symptom                              | Likely cause                              | Action                                                          |

@@ -34,7 +34,7 @@ import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -58,19 +58,31 @@ class CycleWatchFinding:
 
 
 def last_scheduled_fire(
-    cron: str, tz: str, before: datetime, *, horizon_days: int = 8
+    cron: str,
+    tz: str,
+    before: datetime,
+    *,
+    horizon_days: int = 8,
+    every_weeks: int = 1,
+    anchor: date | None = None,
 ) -> datetime | None:
     """Latest fire time of ``cron`` (in ``tz``) at or before ``before``.
 
     Uses APScheduler's own trigger arithmetic so this can never disagree
-    with the scheduler about when a cycle was due, DST included.
+    with the scheduler about when a cycle was due, DST included — and the
+    same CYCLE_EVERY_WEEKS gate the runner uses, or every off-week Friday
+    would be reported as a missed cycle.
     """
     from apscheduler.triggers.cron import CronTrigger
 
+    from trading.runner.cadence import gate
+
     if before.tzinfo is None:
         raise ValueError("before must be timezone-aware")
-    trigger = CronTrigger.from_crontab(cron, timezone=tz)
-    cursor = before - timedelta(days=horizon_days)
+    trigger = gate(
+        CronTrigger.from_crontab(cron, timezone=tz), every_weeks=every_weeks, anchor=anchor, tz=tz
+    )
+    cursor = before - timedelta(days=max(horizon_days, 7 * every_weeks + 1))
     fire = trigger.get_next_fire_time(None, cursor)
     latest: datetime | None = None
     for _ in range(10_000):  # bounded: a pathological cron must not hang the watchdog
@@ -95,8 +107,10 @@ def check_missed_cycle(
     tz: str,
     now: datetime,
     grace: timedelta = DEFAULT_GRACE,
+    every_weeks: int = 1,
+    anchor: date | None = None,
 ) -> CycleWatchFinding | None:
-    fire = last_scheduled_fire(cron, tz, now - grace)
+    fire = last_scheduled_fire(cron, tz, now - grace, every_weeks=every_weeks, anchor=anchor)
     if fire is None:
         return None
     # Five minutes of slack: the cycle row is stamped at cycle start, and
@@ -186,12 +200,22 @@ def evaluate(
     grace: timedelta = DEFAULT_GRACE,
     stuck_streak: int = DEFAULT_STUCK_STREAK,
     no_trade_streak: int = DEFAULT_NO_TRADE_STREAK,
+    every_weeks: int = 1,
+    anchor: date | None = None,
 ) -> list[CycleWatchFinding]:
     """All current findings, most severe first. ``cycles`` is newest first."""
     ordered = sorted(cycles, key=_ts, reverse=True)
     stuck = check_stuck_desk(ordered, streak=stuck_streak)
     found = [
-        check_missed_cycle(ordered, cron=cron, tz=tz, now=now, grace=grace),
+        check_missed_cycle(
+            ordered,
+            cron=cron,
+            tz=tz,
+            now=now,
+            grace=grace,
+            every_weeks=every_weeks,
+            anchor=anchor,
+        ),
         stuck,
         None if stuck is not None else check_no_trades(ordered, streak=no_trade_streak),
     ]

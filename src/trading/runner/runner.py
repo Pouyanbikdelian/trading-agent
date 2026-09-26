@@ -466,7 +466,9 @@ class Runner:
         # shutdown; IBC retries a missed prompt, but only a human can answer
         # it. This remains useful with an ops-only Telegram channel.
         try:
-            pre = _precycle_trigger(self.config.schedule_cron, self.config.schedule_tz)
+            pre = self._cadence_gate(
+                _precycle_trigger(self.config.schedule_cron, self.config.schedule_tz)
+            )
             if pre is None:
                 logger.bind(component="runner").warning(
                     "pre-cycle broker check NOT scheduled: cannot derive a lead time from "
@@ -830,9 +832,13 @@ class Runner:
         from apscheduler.triggers.cron import CronTrigger
 
         self._scheduler = AsyncIOScheduler(timezone=self.config.schedule_tz)
-        trigger = CronTrigger.from_crontab(
-            self.config.schedule_cron,
-            timezone=self.config.schedule_tz,
+        # CYCLE_EVERY_WEEKS gates the cron (runner/cadence.py); weekly is
+        # the unchanged default. Manual /cycle runs bypass the schedule.
+        trigger = self._cadence_gate(
+            CronTrigger.from_crontab(
+                self.config.schedule_cron,
+                timezone=self.config.schedule_tz,
+            )
         )
         self._scheduler.add_job(self._run_cycle_async, trigger, id="cycle", replace_existing=True)
         dst_warning = _cycle_dst_warning(self.config.schedule_cron, self.config.schedule_tz)
@@ -1008,11 +1014,17 @@ class Runner:
                 # be offset (crosses midnight, or is not a simple daily
                 # time) — simulation keeps running; the bridge will refuse
                 # on freshness and say so, which is the safe direction.
-                _pm_trigger = _precycle_trigger(
-                    self.config.schedule_cron,
-                    self.config.schedule_tz,
-                    lead_minutes=settings.pm_pre_cycle_lead_minutes,
-                ) or CronTrigger(day_of_week="mon", hour=14, minute=30, timezone="UTC")
+                # Gated with the cycle: on a two-week cadence the PM (and so
+                # the simulation) decides on cycle Fridays only, plus every
+                # manual /cycle (see _check_trigger_flag).
+                _pm_trigger = self._cadence_gate(
+                    _precycle_trigger(
+                        self.config.schedule_cron,
+                        self.config.schedule_tz,
+                        lead_minutes=settings.pm_pre_cycle_lead_minutes,
+                    )
+                    or CronTrigger(day_of_week="mon", hour=14, minute=30, timezone="UTC")
+                )
                 self._scheduler.add_job(
                     self._run_agent_pm_async,
                     _pm_trigger,
@@ -1277,17 +1289,22 @@ class Runner:
             parts.append(_humanize_strategy(slug, params))
         strat_line = "; ".join(parts) if parts else "(none)"
 
+        next_run = None
         try:
             next_run = self._scheduler.get_job("cycle").next_run_time
             next_run_s = next_run.strftime("%Y-%m-%d %H:%M %Z") if next_run else "?"
         except Exception:
             next_run_s = "?"
+        from trading.runner.cadence import cadence_from, describe
+
+        every, _anchor = cadence_from(settings)
 
         lines = [
             "🤖 Runner online",
             f"  Strategy:    {strat_line}",
             f"  Universe:    {cfg.universe.upper()}",
-            f"  Rebalance:   {_humanize_cron(cfg.schedule_cron, cfg.schedule_tz)}",
+            f"  Rebalance:   {_humanize_cron(cfg.schedule_cron, cfg.schedule_tz)}"
+            f"{describe(every, next_run, cfg.schedule_tz)}",
             f"  Next run:    {next_run_s}",
         ]
         if cfg.vol_target is not None:
@@ -1296,6 +1313,13 @@ class Runner:
                 f"(max leverage {cfg.max_leverage:g}x)"
             )
         return "\n".join(lines)
+
+    def _cadence_gate(self, trigger: Any) -> Any:
+        """Wrap a cycle-derived trigger in CYCLE_EVERY_WEEKS (weekly: unchanged)."""
+        from trading.runner.cadence import cadence_from, gate
+
+        every, anchor = cadence_from(settings)
+        return gate(trigger, every_weeks=every, anchor=anchor, tz=self.config.schedule_tz)
 
     async def _run_cycle_async(self, *, review_only: bool = False) -> None:
         """Run one trading cycle with a hard timeout + Telegram-friendly
@@ -1724,14 +1748,18 @@ class Runner:
             logger.bind(component="runner").exception("watchdog liveness poll failed")
 
         try:
+            from trading.runner.cadence import cadence_from
             from trading.runtime import cycle_watch
 
+            every, anchor = cadence_from(settings)
             cycles = self.cycle.runner_store.recent_cycles(limit=200)
             findings = cycle_watch.evaluate(
                 cycles,
                 cron=self.config.schedule_cron,
                 tz=self.config.schedule_tz,
                 now=datetime.now(tz=timezone.utc),
+                every_weeks=every,
+                anchor=anchor,
             )
             for finding in cycle_watch.unalerted(settings.state_dir, findings):
                 if finding.level == "critical":
@@ -2785,9 +2813,76 @@ class Runner:
                     )
                 else:
                     review_only = False
+            if not review_only:
+                await self._refresh_pm_before_manual_cycle()
             await self._run_cycle_async(review_only=review_only)
         except Exception:
             logger.bind(component="runner").exception("off-cycle trigger failed")
+
+    @staticmethod
+    def _agents_configured() -> bool:
+        return os.getenv("AGENTS_ENABLED", "false").lower() in ("true", "1", "yes") and bool(
+            os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
+        )
+
+    @staticmethod
+    def _pm_decision_age_h() -> float | None:
+        """Hours since the last successful PM decision, or None if there is none."""
+        from trading.agents.pm_signal import pm_decision_path
+
+        try:
+            raw = json.loads(pm_decision_path(settings.state_dir).read_text())
+            if not isinstance(raw, dict) or not raw.get("ok"):
+                return None
+            ts = datetime.fromisoformat(str(raw["ts"]))
+        except Exception:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(tz=timezone.utc) - ts).total_seconds() / 3600.0
+
+    async def _refresh_pm_before_manual_cycle(self) -> None:
+        """A manual /cycle is a PM decision point, like a scheduled one.
+
+        Why (2026-09-26). With the schedule at every second Friday, most
+        cycles the operator runs are manual, on days the PM has not
+        decided. The bridge refuses a PM decision older than
+        AGENT_PM_SIGNAL_MAX_AGE_H (6h), so a Tuesday /cycle would have
+        traded nothing from the PM and said "decision 96h old" — and the
+        simulation, which rebalances only when the PM decides, would never
+        have seen the operator's recycles at all.
+
+        So: a PM decision still inside the freshness window is reused
+        (the scheduled Friday one, or a /pm the operator just ran);
+        otherwise the PM decides now and the cycle trades that. A PM run
+        already in flight is waited for, not duplicated. A failed PM run
+        does not block the cycle — the bridge then refuses the PM sleeve
+        and the approval card says why.
+        """
+        if not self._agents_configured():
+            return
+        from trading.agents.pm_signal import default_max_age_h
+
+        lock = getattr(self, "_agent_pm_lock", None)
+        if lock is not None and lock.locked():
+            async with lock:
+                return
+        age = self._pm_decision_age_h()
+        if age is not None and age <= default_max_age_h():
+            logger.bind(component="agent_pm").info(
+                f"manual cycle reuses the PM decision from {age:.1f}h ago"
+            )
+            return
+        stale = "none on file" if age is None else f"the last one is {age:.0f}h old"
+        with contextlib.suppress(Exception):
+            self.alerts.info(
+                f"🧠 Manual cycle — the PM decides first ({stale}); the simulation "
+                "rebalances with it. The basket follows in ~5–10 min."
+            )
+        try:
+            await self._run_agent_pm_async()
+        except Exception:
+            logger.bind(component="agent_pm").exception("PM refresh before manual cycle failed")
 
     async def _shutdown(self) -> None:
         if self._scheduler is not None:

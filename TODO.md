@@ -106,6 +106,17 @@ Order of operations:
       `SCHEDULE_TZ=America/New_York` — the existing 0 19 UTC in New York
       time (the compose default 5 17 is after the close; not adopted).
 
+## Cadence + models (2026-09-26, branch `claude/dashboard-v2`)
+
+- [x] Scheduled cycle every second Friday (`CYCLE_EVERY_WEEKS=2`,
+      `CYCLE_ANCHOR_DATE`), PM decision / broker check / watchdog /
+      dashboard gated on the same weeks (runner/cadence.py).
+- [x] Manual `/cycle` refreshes a stale PM decision first, so the PM
+      simulation counts manual recycles.
+- [x] All agents on Claude Opus 5.5 (specialists, decision nodes, copilot).
+- [ ] After two cycles: rerun `scripts/llm_cost.py` for real Opus 5.5
+      token use; check specialist latency against `AGENTS_TIMEOUT_S`.
+
 ## Robustness wave 1 (2026-09-23, branch `claude/robustness-wave-1`)
 
 - [x] Bot: `/halt` with an apostrophe crashed the poll loop (shlex) and was
