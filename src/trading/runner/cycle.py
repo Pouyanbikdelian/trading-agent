@@ -273,14 +273,17 @@ class Cycle:
             report = self._run_inner(ts_start, force_review=force_review)
         except Exception as e:
             logger.bind(component="cycle").exception("cycle failed")
-            self.alerts.critical(f"cycle failed: {e!r}")
+            # The one message for this failure: every other error path in
+            # the cycle alerts where it happens, so the runner no longer
+            # repeats report.error (two messages per failure until 2026-09-26).
+            self.alerts.critical(f"❌ *Cycle failed*\n`{type(e).__name__}: {e}`")
             report = CycleReport(
                 ts=ts_start,
                 status="error",
                 orders_submitted=0,
                 fills_received=0,
                 decisions=[],
-                error=str(e),
+                error=f"{type(e).__name__}: {e}",
                 duration_ms=self._elapsed_ms(ts_start),
             )
         # Always persist + heartbeat, even on error.
@@ -979,11 +982,10 @@ class Cycle:
                     f"excluded name(s): `{names}`. `/unexclude <sym>` to allow again."
                 )
 
-        # 8b. Buying-power preflight. Estimate notional required vs cash
-        # available; warn (don't refuse) if we're going to run short. The
-        # broker will issue the actual rejection if margin doesn't permit
-        # — this is a heads-up so the operator can intervene with /fx.
-        self._preflight_buying_power(orders, account, last_prices)
+        # 8b. (Removed 2026-09-26) The buying-power preflight compared the
+        # USD value of the buys with the account's CHF cash and printed both
+        # as "$". The risk manager's per-currency cash fit (FIT_ORDERS_TO_CASH)
+        # and the pre-cycle funding check already cover this, correctly.
 
         if review_only:
             # A halt has to stop the book growing. It does not have to stop
@@ -2901,42 +2903,6 @@ class Cycle:
         """
         return self.broker.get_account()
 
-    def _preflight_buying_power(
-        self,
-        orders: list[Any],
-        account: Any,
-        last_prices: dict[str, float],
-    ) -> None:
-        """Estimate notional cost of BUY orders vs current cash.
-
-        Surfaces a Telegram warning when cash is short. We don't *reject*
-        — IBKR's risk margin may permit; the operator can also `/fx
-        CHF X` to convert before the actual fill. Sells reduce required
-        notional. Skip if last_prices is empty.
-        """
-        if not orders or not last_prices:
-            return
-        from trading.core.types import Side as _Side  # local to avoid name clash
-
-        notional_required = 0.0
-        for o in orders:
-            px = last_prices.get(o.instrument.key)
-            if px is None:
-                continue
-            sign = 1.0 if o.side == _Side.BUY else -1.0
-            notional_required += sign * o.quantity * px
-        if notional_required <= 0:
-            return
-        cash = float(getattr(account, "cash", 0.0) or 0.0)
-        shortfall = notional_required - cash
-        if shortfall <= 0:
-            return
-        self.alerts.warning(
-            f"⚠️ buying-power preflight: need ~${notional_required:,.0f} for "
-            f"net buys, have ${cash:,.0f} — short ~${shortfall:,.0f}. "
-            "IBKR may reject or auto-margin; consider `/fx` to convert."
-        )
-
     def _announce_fills(self, fills: list[Any]) -> None:
         """Telegram a one-shot summary of fills received this cycle.
 
@@ -3612,8 +3578,9 @@ class Cycle:
                     )
                 )
             return picked_orders
-        # action == "approve"
-        self.alerts.info(f"✅ cycle `{cycle_id[:8]}` approved as-is.")
+        # action == "approve". No echo (2026-09-26): the bot has already
+        # confirmed the tap, and the fills message follows within seconds.
+        logger.bind(component="cycle").info(f"cycle {cycle_id[:8]} approved as-is")
         return orders
 
     def _compute_top_candidates(

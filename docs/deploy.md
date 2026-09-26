@@ -435,6 +435,25 @@ Audit of every limit on what one agent hands another, and the fixes:
 - Code defaults now match the `.env` set on 2026-09-26: tokens 12k/24k,
   timeouts 180/300 s.
 
+## 19. Telegram cleanup (2026-09-26)
+
+- Runner, PM, committee and cycle messages now render Markdown (they were
+  plain text, so formatting showed as literal symbols), fall back to plain
+  text if Telegram rejects the formatting, and split past 3,800 chars.
+- New desk card at startup: live/armed, whose targets trade (Agent PM),
+  approval gate, next cycle once, broker reconciliation in one line.
+- Removed: "Bot online", the momentum-era strategy line, the style advisor
+  while momentum does not trade, the buying-power preflight (mixed CHF and
+  USD), the duplicate failure and generic halt messages, the "approved
+  as-is" echo, sentinel false alarms, weekly index-membership lists.
+- Commands: `/k` removed; `/heartbeat` is an alias of `/health`; `/plan`
+  opens `/proposal`; `/ask` and `/thesis` work but are not advertised.
+  `/help` is regrouped (one message). `/status` shows book, next cycle and
+  PM decision age. The sentinel's "Debate it" button works.
+- Wording: PM targets are described as the live targets; funding and
+  broker alerts give phone actions (`/fx`, `/gateway`), not env vars or
+  shell commands. Ops watch no longer flags the PM as dead mid-fortnight.
+
 ## Troubleshooting
 
 | Symptom                              | Likely cause                              | Action                                                          |

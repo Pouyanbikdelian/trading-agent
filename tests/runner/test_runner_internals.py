@@ -758,3 +758,39 @@ def test_precycle_funding_check_sizes_the_desk_and_matches_its_severity(
     assert sent is not None and sent.startswith("FUNDING")
     assert ("halted" in sent) is halted
     assert (runner.alerts.last_critical if fit else runner.alerts.last_warning) is None
+
+
+def test_the_desk_card_says_whose_targets_trade_and_when(monkeypatch, tmp_path: Path) -> None:
+    """2026-09-26: the start message led with 'Top-8 momentum (lookback 126d,
+    skip 21d, rebalance every 5 bars)' — a book that places no orders — and
+    printed the next cycle twice."""
+    monkeypatch.setattr(
+        runner_module,
+        "settings",
+        settings.model_copy(
+            update={
+                "state_dir": tmp_path,
+                "agent_pm_sleeve_pct": 1.0,
+                "strategy_sleeve_pct": 0.0,
+                "require_cycle_approval": True,
+                "cycle_every_weeks": 2,
+            }
+        ),
+    )
+    runner = _bare_runner(tmp_path)
+    runner.config = RunnerConfig(
+        universe="sp500", strategies=["top_k_momentum"], schedule_tz="America/New_York"
+    )
+    nxt = datetime(2026, 10, 9, 19, 0, tzinfo=timezone.utc)
+    runner._scheduler = SimpleNamespace(get_job=lambda _id: SimpleNamespace(next_run_time=nxt))
+    runner.cycle = SimpleNamespace(
+        risk_manager=SimpleNamespace(_reload_halt_state=lambda: None, is_halted=lambda: True)
+    )
+    card = runner._format_runner_started_message(recon_note="7 position(s) match the last snapshot")
+    assert "lookback" not in card and "rebalance every" not in card
+    assert "*Book* · Agent PM · 100% of the desk" in card
+    assert "waits for your /approve" in card
+    assert "Fri 09 Oct, 15:00 New York, every 2 weeks" in card
+    assert "*Broker* · 7 position(s) match" in card
+    assert "Halted" in card
+    assert card.count("Oct") == 1  # the next cycle once, not twice

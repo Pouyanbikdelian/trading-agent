@@ -1536,7 +1536,7 @@ def format_pm_digest(
     # none of them were sizes anyone could act on. What the PM decides
     # is a set of weights — so that is what this shows.
     lines = [
-        "🧪 *Agent PM — target allocation* (research; not an IBKR order ticket)",
+        "🧠 *Agent PM — target allocation* (the desk's live targets; they become orders only at a cycle, after your /approve)",
     ]
 
     opened, closed = result.get("opened") or [], result.get("closed") or []

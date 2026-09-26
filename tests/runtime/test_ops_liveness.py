@@ -376,3 +376,16 @@ class TestErrorLogScan:
 
     def test_missing_log_is_silent(self, tmp_path: Path) -> None:
         assert check_recent_errors(tmp_path / "nope") == []
+
+
+def test_the_pm_liveness_limit_follows_the_two_week_cadence(monkeypatch) -> None:
+    """At CYCLE_EVERY_WEEKS=2 the 240h (10 day) limit cried 'PM dead' every
+    six hours on days 10-14 of each fortnight."""
+    from trading.core import config
+    from trading.runtime.ops_watch import _journal_max_age_h
+
+    monkeypatch.setattr(
+        config, "settings", config.settings.model_copy(update={"cycle_every_weeks": 2})
+    )
+    assert _journal_max_age_h("agent_pm", 240.0) >= 14 * 24
+    assert _journal_max_age_h("committee", 96.0) == 96.0

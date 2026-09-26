@@ -68,7 +68,8 @@ class TestCheckBrokerReady:
         """The only thing that matters is how long is left to fix it."""
         msg = format_not_ready_alert({"detail": "Not connected"}, minutes_to_cycle=60)
         assert "cycle in 60 min" in msg
-        assert "IBKR Mobile" in msg and "restart ib-gateway" in msg
+        assert "IBKR Mobile" in msg and "/gateway stop" in msg and "/gateway start" in msg
+        assert "docker" not in msg  # phone-actionable (2026-09-26)
 
 
 class TestPrecycleTrigger:

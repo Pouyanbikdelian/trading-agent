@@ -20,7 +20,17 @@ from pathlib import Path
 from trading.bot.telegram import HELP_TEXT
 
 #: Deliberately unlisted: /help itself, mandate sub-ops, and aliases.
-KNOWN_UNLISTED = {"/cancel_order", "/forget", "/harden", "/help", "/mandates", "/soften"}
+KNOWN_UNLISTED = {
+    "/cancel_order",
+    "/forget",
+    "/harden",
+    "/help",
+    "/soften",
+    # Work, but not advertised since 2026-09-26: plain text already reaches
+    # the copilot (/ask), and /thesis is a variant of /why.
+    "/ask",
+    "/thesis",
+}
 
 
 def _registry_commands() -> set[str]:

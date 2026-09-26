@@ -63,19 +63,19 @@ def format_not_ready_alert(result: dict[str, Any], *, minutes_to_cycle: int) -> 
     """The message that has to make someone pick up their phone.
 
     Leads with the deadline, because the only thing that matters is how
-    long there is left to fix it.
+    long there is left to fix it. Every step is doable from the phone
+    (2026-09-26: it used to end in a shell command).
     """
     return (
         f"🔴 *Broker not ready — cycle in {minutes_to_cycle} min*\n"
         f"`{result.get('detail', 'unknown')}`\n\n"
-        "The gateway is not answering with account data. Most likely it is "
-        "waiting on an IBKR Mobile 2FA prompt after a restart.\n\n"
-        "*Do now:*\n"
-        "1. Open IBKR Mobile and approve any pending login.\n"
-        "2. If there is no prompt, force a fresh login:\n"
-        "   `docker compose restart ib-gateway` — then watch for the prompt.\n"
-        "3. Re-check with `/health`.\n\n"
-        "_If this is not fixed, the cycle will submit nothing and say so._"
+        "The IBKR gateway is not answering with account data — most likely it "
+        "is waiting for a login approval after a restart.\n\n"
+        "*Do now*\n"
+        "1. Open IBKR Mobile and approve the pending login.\n"
+        "2. No prompt? `/gateway stop`, then `/gateway start` for a fresh login.\n"
+        "3. Check with `/health`.\n\n"
+        "_If it is still down at cycle time, the cycle submits nothing and says so._"
     )
 
 
@@ -233,7 +233,7 @@ def format_funding_alert(result: dict[str, Any], *, minutes_to_cycle: int) -> st
         f"have `{have:,.0f}` · a full basket at {upto}{what} needs up to "
         f"`{need:,.0f}` · short `{short:,.0f}` {ccy}\n\n"
     )
-    convert = f"convert about `{short_base * 1.02:,.0f}` {base} to {ccy} in Client Portal"
+    convert = f"convert about `{short_base * 1.02:,.0f}` {base} to {ccy} (`/fx` or IBKR)"
     if result.get("fit_to_cash"):
         covers = f"about {cov:.0%} of the desk" if isinstance(cov, (int, float)) else "part of it"
         return (
@@ -241,21 +241,18 @@ def format_funding_alert(result: dict[str, Any], *, minutes_to_cycle: int) -> st
             + head
             + f"Your {ccy} cash can buy {covers}. The PM has not decided yet, so this is "
             "the most it could ask for. If its basket is bigger than your "
-            f"{ccy}, every buy is scaled down by the same factor to fit "
-            "(FIT_ORDERS_TO_CASH): a smaller basket, not a refused one, and the "
-            "approval card says so.\n\n"
-            f"*Only if you want a full basket:* {convert} "
-            "(or raise MAX_MARGIN_BORROWING_PCT if you intend to borrow)."
+            f"{ccy}, every buy is scaled down by the same factor to fit — "
+            "a smaller basket, not a refused one, and the approval card says so.\n\n"
+            f"*Only if you want a full basket:* {convert}."
         )
     return (
         f"🟠 *Not enough {ccy} to fund the basket — cycle in {minutes_to_cycle} min*\n"
         + head
         + f"The account is {base}-based and US equities settle in {ccy}. With margin "
-        "borrowing set to 0, the risk manager will REJECT the whole basket "
-        "rather than borrow — the cycle will complete having bought nothing, "
-        "which looks exactly like a strategy that saw nothing worth buying.\n\n"
-        f"*Do now:* {convert} "
-        "(or raise MAX_MARGIN_BORROWING_PCT if you intend to borrow)."
+        "borrowing off, the risk manager will REJECT the whole basket rather "
+        "than borrow — the cycle will complete having bought nothing, which "
+        "looks exactly like a PM that saw nothing worth buying.\n\n"
+        f"*Do now:* {convert}."
     )
 
 
@@ -446,15 +443,14 @@ def format_unheld_alert(result: dict[str, Any]) -> str:
     return (
         "🔴 *Unprotected positions in the live account*\n"
         f"`{names}`\n\n"
-        "Nothing is protecting these. Two separate subsystems can sell them:\n"
-        "• the *rebalance* — any symbol the strategy did not pick has a target "
-        "weight of zero, and a zero target is a sell;\n"
-        "• the *position guards* — ATR trailing stops apply to every position "
-        "in the account, not only the ones the system opened.\n\n"
-        "`GUARDS_ENABLED=false` only closes the second path. `/hold SYMBOL` "
-        "closes both — it is the only thing that does.\n\n"
-        "*Do now:* `/hold` each one, or run `trading preflight ack` to accept "
-        "that the system may trade them."
+        "Nothing is protecting these. Two parts of the system can sell them:\n"
+        "• the *rebalance* — a name the PM did not target has a target of zero, "
+        "and a zero target is a sell;\n"
+        "• the *trailing stops* — they watch every position in the account, "
+        "not only the ones the desk opened.\n\n"
+        "Switching the trailing stops off would close only the second path. "
+        "*Do now:* `/hold SYMBOL` for each one you own yourself — it is the one "
+        "thing that protects a position from both."
     )
 
 

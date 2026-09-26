@@ -160,8 +160,9 @@ class TestTheAlert:
         )
         msg = format_funding_alert(r, minutes_to_cycle=60)
         assert "cycle in 60 min" in msg
-        assert "short" in msg and "Client Portal" in msg
-        assert "MAX_MARGIN_BORROWING_PCT" in msg
+        assert "short" in msg and "/fx" in msg
+        # Phone-actionable: no environment-variable names (2026-09-26).
+        assert "MAX_MARGIN_BORROWING_PCT" not in msg and "FIT_ORDERS_TO_CASH" not in msg
 
     def test_it_explains_the_silent_symptom(self) -> None:
         """The operator has to recognise the failure if it happens anyway."""

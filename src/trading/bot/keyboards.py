@@ -69,6 +69,10 @@ SAFE_COMMANDS = frozenset(
         "/regime",
         "/holds",
         "/detail",
+        # Convenes the committee: advisory, one LLM round, no order path.
+        # The sentinel's "Debate it" button sent it and was refused, so the
+        # button answered "can't be run from a button" (fixed 2026-09-26).
+        "/committee",
     }
 )
 

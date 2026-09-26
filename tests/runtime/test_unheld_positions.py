@@ -160,8 +160,8 @@ def test_the_alert_names_both_paths_and_the_fix() -> None:
     assert "VST" in msg
     # Disabling the guards is the tempting half-fix; the message must say
     # why it is not enough.
-    assert "rebalance" in msg and "guards" in msg
-    assert "GUARDS_ENABLED=false" in msg
+    assert "rebalance" in msg and "trailing stops" in msg
+    assert "Switching the trailing stops off would close only the second path" in msg
     assert "/hold" in msg
 
 

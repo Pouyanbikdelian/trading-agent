@@ -81,6 +81,10 @@ async def send_message(
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(url, json=payload)
+            if r.status_code == 400 and payload.get("parse_mode"):
+                # A Markdown parse error used to lose the whole advisory.
+                payload.pop("parse_mode", None)
+                r = await client.post(url, json=payload)
         if r.status_code >= 400:
             logger.warning(f"telegram sendMessage failed: {r.status_code} {r.text[:200]}")
             return False
@@ -115,6 +119,9 @@ def send_message_sync(
     try:
         with httpx.Client(timeout=10.0) as client:
             r = client.post(url, json=payload)
+            if r.status_code == 400 and payload.get("parse_mode"):
+                payload.pop("parse_mode", None)
+                r = client.post(url, json=payload)
         if r.status_code >= 400:
             logger.warning(f"telegram sendMessage failed: {r.status_code} {r.text[:200]}")
             return False

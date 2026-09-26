@@ -60,16 +60,15 @@ class Spec:
 REGISTRY: tuple[Spec, ...] = (
     # --- status & data
     Spec("/help", "command list", aliases=("/start",)),
-    Spec("/status", "env, halted, heartbeat"),
-    Spec("/health", "broker, heartbeat, queue at a glance"),
+    Spec("/status", "desk, halt, next cycle, PM decision at a glance"),
+    Spec("/health", "broker login, heartbeat, command queue", aliases=("/heartbeat",)),
     Spec("/positions", "open positions + weights"),
     Spec("/balances", "cash by currency, equity"),
     Spec("/orders", "last 7d of orders + everything still open; `resolve` retires dead rows"),
     Spec("/pending", "orders currently working", aliases=("/pending_orders", "/pending-orders")),
-    Spec("/heartbeat", "age of the last cycle"),
-    Spec("/report", "weekly report"),
+    Spec("/report", "written summary of the book and the news"),
     Spec("/correlation", "12m correlation matrix of holdings", aliases=("/corr",)),
-    Spec("/memory", "calibration, trust, lessons"),
+    Spec("/memory", "agent scorecard: calibration and source trust"),
     Spec(
         "/watchlist",
         "show the dashboard watchlist or propose an add/remove",
@@ -108,25 +107,21 @@ REGISTRY: tuple[Spec, ...] = (
         usage="/approve [N|only SYM ...|all except SYM ...|flat]",
         example="/approve 80",
     ),
-    Spec("/proposal", "repeat the exact pending buy/sell plan"),
-    Spec(
-        "/review",
-        "show a non-executable live-account review",
-        aliases=("/plan",),
-    ),
-    Spec("/candidates", "alternate ranks for the pending cycle"),
+    Spec("/proposal", "repeat the exact pending buy/sell plan", aliases=("/plan",)),
+    Spec("/review", "show a non-executable live-account review"),
+    Spec("/candidates", "the PM's candidate ladder next to the pending plan"),
     Spec("/reject", "skip this cycle, no orders"),
     Spec(
         "/pick",
-        "override the basket with these ranks",
+        "replace the PM's basket with ladder ranks, equal-weighted",
         usage="/pick RANK [RANK ...]",
         example="/pick 1 3 5 8",
     ),
     # --- regime & signal
-    Spec("/regime", "HMM bull/bear state + triggers", aliases=("/state",)),
+    Spec("/regime", "market regime and SPY/VIX readings", aliases=("/state",)),
     Spec(
         "/signal",
-        "top-N candidates the strategy would pick now",
+        "the candidate ladder right now (momentum ranks the PM chooses from)",
         usage="/signal [N]",
         example="/signal 10",
         aliases=("/signals",),
@@ -197,8 +192,9 @@ REGISTRY: tuple[Spec, ...] = (
     ),
     Spec("/unexclude", "lift a standing ban", usage="/unexclude SYMBOL", example="/unexclude PM"),
     Spec("/exclusions", "list the standing never-buy names"),
-    Spec("/k", "override the strategy top-K", usage="/k [N|clear]", example="/k 12"),
-    Spec("/pm", "PM research simulation", usage="/pm [run]", example="/pm run"),
+    Spec(
+        "/pm", "the PM's current targets; `run` decides again", usage="/pm [run]", example="/pm run"
+    ),
     # --- mode
     Spec(
         "/mode",

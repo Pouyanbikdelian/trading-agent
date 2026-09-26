@@ -1093,17 +1093,18 @@ class Runner:
                 id="macro_monitor",
                 replace_existing=True,
             )
-            # Style-rotation advisor: weekly, Sunday 12:00 UTC (market
-            # closed, cache warm from Friday's cycle). Ranks all
-            # registered strategies on trailing 3/6/9-month Sharpe and
-            # proposes a switch when the leader changes. NEVER applies
-            # anything — the deployed strategy only changes via .env.
-            self._scheduler.add_job(
-                self._run_style_advisor_async,
-                CronTrigger(day_of_week="sun", hour=12, minute=0, timezone="UTC"),
-                id="style_advisor",
-                replace_existing=True,
-            )
+            # Style-rotation advisor: weekly, Sunday 12:00 UTC. Ranks the
+            # registered strategies and proposes switching STRATEGY in .env
+            # when the leader changes. Only scheduled while the mechanical
+            # strategy actually trades (2026-09-26): at STRATEGY_SLEEVE_PCT=0
+            # it proposed re-deploying a book that places no orders.
+            if float(getattr(settings, "strategy_sleeve_pct", 1.0) or 0.0) > 0:
+                self._scheduler.add_job(
+                    self._run_style_advisor_async,
+                    CronTrigger(day_of_week="sun", hour=12, minute=0, timezone="UTC"),
+                    id="style_advisor",
+                    replace_existing=True,
+                )
 
         self._register_core_background_jobs()
 
@@ -1114,7 +1115,14 @@ class Runner:
             # restart.  This is read-only broker observation plus local state
             # persistence; no cycle or order path is started here.
             await self._refresh_account_snapshot()
-            self.alerts.info(self._format_runner_started_message())
+            # Reconcile BEFORE the banner so a clean result is one line of
+            # it, not a second message; drift still alerts on its own.
+            recon_note: str | None = None
+            try:
+                recon_note = await asyncio.to_thread(self._reconcile_startup, quiet_ok=True)
+            except Exception:
+                logger.bind(component="runner").exception("startup reconciliation failed")
+            self.alerts.info(self._format_runner_started_message(recon_note=recon_note))
             logger.bind(component="runner").info(
                 f"scheduler started — next run: {self._scheduler.get_job('cycle').next_run_time}"
             )
@@ -1133,19 +1141,15 @@ class Runner:
             # repair the dashboard's missing reading immediately.
             self._start_startup_market_watch_catchup()
 
-            # Startup reconciliation. Today (May 2026) we shipped a bug where
-            # broker.get_account silently returned a zero-position snapshot on
-            # IBKR timeout, and three cycles stacked to 3x target. The cycle
-            # itself now fails-closed on that path, but a sibling failure
-            # mode is: container restarts mid-cycle, local order_store is
-            # empty, broker still holds positions, next cycle thinks book is
-            # flat and re-buys. We can't *fix* that automatically (the
-            # safest thing is to make the operator notice + decide), but we
-            # CAN make the drift loud at startup so they intervene.
-            try:
-                await asyncio.to_thread(self._reconcile_startup)
-            except Exception:
-                logger.bind(component="runner").exception("startup reconciliation failed")
+            # Startup reconciliation ran before the banner (above). Today
+            # (May 2026) we shipped a bug where broker.get_account silently
+            # returned a zero-position snapshot on IBKR timeout, and three
+            # cycles stacked to 3x target. The cycle itself now fails-closed
+            # on that path, but a sibling failure mode is: container restarts
+            # mid-cycle, local order_store is empty, broker still holds
+            # positions, next cycle thinks book is flat and re-buys. We can't
+            # *fix* that automatically, but we CAN make the drift loud at
+            # startup so the operator intervenes.
 
             # Park until cancelled.
             stop_event = asyncio.Event()
@@ -1210,7 +1214,7 @@ class Runner:
         except Exception:
             logger.bind(component="runner").exception("failed to persist error counter")
 
-    def _reconcile_startup(self) -> None:
+    def _reconcile_startup(self, *, quiet_ok: bool = False) -> str | None:
         """At startup, compare the broker's positions to the last persisted
         snapshot. If they differ, alert the operator loudly — they may need
         to manually flatten or sell down before the next cycle.
@@ -1228,7 +1232,7 @@ class Runner:
             logger.bind(component="runner").warning(
                 f"startup reconciliation: broker.get_positions failed ({e!r}); skipping drift check"
             )
-            return
+            return "positions could not be checked at startup"
 
         snap = None
         with contextlib.suppress(Exception):
@@ -1250,11 +1254,12 @@ class Runner:
             drifted.append(f"{sym}: broker={b:g}, snapshot={s:g}")
 
         if not drifted:
-            self.alerts.info(
-                f"✅ startup reconciliation: broker matches last snapshot "
-                f"({len(broker_positions)} position(s))"
-            )
-            return
+            note = f"{len(broker_positions)} position(s) match the last snapshot"
+            if not quiet_ok:
+                self.alerts.info(
+                    f"✅ startup reconciliation: broker matches last snapshot ({note})"
+                )
+            return note
 
         snap_age = "(no prior snapshot)"
         if snap is not None:
@@ -1274,42 +1279,76 @@ class Runner:
         logger.bind(component="runner").warning(
             f"startup drift: {len(drifted)} symbol(s) — {drifted}"
         )
+        return None
 
-    def _format_runner_started_message(self) -> str:
-        """Build the human-readable startup alert.
+    def _format_runner_started_message(self, *, recon_note: str | None = None) -> str:
+        """The startup card: who trades, when, and under what gate.
 
-        Expands the internal strategy slug + cron expression into something
-        the operator can scan on Telegram without thinking — no Python
-        ``['x']`` reprs, no raw cron strings.
+        Rewritten 2026-09-26. The old banner led with "Top-8 momentum
+        (lookback 126d, skip 21d, rebalance every 5 bars)" — a book that has
+        placed no orders since the PM sleeve went to 100% — and said the
+        next cycle twice. What an operator needs at a restart is: is it
+        live, whose targets trade, does it wait for me, when is the next
+        cycle, and does the broker agree with our records.
         """
         cfg = self.config
-        parts: list[str] = []
-        for slug in cfg.strategies:
-            params = cfg.strategy_params.get(slug, {}) if cfg.strategy_params else {}
-            parts.append(_humanize_strategy(slug, params))
-        strat_line = "; ".join(parts) if parts else "(none)"
+        from zoneinfo import ZoneInfo
 
         next_run = None
-        try:
+        with contextlib.suppress(Exception):
             next_run = self._scheduler.get_job("cycle").next_run_time
-            next_run_s = next_run.strftime("%Y-%m-%d %H:%M %Z") if next_run else "?"
-        except Exception:
-            next_run_s = "?"
-        from trading.runner.cadence import cadence_from, describe
+        from trading.runner.cadence import cadence_from
 
         every, _anchor = cadence_from(settings)
 
-        lines = [
-            "🤖 Runner online",
-            f"  Strategy:    {strat_line}",
-            f"  Universe:    {cfg.universe.upper()}",
-            f"  Rebalance:   {_humanize_cron(cfg.schedule_cron, cfg.schedule_tz)}"
-            f"{describe(every, next_run, cfg.schedule_tz)}",
-            f"  Next run:    {next_run_s}",
-        ]
+        env = str(getattr(settings, "trading_env", "") or "").lower()
+        armed = False
+        with contextlib.suppress(Exception):
+            armed = bool(settings.is_live_armed())
+        if env == "live":
+            head = "🟢 *Desk online* — LIVE" + (" · armed" if armed else " · NOT armed")
+        else:
+            head = f"🔵 *Desk online* — {env.upper() or 'PAPER'}"
+
+        pm = float(getattr(settings, "agent_pm_sleeve_pct", 0.0) or 0.0)
+        strat = float(getattr(settings, "strategy_sleeve_pct", 1.0 - pm) or 0.0)
+        mech = "; ".join(
+            _humanize_strategy(slug, (cfg.strategy_params or {}).get(slug, {}))
+            for slug in cfg.strategies
+        )
+        if pm > 0 and strat <= 0:
+            book = f"Agent PM · {pm:.0%} of the desk"
+        elif pm > 0:
+            book = f"Agent PM {pm:.0%} · {mech or 'strategy'} {strat:.0%}"
+        else:
+            book = mech or "(no strategy)"
+        lines = [head, f"*Book* · {book}"]
+        if pm > 0:
+            lines.append(
+                f"*Candidates* · momentum ranking of the {cfg.universe.upper()} "
+                "(top 30, informs the PM)"
+            )
+        if bool(getattr(settings, "require_cycle_approval", False)):
+            lines.append("*Approval* · every basket waits for your /approve")
+        if next_run is not None:
+            local = next_run.astimezone(ZoneInfo(cfg.schedule_tz))
+            where = "New York" if cfg.schedule_tz == "America/New_York" else cfg.schedule_tz
+            cadence = f", every {every} weeks" if every > 1 else ", weekly"
+            lines.append(
+                f"*Next cycle* · {local:%a %d %b, %H:%M} {where}{cadence} — or /cycle any time"
+            )
+        if recon_note:
+            lines.append(f"*Broker* · {recon_note}")
+        halted = False
+        with contextlib.suppress(Exception):
+            rm = self.cycle.risk_manager
+            rm._reload_halt_state()
+            halted = bool(rm.is_halted())
+        if halted:
+            lines.append("⏸ *Halted* — nothing new trades until /resume")
         if cfg.vol_target is not None:
             lines.append(
-                f"  Vol target:  {cfg.vol_target:.0%} annualized "
+                f"*Vol target* · {cfg.vol_target:.0%} annualized "
                 f"(max leverage {cfg.max_leverage:g}x)"
             )
         return "\n".join(lines)
@@ -1410,14 +1449,15 @@ class Runner:
             self._consecutive_errors += 1
             self._save_error_counter()
             err = (report.error or "unknown error").strip()
-            logger.bind(component="runner").error(f"cycle error: {err}")
-            self.alerts.error(
-                f"❌ cycle error ({self._consecutive_errors}/{self.AUTO_HALT_AFTER}): {err[:300]}"
+            # Not re-sent: the cycle already alerted where the error arose.
+            # The counter surfaces through the AUTO-HALT message if it trips.
+            logger.bind(component="runner").error(
+                f"cycle error ({self._consecutive_errors}/{self.AUTO_HALT_AFTER}): {err}"
             )
             self._maybe_auto_halt(f"cycle error: {err[:100]}")
         elif report.status == "halted":
+            # The cycle has already sent the specific HALTED message.
             logger.bind(component="runner").warning("cycle halted by risk manager")
-            self.alerts.warning("⚠️ cycle halted by risk manager")
         elif report.status == "halted_review":
             # The cycle itself has emitted the complete review card.  Do not
             # append the old generic warning or call this a recovery: the
@@ -2247,6 +2287,13 @@ class Runner:
             result = await asyncio.to_thread(run_sentinel, settings.state_dir)
             if result.get("quiet"):
                 return
+            if str(result.get("severity", "")).strip().lower() == "false_alarm":
+                # The model looked and judged it noise: a phone buzz saying
+                # "false alarm" is the noise (2026-09-26). Kept in the log.
+                logger.bind(component="sentinel").info(
+                    f"sentinel false alarm not sent: {result.get('triggers')}"
+                )
+                return
             from trading.bot.keyboards import sentinel_keyboard
 
             # Read-only buttons only: "look closer" and "argue about it".
@@ -2454,7 +2501,7 @@ class Runner:
                 logger.bind(component="data").warning(
                     f"universe refresh failed: {result['reason']}"
                 )
-                self.alerts.info(f"⚠️ universe refresh failed: {result['reason']}")
+                self.alerts.warning(f"⚠️ Index membership refresh failed: {result['reason']}")
                 return
             clear_cache()
 
@@ -2473,10 +2520,9 @@ class Runner:
             logger.bind(component="data").info(
                 "universe refresh: " + ("; ".join(lines) if lines else "no membership changes")
             )
-            if lines:
-                self.alerts.info(
-                    "🗂 *Index membership changed*\n" + "\n".join(f"• {ln}" for ln in lines)
-                )
+            # Membership changes are logged, not sent (2026-09-26): a weekly
+            # list of index additions is not something the operator acts on;
+            # the candidate ladder simply picks them up.
         except Exception:
             logger.bind(component="data").exception("universe refresh failed")
 
@@ -2876,8 +2922,8 @@ class Runner:
         stale = "none on file" if age is None else f"the last one is {age:.0f}h old"
         with contextlib.suppress(Exception):
             self.alerts.info(
-                f"🧠 Manual cycle — the PM decides first ({stale}); the simulation "
-                "rebalances with it. The basket follows in ~5–10 min."
+                f"🧠 Manual cycle — the PM decides first ({stale}). "
+                "The basket follows in about 5–10 min."
             )
         try:
             await self._run_agent_pm_async()

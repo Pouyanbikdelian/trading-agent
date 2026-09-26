@@ -118,6 +118,10 @@ Order of operations:
 - [x] Mandates: newest-first within strength, 40 reach the agents (was 8,
       oldest-first), a note names any hidden; every instruction clause of a
       message is stored; 2,000-char text.
+- [x] Telegram cleanup (docs/deploy.md §19).
+- [ ] Telegram, next: one daily market-risk note instead of four advisors
+      (SPY/VIX hourly, HMM, options, macro); fold PM bridge / pins / holds
+      notes into the approval card; one post-trade summary (fills + book).
 - [ ] After two cycles: rerun `scripts/llm_cost.py` for real Opus 5.5
       token use; check specialist latency against `AGENTS_TIMEOUT_S`.
 

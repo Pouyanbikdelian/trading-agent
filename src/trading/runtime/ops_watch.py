@@ -77,13 +77,30 @@ _FRESHNESS: dict[str, tuple[str, float]] = {
 # journal kind -> (label, max age in hours before it counts as dead)
 _JOURNAL_CADENCE: dict[str, tuple[str, float]] = {
     "committee": ("committee debate", 96.0),  # 2x/week
-    "agent_pm": ("agent PM run", 240.0),  # weekly
+    # Weekly cadence baseline; scaled by CYCLE_EVERY_WEEKS in
+    # _journal_max_age_h — at two weeks, 240 h raised "PM dead" every six
+    # hours on days 10-14 of every fortnight.
+    "agent_pm": ("agent PM run", 240.0),
     # Weekly (Friday 19:00 New York, runner._historian_trigger). This was
     # 120 h from the twice-weekly era, which raised a false "historian
     # dead" alarm every Wednesday-Friday once the cadence became weekly.
     "historian": ("historian distillation", 192.0),  # weekly + 1 day slack
     "daily": ("nightly memory pass", 48.0),  # nightly
 }
+
+
+def _journal_max_age_h(kind: str, default: float) -> float:
+    """The PM decides on the cycle cadence; everything else keeps its own."""
+    if kind != "agent_pm":
+        return default
+    try:
+        from trading.core.config import settings
+        from trading.runner.cadence import cadence_from
+
+        every, _anchor = cadence_from(settings)
+    except Exception:
+        return default
+    return max(default, 7 * 24.0 * every + 72.0)
 
 
 def check_learning_loops(state_dir: Path, *, now: datetime | None = None) -> list[str]:
@@ -108,6 +125,7 @@ def check_learning_loops(state_dir: Path, *, now: datetime | None = None) -> lis
 
     try:
         for kind, (label, max_h) in _JOURNAL_CADENCE.items():
+            max_h = _journal_max_age_h(kind, max_h)
             try:
                 row = conn.execute(
                     "SELECT MAX(ts) AS ts FROM journal WHERE kind = ?", (kind,)

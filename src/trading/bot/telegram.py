@@ -55,77 +55,59 @@ if TYPE_CHECKING:
 
 BOT_API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 25  # seconds — long-poll
+# Rewritten 2026-09-26 for the desk as it now runs: the Agent PM's targets
+# trade, every basket waits for /approve, and the cycle runs every second
+# Friday or on demand. Grouped by what the operator is trying to do, one
+# line per job; momentum-era commands (/k) are gone and near-duplicates
+# (/ask, /thesis, /heartbeat) still work but are not advertised.
 HELP_TEXT = (
-    "*Trading bot — commands*\n\n"
-    "*Status & data*\n"
-    "/status — env, halted, heartbeat\n"
-    "/health — broker, heartbeat, queue at a glance\n"
-    "/positions — open positions + weights\n"
-    "/balances — cash by currency, equity\n"
-    "/orders — last 7d of orders (grouped)\n"
-    "/pending — orders currently working\n"
-    "/heartbeat — age of last cycle\n"
-    "/report — weekly report\n\n"
-    "*Cycle approval* (when REQUIRE\\_CYCLE\\_APPROVAL=true)\n"
-    "/approve — submit pending basket as-is\n"
-    "/approve N — scale to N% (e.g. `/approve 80`)\n"
-    "/approve only SYM ... — apply only those planned changes (then confirm preview)\n"
-    "/approve all except SYM ... — freeze those planned changes (then confirm preview)\n"
-    "/approve flat — flatten instead of basket\n"
-    "/proposal — repeat the exact pending buys and sells\n"
-    "/review — repeat the latest non-executable halted account review\n"
-    "/candidates — alternate ranked picks for the pending cycle\n"
-    "/pick 1 3 5 8 — replace basket with a new equal-weight rank selection\n"
-    "/reject — skip this cycle, no orders\n\n"
-    "*Regime & signal*\n"
-    "/regime — HMM bull/bear state + SPY/VIX triggers\n"
-    "/signal \\[N] — top-N candidates the strategy would pick NOW (no order)\n\n"
-    "*Trigger work*\n"
-    "/cycle — force a rebalance now; while halted, a reduce-only basket or a review\n"
-    "/refresh — queue a data refresh\n\n"
-    "*Desk copilot* (never trades)\n"
-    "/ask QUESTION — anything about past decisions or current state\n"
-    "/why SYM — why did we buy/sell/hold it, and what happened\n"
-    "/thesis SYM — latest thesis + is it still valid\n"
-    "/committee SYM — decision history for a symbol (bare /committee still convenes)\n\n"
-    "/watchlist — show dashboard watchlist · `/watchlist add|remove|undo` stages a change\n"
-    "*Manual orders* (queued, run within ~5s)\n"
+    "*Trading desk — commands*\n\n"
+    "*At a glance*\n"
+    "/status — desk, halt, next cycle, PM decision\n"
+    "/health — broker login, heartbeat, command queue\n"
+    "/positions · /balances — holdings and cash\n"
+    "/orders · /pending — recent and working orders\n"
+    "/report — written summary of the book and the news\n\n"
+    "*Cycle* (every 2nd Friday, or whenever you ask)\n"
+    "/cycle — run one now; the PM decides first if needed\n"
+    "/proposal — the basket waiting for you\n"
+    "/approve — send it · `/approve 80` scales it to 80%\n"
+    "/approve only SYM … · /approve all except SYM … — partial\n"
+    "/approve flat — flatten instead · /reject — skip this cycle\n"
+    "/candidates — the candidate ladder next to the plan\n"
+    "/pick 1 3 5 — swap in ladder ranks, equal-weighted\n"
+    "/review — the latest review-only card (while halted)\n\n"
+    "*Agents*\n"
+    "/committee — convene a debate now · /detail — the full transcript\n"
+    "/pm — the PM's targets · /pm run — decide again (no order)\n"
+    "/why SYM — why we bought, sold or held it\n"
+    "/mandates — your standing instructions (type one to add it)\n"
+    "/lessons · /lesson — what the desk has learned\n"
+    "/memory — agent scorecard · /edge — do picks beat the names passed on?\n"
+    "/exceptions — off-ladder ideas waiting for your call\n"
+    "/watchlist — the dashboard watchlist\n\n"
+    "*Market*\n"
+    "/regime — regime and SPY/VIX readings\n"
+    "/signal — the candidate ladder right now\n"
+    "/correlation — how your holdings move together\n\n"
+    "*Trade by hand* (queued, runs within ~5 s)\n"
     "/buy SYM QTY \\[LIMIT] — e.g. `/buy AAPL 10 180`\n"
-    "/sell SYM \\[QTY|all] \\[LIMIT] — e.g. `/sell AAPL all`\n"
-    "/close SYM — close one position\n"
-    "/flatten — close every open position\n"
-    "/hold SYM | /unhold SYM | /holds — pin/release positions the cycle must not touch\n"
-    "/exclude SYM \\[reason] — never buy it again; selling still works\n"
-    "/unexclude SYM | /exclusions — lift a ban / list the standing ones\n"
-    "/k N | /k clear — override the strategy top-K at runtime\n"
-    "/correlation — 12m correlation matrix of current holdings\n"
-    "/memory — permanent-memory vitals: calibration, trust, lessons\n"
-    "/lesson <text> — propose a durable desk lesson; archive/restore stays approval-gated\n"
-    "/lessons [harden|soften <id>] — review or propose a re-weighting\n"
-    "/edge [5|21|63] — did our picks beat the names we passed on?\n"
-    "/edge why — the breakdown: rank, market conditions, entry level\n"
-    "/exceptions — review off-ladder research; approve/reject a bounded proposal\n"
-    "/detail — full transcript of the latest committee debate\n"
-    "/committee — convene the agents for a fresh debate right now\n"
-    "/pm — PM research simulation · /pm run — refresh PM research (no broker order)\n"
-    "/cancel\\_order CLIENT\\_ID — cancel a pending order\n\n"
-    "*Mode (rebalance posture)*\n"
-    "/mode bull|neutral|defense|bear|flatten — preview\n"
-    "/confirm — apply previewed mode + run now\n"
-    "/cancel — discard preview\n\n"
-    "*FX*\n"
-    "/fx 5000 CHF to USD — convert at market\n"
-    "/fx-rate USD CHF — reference rate\n\n"
+    "/sell SYM \\[QTY|all] \\[LIMIT] · /close SYM · /flatten\n"
+    "/hold · /unhold · /holds — positions the desk must never touch\n"
+    "/exclude · /unexclude · /exclusions — names never to buy\n"
+    "/fx 5000 CHF to USD — convert · /fx-rate USD CHF — rate\n\n"
     "*Safety*\n"
-    "/halt \\[reason] — refuse new exposure; explicit close/flatten remains reduce-only\n"
-    "/resume — clear halt, reset failure counter\n"
-    "/baseline \\[reset] — show or re-stamp the kill-switch high-water mark\n"
-    "/reconnect — bounce the broker connection\n"
-    "/gateway stop|start|status — release your IBKR session so you can trade by hand in TWS or mobile; stop also halts\n"
-    "\n*Money in / out* (so returns are not distorted)\n"
-    "/deposit AMOUNT \\[CCY] \\[YYYY-MM-DD] — record money you added\n"
-    "/withdraw AMOUNT \\[CCY] \\[YYYY-MM-DD] — record money you took out\n"
-    "/flows — list recorded deposits and withdrawals\n"
+    "/halt \\[reason] — stop new exposure; exits still work\n"
+    "/resume — clear the halt (asks to confirm)\n"
+    "/mode bull|neutral|defense|bear|flatten — preview a posture\n"
+    "/confirm · /cancel — confirm or drop a staged command\n"
+    "/baseline — the kill-switch reference\n"
+    "/refresh · /reconnect — refresh data · bounce the broker link\n"
+    "/gateway stop|start|status — release your IBKR session to trade by hand "
+    "in TWS or mobile; stop also halts\n\n"
+    "*Money in / out* (keeps returns honest)\n"
+    "/deposit · /withdraw AMOUNT \\[CCY] \\[DATE] — record a transfer\n"
+    "/flows — recorded deposits and withdrawals\n"
 )
 
 
@@ -542,31 +524,6 @@ def _cmd_holds() -> str:
     return "\U0001f4cc *Pinned positions* (cycle won't touch):\n" + "\n".join(
         f"  • `{s}`" for s in sorted(holds)
     )
-
-
-def _cmd_k(args: list[str]) -> str:
-    """``/k 12`` — override the strategy's top-K at runtime; ``/k`` shows;
-    ``/k clear`` reverts to the configured default."""
-    from trading.runner.holds import load_holds, load_k_override, save_k_override
-
-    current = load_k_override(settings.state_dir)
-    held = len(load_holds(settings.state_dir))
-    if not args:
-        base = f"`{current}`" if current else "_not set (strategy default applies)_"
-        tail = f"\n_{held} pinned position(s) each reserve one slot on top._" if held else ""
-        return f"Top-K override: {base}{tail}"
-    if args[0].lower() in ("clear", "off", "none", "reset"):
-        save_k_override(settings.state_dir, None)
-        return "Top-K override cleared — next cycle uses the configured default."
-    try:
-        k = int(args[0])
-    except ValueError:
-        return "usage: `/k 12` to set, `/k` to show, `/k clear` to reset"
-    if not 1 <= k <= 50:
-        return "k must be between 1 and 50"
-    save_k_override(settings.state_dir, k)
-    note = f" ({held} held position(s) will reserve slots on top)" if held else ""
-    return f"Top-K set to `{k}` from the next cycle{note}."
 
 
 def _cmd_correlation() -> str:
@@ -1026,7 +983,7 @@ def _cmd_committee() -> str:
 
 
 def _cmd_pm(args: list[str]) -> str:
-    """``/pm`` — PM research simulation; ``/pm run`` refreshes research only."""
+    """``/pm`` — the PM's current targets; ``/pm run`` decides again (no order)."""
     import json as _json
 
     if args and args[0].lower() == "run":
@@ -1036,9 +993,9 @@ def _cmd_pm(args: list[str]) -> str:
         except Exception as e:
             return f"could not request PM run: `{e}`"
         return (
-            "🧪 Agent PM convening — research allocation lands here in ~1 minute.\n"
-            "_This does not submit to IBKR. `/cycle` translates it into the live CHF account; "
-            "while halted that translation is review-only._"
+            "🧠 Agent PM deciding — its targets land here in a few minutes.\n"
+            "_No order is sent. The next cycle (or `/cycle`) turns them into a basket "
+            "for your approval._"
         )
 
     from trading.agents.pm import (
@@ -1053,14 +1010,16 @@ def _cmd_pm(args: list[str]) -> str:
     try:
         book = _json.loads((pm_dir / "portfolio.json").read_text())
     except Exception:
-        return "_no agent-PM book yet — it trades Mondays 14:30 UTC, or `/pm run` to convene now._"
+        return "_no Agent PM book yet — it decides before each cycle, or `/pm run` to decide now._"
     perf = performance(settings.state_dir)
     # No paper equity figure. The sim book is seeded at $1m and the
     # account holds CHF 84k; the two landed in the same chat and every
     # number on this card read as a position size somebody could act on.
     # The percentage return is still meaningful — it is the PM's own
     # scorecard — so that stays, in the unit it is actually measured in.
-    lines = ["🧪 *Agent PM — target allocation* (research; not an IBKR order ticket)"]
+    lines = [
+        "🧠 *Agent PM — target allocation* (the desk's live targets; they become orders only at a cycle, after your /approve)"
+    ]
     since = float(perf.get("return_pct", 0.0) or 0.0)
     if "spy_return_pct" in perf:
         alpha = since - perf["spy_return_pct"]
@@ -1536,15 +1495,25 @@ def _cmd_status() -> str:
             pass
 
     hb_age = _heartbeat_age()
-    hb_line = "unknown" if hb_age is None else f"{hb_age:.0f}s ago"
+    hb_line = "unknown" if hb_age is None else _human_age(hb_age)
     halt_line = f"🛑 *HALTED* — `{halt_reason}`" if halted else "🟢 running"
-    lines = [
-        "*Trading status*",
-        f"env: `{settings.trading_env}`",
-        f"live armed: `{settings.is_live_armed()}`",
-        f"state: {halt_line}",
-        f"heartbeat: {hb_line}",
-    ]
+    env = str(getattr(settings, "trading_env", "") or "").upper()
+    try:
+        armed = bool(settings.is_live_armed())
+    except Exception:
+        armed = False
+    head = f"*Desk* · {env}" + (" · armed" if env == "LIVE" and armed else "")
+    lines = [head, halt_line]
+    pm = float(getattr(settings, "agent_pm_sleeve_pct", 0.0) or 0.0)
+    if pm > 0:
+        lines.append(f"*Book* · Agent PM · {pm:.0%} of the desk")
+    nxt = _next_cycle_line()
+    if nxt:
+        lines.append(f"*Next cycle* · {nxt} — or /cycle")
+    pm_age = _pm_decision_age_h()
+    if pm_age is not None:
+        lines.append(f"*PM decision* · {_human_age(pm_age * 3600)}")
+    lines.append(f"*Heartbeat* · {hb_line}")
 
     pending = _read_cycle_pending()
     if pending is not None:
@@ -1568,9 +1537,7 @@ def _cmd_status() -> str:
             f"\n🧪 *Review `{review_id}` is non-executable* — `/review` or `/proposal` repeats it."
         )
     elif getattr(settings, "require_cycle_approval", False):
-        lines.append(
-            "\n_cycle approval required for every cycle (REQUIRE\\_CYCLE\\_APPROVAL=true)._"
-        )
+        lines.append("*Approval* · every basket waits for your /approve")
 
     # The three things an operator almost always checks straight after
     # /status. All read-only.
@@ -1579,6 +1546,60 @@ def _cmd_status() -> str:
     markup = read_only_keyboard("/positions", "/orders", "/health")
     text = "\n".join(lines)
     return ButtonReply(text, markup) if markup else text
+
+
+def _human_age(seconds: float) -> str:
+    s = max(0.0, float(seconds))
+    if s < 90:
+        return f"{s:.0f}s ago"
+    if s < 5400:
+        return f"{s / 60:.0f} min ago"
+    if s < 172800:
+        return f"{s / 3600:.1f} h ago"
+    return f"{s / 86400:.1f} days ago"
+
+
+def _next_cycle_line() -> str | None:
+    """The next scheduled cycle, from the same CRON + cadence the runner uses."""
+    import os as _os
+
+    cron = _os.getenv("CRON", "")
+    tz = _os.getenv("SCHEDULE_TZ", "America/New_York")
+    if not cron:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        from apscheduler.triggers.cron import CronTrigger
+
+        from trading.runner.cadence import cadence_from, gate
+
+        every, anchor = cadence_from(settings)
+        trig = gate(
+            CronTrigger.from_crontab(cron, timezone=tz), every_weeks=every, anchor=anchor, tz=tz
+        )
+        nxt = trig.get_next_fire_time(None, datetime.now(tz=timezone.utc))
+    except Exception:
+        return None
+    if nxt is None:
+        return None
+    where = "New York" if tz == "America/New_York" else tz
+    cadence = f", every {every} weeks" if every > 1 else ""
+    return f"{nxt.astimezone(ZoneInfo(tz)):%a %d %b, %H:%M} {where}{cadence}"
+
+
+def _pm_decision_age_h() -> float | None:
+    """Hours since the Agent PM's last successful decision."""
+    try:
+        raw = json.loads((settings.state_dir / "agent_pm" / "last_run.json").read_text())
+        if not raw.get("ok"):
+            return None
+        ts = datetime.fromisoformat(str(raw["ts"]))
+    except Exception:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(tz=timezone.utc) - ts).total_seconds() / 3600.0
 
 
 def _heartbeat_age() -> float | None:
@@ -2683,9 +2704,8 @@ def _cmd_cycle_now() -> str:
             "it lands as a read-only review._"
         )
     return (
-        "🔄 cycle triggered. If the PM has not decided in the last 6h it decides first "
-        "(the simulation rebalances with it), then the basket preview + approval — "
-        "~5–10 minutes."
+        "🔄 Cycle started. If the PM has not decided in the last 6 h it decides first; "
+        "the basket then comes to you for approval — about 5–10 minutes."
     )
 
 
@@ -2927,7 +2947,7 @@ def _cmd_regime() -> str:
             lines.append(f"_HMM state file unreadable: {e}_")
     else:
         lines.append(
-            "_HMM regime not classified yet — runs daily at 22:15 UTC. "
+            "_HMM regime not classified yet — runs weekdays at 18:15 New York. "
             "Returns blank if the runner hasn't completed a daily fit._"
         )
 
@@ -3439,7 +3459,9 @@ def _cmd_pick(args: list[str]) -> str:
         return "_pending cycle expired._"
     return (
         f"✅ /pick on `{short_id}` → {len(picked_symbols)} names: "
-        f"`{', '.join(picked_symbols)}`\nRebuilding basket…"
+        f"`{', '.join(picked_symbols)}`\nRebuilding basket…\n"
+        "_This replaces the Agent PM's weights with equal-weighted ladder picks "
+        "for this cycle only; you will see the revised basket before anything is sent._"
     )
 
 
@@ -3653,8 +3675,6 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return HELP_TEXT
     if cmd == "/status":
         return _cmd_status()
-    if cmd == "/heartbeat":
-        return _cmd_heartbeat()
     if cmd == "/positions":
         return _cmd_positions()
     if cmd == "/halt":
@@ -3671,8 +3691,6 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_exclusions()
     if cmd == "/holds":
         return _cmd_holds()
-    if cmd == "/k":
-        return _cmd_k(args)
     if cmd in ("/correlation", "/corr"):
         return _cmd_correlation()
     if cmd == "/memory":
@@ -3736,9 +3754,9 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_approve(args)
     if cmd == "/reject":
         return _cmd_reject()
-    if cmd == "/proposal":
+    if cmd in ("/proposal", "/plan"):
         return _cmd_proposal()
-    if cmd in ("/review", "/plan"):
+    if cmd == "/review":
         return _cmd_review()
     if cmd == "/candidates":
         # During an approval window, candidates means alternatives to the
@@ -3782,7 +3800,7 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
     if cmd in ("/fx", "/convert"):
         return _cmd_fx(args)
     # --- Reliability ---
-    if cmd == "/health":
+    if cmd in ("/health", "/heartbeat"):
         return _cmd_health()
     if cmd in ("/cycle", "/cycle_now"):
         return _cmd_cycle_now()
@@ -4290,13 +4308,9 @@ async def run_bot() -> None:
     logger.info("telegram bot starting (long-poll)")
     offset = _load_offset()
     async with httpx.AsyncClient() as client:
-        # Greet on startup so the operator knows the bot is up.
-        await _send(
-            client,
-            token,
-            chat_id,
-            "🤖 *Bot online.* Use /help for commands.",
-        )
+        # No "Bot online" greeting (2026-09-26): the runner's desk card
+        # already announces every restart, and a third message per deploy
+        # is noise. A dead bot shows as unanswered commands and in /health.
         while True:
             updates = await _get_updates(client, token, offset)
             for upd in updates:
