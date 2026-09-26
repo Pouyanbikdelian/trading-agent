@@ -7,7 +7,7 @@ OpenAI HTTP APIs, chosen by which key is present in the environment:
 * ``OPENAI_API_KEY``     -> OpenAI Chat Completions
 
 Model is ``AGENTS_MODEL`` (default Sonnet 5 for specialist research) or
-``AGENTS_MODEL_FRONTIER`` (default Opus 5 for decision nodes).  Adaptive
+``AGENTS_MODEL_FRONTIER`` (default Opus 5.5 for decision nodes).  Adaptive
 thinking is bounded: specialists use medium effort and the manager, PM,
 challenger and Curator use high effort.  Every response records model,
 effort, tokens and latency to a local telemetry journal — never its prompt
@@ -33,7 +33,14 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 # Frontier tier for the committee's decision nodes (challenger, manager).
 # Overridable via the AGENTS_MODEL_FRONTIER env var without a code change.
-FRONTIER_ANTHROPIC_MODEL = "claude-opus-5"
+# Opus 5.5 since 2026-09-26: cheaper than Opus 5 ($4/$20 vs $5/$25 per MTok)
+# and a drop-in for this client — adaptive thinking is always on (the
+# request already asks for it), effort is sent explicitly (5.5's default
+# fell to medium; ours stays AGENTS_FRONTIER_EFFORT), there is no
+# tool_choice, sampling parameter or prefill, and text is read by block
+# type so leading thinking blocks are skipped. AGENTS_MODEL_FRONTIER=
+# claude-opus-5 in .env rolls back without a deploy.
+FRONTIER_ANTHROPIC_MODEL = "claude-opus-5-5"
 FRONTIER_OPENAI_MODEL = "gpt-4o"
 DEFAULT_TIMEOUT_S = 60.0
 FRONTIER_TIMEOUT_S = 180.0
