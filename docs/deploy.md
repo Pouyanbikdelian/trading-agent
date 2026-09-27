@@ -481,6 +481,12 @@ Audit of every limit on what one agent hands another, and the fixes:
   scrub, hover), money map, investment clock since 2000 and radar; Economy
   tab with the seven FRED panels and a 5Y/10Y/ALL range. The regime box now
   reads the real playbook shape (it showed no colours on live data).
+- **Why SPY and rotation were empty on live**: SPY and the sector ETFs are
+  in no strategy universe, so the daily refresh (17:40 NY) only fetched
+  them 30 days back. It now keeps SPY, the 15 sector ETFs and 10
+  asset-class ETFs three years deep (`_add_reference_targets`). After a
+  deploy, `/refresh` in Telegram backfills at once; an empty rotation is
+  retried every 5 minutes instead of held for 2 hours.
 
 ## Troubleshooting
 

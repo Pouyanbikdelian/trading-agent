@@ -983,6 +983,9 @@ def market_block(data_dir: Path, market_watch: dict[str, Any] | None) -> dict[st
     from trading.data.cache import ParquetCache
 
     out: dict[str, Any] = {"components": [], "preview": True}
+    # SPY can sit under etf/ (CLI backfill) and equity/ (the daily refresh).
+    # Take the fresher one, then the longer: taking whichever came first let
+    # a stale or month-short copy blank the panel (2026-09-27).
     closes = None
     for ac in (AssetClass.ETF, AssetClass.EQUITY):
         try:
@@ -995,8 +998,18 @@ def market_block(data_dir: Path, market_watch: dict[str, Any] | None) -> dict[st
                 if "adj_close" in df and df["adj_close"].notna().sum() > 200
                 else "close"
             )
-            closes = df[col].dropna()
-            break
+            s = df[col].dropna()
+            if s.empty:
+                continue
+            try:
+                rank = (pd.Timestamp(s.index.max()).normalize(), len(s))
+                if closes is None or rank > (
+                    pd.Timestamp(closes.index.max()).normalize(),
+                    len(closes),
+                ):
+                    closes = s
+            except Exception:
+                closes = closes if closes is not None else s
     comps: list[dict[str, Any]] = []
 
     def _clip(x: float) -> float:

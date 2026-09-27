@@ -265,6 +265,33 @@ def _add_scorecard_backfill_targets(
         starts[symbol] = min(starts.get(symbol, default_start), earliest - timedelta(days=3))
 
 
+#: Three years of daily history for the reference series (see below).
+REFERENCE_LOOKBACK_DAYS = 1100
+#: Asset-class ETFs the rotation and macro views compare against.
+_REFERENCE_MACRO_ETFS = ("QQQ", "IWM", "EFA", "EEM", "TLT", "IEF", "LQD", "HYG", "GLD", "DBC")
+
+
+def _add_reference_targets(
+    symbols: set[str], starts: dict[str, datetime], *, end: datetime
+) -> None:
+    """Keep SPY, the sector ETFs and the asset-class ETFs at ~3 years deep.
+
+    Why (2026-09-27). No strategy universe contains them, so the daily
+    refresh only ever fetched SPY or a sector ETF as a scorecard subject,
+    starting 30 days back. The dashboard needs 210 SPY closes for the
+    200-day line and ~15 months per sector for the rotation graph; with a
+    month of history both panels said "not cached" on the live box. The
+    cache fills a missing prefix on request, so the first pass backfills
+    three years and every later pass is the usual one-day suffix.
+    """
+    from trading.runtime.news_watch import SECTOR_ETFS
+
+    start = end - timedelta(days=REFERENCE_LOOKBACK_DAYS)
+    for sym in ("SPY", *SECTOR_ETFS, *_REFERENCE_MACRO_ETFS):
+        symbols.add(sym)
+        starts[sym] = min(starts.get(sym, start), start)
+
+
 def _humanize_cron(expr: str, tz: str = "UTC") -> str:
     """Translate a 5-field cron string into something humans read.
 
@@ -2561,6 +2588,7 @@ class Runner:
             end = datetime.now(tz=timezone.utc)
             default_start = end - _td(days=30)
             starts = {symbol: default_start for symbol in symbols}
+            _add_reference_targets(symbols, starts, end=end)
             # Deliberately include subjects blocking the scorecard. The
             # configured universe can be all stocks while a committee made
             # calls on SPY, QQQ or a sector ETF; refreshing only the former

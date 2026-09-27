@@ -42,6 +42,7 @@ _MOM_WINDOW = 21
 _TRAIL_DAYS = 504  # ~2 years of daily trail for the scrubber
 _CROSS_LOOKBACK = 15  # sessions (~3 weeks) for quadrant-crossing alerts
 _CACHE_TTL_S = 2 * 3600.0
+_EMPTY_TTL_S = 300.0  # an empty result is retried after 5 minutes
 
 # One-line reading per destination quadrant, so a radar alert explains
 # itself instead of assuming the reader knows RRG folklore.
@@ -288,6 +289,32 @@ def _daily_utc(s: pd.Series) -> pd.Series:
     return out[~out.index.duplicated(keep="last")]
 
 
+def _cached_dollar_volume(data_dir: Path, sym: str, days: int = 90) -> float | None:
+    """Mean daily traded dollars over ``days`` sessions, from the cache.
+
+    The money map sizes tiles by this. It used to come only from the
+    network fallback, so a cache-only dashboard drew every tile the same
+    size (2026-09-27).
+    """
+    from trading.runtime.portfolio_stats import _ASSET_DIRS, cache_symbol_for_subject
+
+    cached = cache_symbol_for_subject(sym)
+    for sub in _ASSET_DIRS:
+        for fname in ("1D.parquet", "1d.parquet"):
+            p = Path(data_dir) / sub / cached / fname
+            if not p.exists():
+                continue
+            try:
+                df = pd.read_parquet(p, columns=["close", "volume"]).dropna().iloc[-days:]
+                if df.empty:
+                    return None
+                val = float((df["close"] * df["volume"]).mean())
+                return val if val > 0 else None
+            except Exception:
+                return None
+    return None
+
+
 def _load_history(
     data_dir: Path, *, allow_network: bool = False
 ) -> tuple[pd.DataFrame, dict[str, float]]:
@@ -307,6 +334,9 @@ def _load_history(
         s = _read_close(data_dir, sym)
         if s is not None and len(s) > 260:
             closes[sym] = s.iloc[-800:]
+            dv = _cached_dollar_volume(data_dir, sym)
+            if dv:
+                dollar_vol[sym] = dv
         else:
             missing.append(sym)
     if missing and allow_network:
@@ -344,7 +374,7 @@ def build_rotation(
     if (
         _cache["payload"] is not None
         and _cache["key"] == key
-        and now - float(_cache["t"]) < _CACHE_TTL_S
+        and now - float(_cache["t"]) < float(_cache.get("ttl", _CACHE_TTL_S))
     ):
         return dict(_cache["payload"])
 
@@ -361,7 +391,9 @@ def build_rotation(
     except Exception as e:
         logger.bind(component="rotation").warning(f"regime classify failed: {e}")
         out["regimes"] = {}
-    # Cache degraded results too. Otherwise an unavailable cache/provider
-    # repeats the same expensive attempt for every dashboard refresh.
-    _cache.update(t=now, payload=dict(out), key=key)
+    # Cache degraded results too, but briefly: with the network off a retry
+    # is a handful of parquet reads, and a two-hour hold kept the tab empty
+    # long after the price refresh had filled the cache (2026-09-27).
+    ttl = _CACHE_TTL_S if out.get("sectors") else _EMPTY_TTL_S
+    _cache.update(t=now, payload=dict(out), key=key, ttl=ttl)
     return out
