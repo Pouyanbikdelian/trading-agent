@@ -119,9 +119,14 @@ Order of operations:
       oldest-first), a note names any hidden; every instruction clause of a
       message is stored; 2,000-char text.
 - [x] Telegram cleanup (docs/deploy.md §19).
-- [ ] Telegram, next: one daily market-risk note instead of four advisors
-      (SPY/VIX hourly, HMM, options, macro); fold PM bridge / pins / holds
-      notes into the approval card; one post-trade summary (fills + book).
+- [x] Telegram, part 2 (docs/deploy.md §20): one daily market-risk note
+      (weekdays 16:20 NY) instead of four advisors; cycle side notes folded
+      into the approval card; one post-trade summary (fills + book).
+- [x] Dashboard: edge panel counts different stocks and flags small
+      samples; "ladder" row relabelled as the momentum ranking (it never
+      measured the PM); new Agent PM vs SPY panel with a luck check.
+- [ ] Deferred by Yan: gateway 2FA / reconnect fix; Flex query columns and
+      token for automatic history refresh.
 - [ ] After two cycles: rerun `scripts/llm_cost.py` for real Opus 5.5
       token use; check specialist latency against `AGENTS_TIMEOUT_S`.
 

@@ -454,6 +454,27 @@ Audit of every limit on what one agent hands another, and the fixes:
   broker alerts give phone actions (`/fx`, `/gateway`), not env vars or
   shell commands. Ops watch no longer flags the PM as dead mid-fortnight.
 
+## 20. Telegram part 2 and dashboard (2026-09-26)
+
+- **One market-risk note**, weekdays 16:20 New York (job `market_note`).
+  The SPY/VIX advisor, HMM regime, options and macro monitors still run
+  and write their state files; they no longer send their own messages.
+  The note gives an overall read (Calm / Watch / Elevated / Stressed), one
+  line per source, and marks what is new or cleared since the last note.
+  Still immediate: the intraday sentinel and an EXTREME SPY/VIX trigger.
+  `MARKET_ALERTS=instant` in `.env` restores the old per-monitor messages.
+- **Cycle messages**: holds, exclusions, cash trim, PM cap, mode, PM
+  bridge and pins are collected into the approval card (or the no-orders /
+  refusal / halted card) under "Notes". Leftovers are flushed once at the
+  end. Fills and "Portfolio after this cycle" arrive as one message.
+- **Dashboard, Portfolio tab**: new "Agent PM vs SPY" panel — lead since
+  start, weeks ahead, tracking error, and the chance a lead this size is
+  luck (one-sided t-test on daily excess returns; frictionless).
+- **Dashboard, edge panel**: rows named by who picked. The `ladder` row is
+  the momentum ranking's own top picks vs ranks below the cut, recorded
+  before the PM merge — it does not measure the PM (`pm_selection` does).
+  The sample is counted in different stocks and flagged under 20 / 50.
+
 ## Troubleshooting
 
 | Symptom                              | Likely cause                              | Action                                                          |

@@ -1093,6 +1093,17 @@ class Runner:
                 id="macro_monitor",
                 replace_existing=True,
             )
+            # One market-risk note a weekday, after the close and the daily
+            # P&L (16:10), from the four monitors' state files. The monitors
+            # themselves no longer message (runtime/market_note.py).
+            self._scheduler.add_job(
+                self._run_market_note_async,
+                CronTrigger(day_of_week="mon-fri", hour=16, minute=20, timezone="America/New_York"),
+                id="market_note",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
             # Style-rotation advisor: weekly, Sunday 12:00 UTC. Ranks the
             # registered strategies and proposes switching STRATEGY in .env
             # when the leader changes. Only scheduled while the mechanical
@@ -2726,6 +2737,27 @@ class Runner:
             self.alerts.info("\n".join(lines))
         except Exception:
             logger.bind(component="daily_summary").exception("daily summary failed")
+
+    async def _run_market_note_async(self) -> None:
+        """Weekday market-risk note: one message instead of four advisors."""
+        try:
+            from trading.runtime.market_note import compose_and_remember, instant_alerts
+
+            if instant_alerts():
+                return  # the monitors are messaging individually
+            temperature = None
+            with contextlib.suppress(Exception):
+                from trading.dashboard.cockpit import market_block
+
+                mw_path = settings.state_dir / "market_watch.json"
+                mw = json.loads(mw_path.read_text()) if mw_path.exists() else None
+                temperature = await asyncio.to_thread(market_block, settings.data_dir, mw)
+            text = await asyncio.to_thread(
+                compose_and_remember, settings.state_dir, temperature=temperature
+            )
+            self.alerts.info(text)
+        except Exception:
+            logger.bind(component="market_note").exception("market note failed")
 
     async def _run_macro_monitor_async(self) -> None:
         """Daily: rates/dollar/energy/BTC financial-conditions dial.

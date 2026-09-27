@@ -250,6 +250,14 @@ async def poll_and_alert(
 
 
 async def _send_telegram(text: str) -> bool:
+    # Deferred to the one daily market-risk note (runtime/market_note.py,
+    # 2026-09-26) unless MARKET_ALERTS=instant. The state file this
+    # monitor writes is what the note, the agents and the dashboard read.
+    from trading.runtime.market_note import instant_alerts
+
+    if not instant_alerts():
+        logger.info("macro_monitor: signal deferred to the daily market note")
+        return False
     try:
         from trading.bot.notifier import send_message
     except Exception:

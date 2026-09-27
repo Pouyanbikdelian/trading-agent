@@ -146,6 +146,15 @@ async def poll_and_alert(
 async def _send_telegram(text: str) -> bool:
     """Best-effort outbound. Lazily imported so the advisor can be unit-
     tested without Telegram configured."""
+    # Deferred to the one daily market-risk note (runtime/market_note.py,
+    # 2026-09-26) unless MARKET_ALERTS=instant. The state file this
+    # monitor writes is what the note, the agents and the dashboard read.
+    from trading.runtime.market_note import instant_alerts
+
+    # An EXTREME SPY/VIX trigger still interrupts immediately.
+    if not instant_alerts() and "EXTREME" not in text:
+        logger.info("advisor: signal deferred to the daily market note")
+        return False
     try:
         from trading.bot.notifier import send_message
     except Exception:

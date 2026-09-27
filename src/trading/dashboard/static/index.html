@@ -263,6 +263,12 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <h2>Agent PM <span class="sub" id="pmSub"></span></h2>
    <div id="pmBox"></div>
   </div>
+  <div class="panel c12">
+   <h2>Agent PM vs SPY <span class="sub">the simulation, every decision executed as made · USD</span></h2>
+   <div class="statgrid" id="pmVsStats"></div>
+   <div class="chart" id="pmVsChart"></div>
+   <div class="read" id="rdPmVs"></div>
+  </div>
 
  </div>
 </section>
@@ -704,7 +710,7 @@ function renderPortfolio(){
  const nearStop=rows.filter(r=>r.stop_distance_pct!=null&&r.stop_distance_pct<.05);
  $('rdHold').innerHTML=rows.length?`${rows.length} positions worth ${money(tot,ccy)}; <b>${pinN}</b> pinned (yours, never traded by the desk). Largest: <b>${esc(big.symbol)}</b> at ${pctU(big.weight,1)} of the account. Best open P&L ${esc(best.symbol)} ${pct(best.unrealized_pct,0)}, worst ${esc(worst.symbol)} ${pct(worst.unrealized_pct,0)}.`+
   (nearStop.length?` <span class="warn">Within 5% of a trailing stop: ${esc(nearStop.map(r=>r.symbol).join(', '))}.</span>`:' No position is near a trailing stop.'):'No positions.';
- renderAlloc(rows);renderCompare();renderWatch();renderPM();
+ renderAlloc(rows);renderCompare();renderWatch();renderPM();renderPmVsSpy();
 }
 function renderAlloc(rows){
  const r=D.risk||{};const bySec={};let tot=0;
@@ -1150,13 +1156,78 @@ function renderCommittee(){
    yAxis:Object.assign({type:'value',min:-1,max:1,interval:1},AX,{axisLabel:{color:C.muted,fontSize:10,formatter:(v)=>({'-1':'risk-off','0':'neutral','1':'risk-on'})[v]}}),
    series:[{type:'line',step:'middle',data:h.map(x=>map[x.posture]??0),showSymbol:true,symbolSize:5,lineStyle:{color:C.ice,width:1.6},itemStyle:{color:C.ice},areaStyle:{color:'rgba(124,196,255,.08)'}}]}),true);}
 }
+// Standard normal CDF (Abramowitz-Stegun 7.1.26), for the luck check.
+function normCdf(x){const t=1/(1+0.3275911*Math.abs(x)/Math.SQRT2);
+ const y=1-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*Math.exp(-x*x/2);
+ return x>=0?0.5*(1+y):0.5*(1-y);}
+// The PM simulation against SPY from the PM's own daily marks: the lead,
+// how often it beat SPY week by week, how far it wanders from SPY, and how
+// likely a lead this size is if the PM had no edge at all (2026-09-26).
+function pmVsSpySeries(){
+ const todayISO=new Date().toISOString().slice(0,10);const by={};
+ ((D.agent_pm||{}).history||[]).forEach(h=>{const t=String(h.t).slice(0,10);
+  if(t<todayISO&&h.equity>0&&h.spy>0)by[t]={t,pm:+h.equity,spy:+h.spy};});
+ return Object.values(by).sort((a,b)=>a.t<b.t?-1:1);}
+function pmVsSpyStats(rows){
+ if(rows.length<3)return null;
+ const ex=[];for(let i=1;i<rows.length;i++){ex.push((rows[i].pm/rows[i-1].pm)-(rows[i].spy/rows[i-1].spy));}
+ const n=ex.length,mean=ex.reduce((a,b)=>a+b,0)/n;
+ const sd=Math.sqrt(ex.reduce((a,b)=>a+(b-mean)**2,0)/Math.max(1,n-1));
+ const t=sd>0?mean/sd*Math.sqrt(n):0;
+ const weeks={};rows.forEach(r=>{const d=new Date(r.t+'T12:00:00Z');const mon=new Date(d-((d.getUTCDay()+6)%7)*864e5).toISOString().slice(0,10);weeks[mon]=weeks[mon]||[];weeks[mon].push(r);});
+ const wk=Object.keys(weeks).sort();let won=0,played=0;
+ for(let i=1;i<wk.length;i++){const a=weeks[wk[i-1]].slice(-1)[0],b=weeks[wk[i]].slice(-1)[0];played++;if(b.pm/a.pm>b.spy/a.spy)won++;}
+ const f=rows[0],l=rows[rows.length-1];
+ const pmR=l.pm/f.pm-1,spyR=l.spy/f.spy-1;
+ return {start:f.t,end:l.t,n,pmR,spyR,lead:pmR-spyR,won,played,te:sd*Math.sqrt(252),t,pLuck:1-normCdf(t),
+  daysNeeded:t>0&&t<2?Math.ceil(n*((2/t)**2-1)):0};}
+function renderPmVsSpy(){
+ const rows=pmVsSpySeries();const s=pmVsSpyStats(rows);const c=chart('pmVsChart');
+ if(!s){$('pmVsStats').innerHTML='';$('rdPmVs').textContent='Not enough daily marks yet.';if(c)c.clear();return;}
+ $('pmVsStats').innerHTML=[['PM',pct(s.pmR,1)],['SPY',pct(s.spyR,1)],['lead',pct(s.lead,1)],['weeks ahead',`${s.won} / ${s.played}`],['tracking error',pctU(s.te,0)+' /yr']]
+  .map(([l,v])=>`<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+ const lead=rows.map(r=>+(100*((r.pm/rows[0].pm)/(r.spy/rows[0].spy)-1)).toFixed(2));
+ if(c)c.setOption(base({tooltip:Object.assign({},TT,{valueFormatter:(v)=>v==null?'–':(v>=0?'+':'')+Number(v).toFixed(1)+'%'}),
+  grid:{left:44,right:14,top:16,bottom:28},
+  xAxis:Object.assign({type:'category',data:rows.map(r=>r.t),boundaryGap:false},AX),
+  yAxis:Object.assign({type:'value',scale:true},AX,{axisLabel:{color:C.muted,fontSize:10,fontFamily:'IBM Plex Mono',formatter:(v)=>v+'%'}}),
+  series:[{type:'line',name:'PM lead over SPY',showSymbol:false,data:lead,lineStyle:{width:1.8,color:C.violet},itemStyle:{color:C.violet},
+   areaStyle:{color:'rgba(167,139,250,.12)'},markLine:{silent:true,symbol:'none',lineStyle:{color:C.faint,type:'dotted'},label:{show:false},data:[{yAxis:0}]}}]}),true);
+ const luck=s.pLuck;
+ const verdict=s.lead<=0?'The PM is <b>not ahead</b> of SPY over this window.':
+  luck<0.05?'That lead would be <b>unusual by chance</b> (under 5%) — the first sign of a real edge, though three months is still short.':
+  `If the PM had no edge at all, a lead at least this large would still happen about <b>${Math.round(luck*100)}% of the time</b> — encouraging, not yet evidence.`;
+ const more=s.daysNeeded>0?` At this pace it needs roughly ${Math.max(1,Math.round(s.daysNeeded/21))} more month(s) of marks to clear the usual bar.`:'';
+ $('rdPmVs').innerHTML=`Since ${esc(s.start)}: PM <b>${pct(s.pmR,1)}</b>, SPY <b>${pct(s.spyR,1)}</b>, lead <b>${pct(s.lead,1)}</b>. It beat SPY in ${s.won} of ${s.played} weeks. `+
+  `It typically wanders ${pctU(s.te,0)} a year away from SPY, which is why a few points of lead over a few months is weak evidence. `+verdict+more+
+  ' <span class="faint">Frictionless simulation: fills at the decision price with a flat 0.10% cost; no spreads, FX or taxes.</span>';
+}
+// What each shadow-ledger origin actually compares (2026-09-26). "ladder"
+// is the MECHANICAL momentum cut — its own top picks vs the ranks below —
+// recorded before the PM merge, so it tests the ranking, not the PM.
+const EDGE_LABELS={
+ ladder:['Momentum ranking','its top picks vs ranks below the cut (not traded; tests the ranking)'],
+ pm_selection:['Agent PM','names it bought vs ladder names it passed on'],
+ committee_recommendation:['Committee','names it recommended vs the rest of the ladder'],
+};
+function edgeSample(x){const s=x.n_taken_symbols||0;
+ return s<20?['small',`only ${s} different stock${s===1?'':'s'}`]:s<50?['early',`${s} different stocks`]:['ok',`${s} different stocks`];}
 function renderEdge(){
  const e=D.edge||{};const rows=(e.by_origin_21d||[]);const r5={};(e.by_origin_5d||[]).forEach(x=>r5[x.origin]=x);
- const tot=rows.reduce((s2,x)=>s2+x.n_taken+x.n_passed,0);
- $('rdEdge').innerHTML=rows.length?`Positive spread = the names picked beat the names passed over. `+rows.slice(0,2).map(x=>`${esc(String(x.origin).replace(/_/g,' '))}: ${pct(x.spread,1)} over 21 days on ${x.n_taken} picks`).join('; ')+'. '+
-  (tot<30?'<b>Far too few names to conclude anything</b> — this needs months.':''):'Nothing graded yet: a pick needs 5 and 21 trading days to be scored.';
- $('edgeT').innerHTML='<thead><tr><th>Who picked</th><th>5d spread</th><th>21d spread</th><th>n picked / passed</th></tr></thead><tbody>'+
-  (rows.length?rows.map(x=>{const f=r5[x.origin]||{};return `<tr><td style="font-family:var(--sans)">${esc(String(x.origin).replace(/_/g,' '))}</td><td class="${cls(f.spread)}">${pct(f.spread,2)}</td><td class="${cls(x.spread)}">${pct(x.spread,2)}</td><td class="faint">${x.n_taken} / ${x.n_passed}</td></tr>`;}).join(''):'<tr><td colspan="4" class="empty">no graded shadow picks yet</td></tr>')+'</tbody>';
+ const label=(o)=>(EDGE_LABELS[o]||[String(o).replace(/_/g,' '),''])[0];
+ const what=(o)=>(EDGE_LABELS[o]||['',''])[1];
+ $('edgeT').innerHTML='<thead><tr><th>Who picked</th><th>5d spread</th><th>21d spread</th><th>picks · stocks</th></tr></thead><tbody>'+
+  (rows.length?rows.map(x=>{const f=r5[x.origin]||{};const [lvl,txt]=edgeSample(x);
+   return `<tr><td style="font-family:var(--sans)">${esc(label(x.origin))}<div class="faint" style="font-size:11px">${esc(what(x.origin))}</div></td>`+
+    `<td class="${cls(f.spread)}">${pct(f.spread,2)}</td><td class="${cls(x.spread)}">${pct(x.spread,2)}</td>`+
+    `<td class="faint">${x.n_taken} · ${x.n_taken_symbols||0}${lvl==='small'?' <span class="tag warn">small</span>':''}</td></tr>`;}).join(''):
+   '<tr><td colspan="4" class="empty">no graded shadow picks yet</td></tr>')+'</tbody>';
+ if(!rows.length){$('rdEdge').textContent='Nothing graded yet: a pick needs 5 and 21 trading days to be scored.';return;}
+ const bits=rows.slice(0,3).map(x=>{const [lvl,txt]=edgeSample(x);
+  return `<b>${esc(label(x.origin))}</b>: ${pct(x.spread,1)} over 21 days from ${x.n_taken} picks of ${txt}`+
+   (lvl==='small'?' — <b>small sample</b>, a hint rather than evidence':lvl==='early'?' — early, keep watching':'');});
+ $('rdEdge').innerHTML='Positive = the picks beat the names passed over, both measured against SPY. '+bits.join('; ')+
+  '. <span class="faint">The same names are logged every day, so picks repeat and their windows overlap: the number of different stocks is the honest sample size.</span>';
 }
 function renderLessons(){
  const L=D.lessons_v2||{};const ls=(L.lessons||[]);const cnt=L.counts||{};const need=L.promotion_net_required||3;

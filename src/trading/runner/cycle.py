@@ -98,6 +98,28 @@ def _looks_like_disconnect(exc: BaseException) -> bool:
     return any(m in text for m in _DISCONNECT_MARKERS)
 
 
+def _cycle_note(cycle: Any, text: str) -> None:
+    """Queue a side note for this cycle's card (see Cycle._run_public_cycle).
+
+    Module-level and attribute-tolerant on purpose: planning helpers are
+    also exercised on bare stand-in objects, which then alert directly.
+    """
+    notes = getattr(cycle, "_card_notes", None)
+    if not isinstance(notes, list):
+        cycle.alerts.info(text)
+        return
+    notes.append(str(text).strip())
+
+
+def _take_cycle_notes(cycle: Any) -> str:
+    """The queued notes as one block, emptied; '' when there are none."""
+    notes = getattr(cycle, "_card_notes", None)
+    if not isinstance(notes, list) or not notes:
+        return ""
+    cycle._card_notes = []
+    return "\n\n🗒 *Notes*\n" + "\n\n".join(notes)
+
+
 class CycleReport(BaseModel):
     """Outcome of a single cycle. Persisted by RunnerStore and returned to
     the caller / scheduler. Frozen so we can pass it around without aliasing."""
@@ -264,6 +286,12 @@ class Cycle:
         """Shared lifecycle persistence for executable and review cycles."""
         ts_start = self._clock()
         self._cycle_count += 1
+        # Side notes (PM bridge, caps, holds, pins, cash trim...) and the fill
+        # summary are buffered and delivered inside the card they belong to;
+        # whatever no card absorbed goes out once, at the end (2026-09-26 —
+        # a cycle used to send 8-12 separate messages).
+        self._card_notes: list[str] = []
+        self._fill_summary: str | None = None
         if not force_review:
             # A prior halted card is never an executable proposal. Remove it
             # before building a normal cycle so `/review` cannot keep showing
@@ -286,6 +314,7 @@ class Cycle:
                 error=f"{type(e).__name__}: {e}",
                 duration_ms=self._elapsed_ms(ts_start),
             )
+        self._flush_cycle_messages()
         # Always persist + heartbeat, even on error.
         try:
             self.runner_store.save_cycle(report)
@@ -308,6 +337,16 @@ class Cycle:
         return report
 
     # -------------------------------------------------------- internals
+
+    def _flush_cycle_messages(self) -> None:
+        """Send what no card absorbed: one message, not one per note."""
+        summary = getattr(self, "_fill_summary", None)
+        if summary:
+            self._fill_summary = None
+            self.alerts.info(summary)
+        rest = _take_cycle_notes(self)
+        if rest:
+            self.alerts.info("🗒 *Cycle notes*" + rest.split("🗒 *Notes*", 1)[1])
 
     def _effective_config(
         self, ts: datetime, *, announce_transition: bool = True
@@ -956,9 +995,10 @@ class Cycle:
                 logger.bind(component="cycle").info(
                     f"holds: dropped {len(dropped)} order(s) on pinned symbols: {names}"
                 )
-                self.alerts.info(
+                _cycle_note(
+                    self,
                     f"📌 Holds respected — skipped {len(dropped)} order(s) on "
-                    f"pinned position(s): `{names}`. Use `/unhold <sym>` to release."
+                    f"pinned position(s): `{names}`. Use `/unhold <sym>` to release.",
                 )
 
         # 8a-ter. Operator exclusions (/exclude SYM): a standing "never buy
@@ -977,9 +1017,10 @@ class Cycle:
                 logger.bind(component="cycle").info(
                     f"exclusions: dropped {len(banned)} buy order(s): {names}"
                 )
-                self.alerts.info(
+                _cycle_note(
+                    self,
                     f"🚫 Exclusions respected — skipped {len(banned)} buy order(s) on "
-                    f"excluded name(s): `{names}`. `/unexclude <sym>` to allow again."
+                    f"excluded name(s): `{names}`. `/unexclude <sym>` to allow again.",
                 )
 
         # 8b. (Removed 2026-09-26) The buying-power preflight compared the
@@ -1061,10 +1102,11 @@ class Cycle:
             n_picks = len(signal.target_weights)
             self.alerts.warning(
                 f"⛔ *Cycle plan: refused by risk manager*\n"
-                f"Strategy wanted {n_picks} names, but the basket was "
+                f"The plan had {n_picks} names, but the basket was "
                 f"rejected pre-submission:\n{reasons}\n\n"
                 "_No orders sent. Address the cause above (e.g. `/fx 500000 "
                 "CHF to USD` for margin breaches) and run `/cycle` again._"
+                + _take_cycle_notes(self)
             )
         # A trimmed basket is still a changed basket. The operator asked
         # for a book of one size and is about to be shown one of another,
@@ -1078,12 +1120,13 @@ class Cycle:
             if d.action == "scale" and str(d.reason).startswith(_CASH_FIT)
         ]
         if orders and trims:
-            self.alerts.info(
+            _cycle_note(
+                self,
                 "✂️ *Basket trimmed to available cash*\n"
                 + "\n".join(f"  • {t.split(':', 1)[1].strip()}" for t in trims)
                 + "\n_Sells are untouched; buys scale together so the "
                 "relative weights are unchanged. `/fx` into the short "
-                "currency to get the full size._"
+                "currency to get the full size._",
             )
 
         # An approval-enabled cycle publishes one self-contained decision
@@ -1420,7 +1463,9 @@ class Cycle:
         # poll /positions. Aggregated to keep noise low even when 8
         # names fill at once. Silent if no fills this cycle.
         if fills:
-            self._announce_fills(fills)
+            # Held for the portfolio card that _finish_cycle sends, so the
+            # operator gets one post-trade message, not two.
+            self._announce_fills(fills, defer=True)
 
         return self._finish_cycle(ts_start, decisions, orders_submitted, fills)
 
@@ -1734,7 +1779,9 @@ class Cycle:
             "*0 orders submitted. This review cannot be approved, queued or executed. "
             "After `/resume`, run a brand-new `/cycle` for a fresh executable approval.*"
         )
-        self.alerts.warning("\n\n".join(["\n".join(headline), rendered, "\n".join(notes)]))
+        self.alerts.warning(
+            "\n\n".join(["\n".join(headline), rendered, "\n".join(notes)]) + _take_cycle_notes(self)
+        )
 
         return CycleReport(
             ts=ts_start,
@@ -2217,7 +2264,7 @@ class Cycle:
                 "so the cycle intentionally did not manufacture a basket.\n\n"
                 f"{held_note}\n"
                 "_A fresh PM decision is required before a later cycle can propose "
-                "discretionary entries._"
+                "discretionary entries._" + _take_cycle_notes(self)
             )
             return
         self.alerts.info(
@@ -2232,6 +2279,7 @@ class Cycle:
                 if held
                 else held_note
             )
+            + _take_cycle_notes(self)
         )
 
     def _merge_pm_signal(
@@ -2355,9 +2403,10 @@ class Cycle:
                 f"PM capital cap binding: scaling the sleeve by {cap_scale:.3f} "
                 f"(cap {float(_cap_s.pm_sleeve_capital_usd):,.0f} USD)"
             )
-            self.alerts.info(
+            _cycle_note(
+                self,
                 f"💵 PM sleeve capped at {float(_cap_s.pm_sleeve_capital_usd):,.0f} USD "
-                f"— targets scaled by {cap_scale:.2f}"
+                f"— targets scaled by {cap_scale:.2f}",
             )
 
         mode_scale, mode_name = self._pm_mode_scale()
@@ -2370,9 +2419,10 @@ class Cycle:
                 f"mode {mode_name}: PM sleeve scaled by {mode_scale:.2f} "
                 f"({pm_gross:.1%} → {pm_gross * mode_scale:.1%} of account)"
             )
-            self.alerts.info(
+            _cycle_note(
+                self,
                 f"🛡 mode *{mode_name}* also applied to the PM sleeve: "
-                f"{pm_gross:.1%} → {pm_gross * mode_scale:.1%} of account"
+                f"{pm_gross:.1%} → {pm_gross * mode_scale:.1%} of account",
             )
 
         # Names the PM held last cycle and no longer wants. Absent is not
@@ -2403,7 +2453,7 @@ class Cycle:
             f"{len(result.signal.target_weights)} PM name(s), "
             f"combined gross {sum(merged.values()):.1%}"
         )
-        self.alerts.info(format_bridge_note(result))
+        _cycle_note(self, format_bridge_note(result))
 
         return signal.model_copy(
             update={
@@ -2887,7 +2937,7 @@ class Cycle:
             f"equity {account.equity:,.0f} -> {view.account.equity:,.0f}"
         )
         if announce:
-            self.alerts.info(view.note(account.base_currency))
+            _cycle_note(self, view.note(account.base_currency))
         return view.account
 
     def _fetch_account(self, ts: datetime) -> AccountSnapshot:
@@ -2903,7 +2953,7 @@ class Cycle:
         """
         return self.broker.get_account()
 
-    def _announce_fills(self, fills: list[Any]) -> None:
+    def _announce_fills(self, fills: list[Any], *, defer: bool = False) -> None:
         """Telegram a one-shot summary of fills received this cycle.
 
         One alert per cycle (never per fill), grouped by order, with
@@ -2994,7 +3044,11 @@ class Cycle:
             )
         parts.extend(summary_lines)
 
-        self.alerts.info("\n".join(parts))
+        text = "\n".join(parts)
+        if defer and hasattr(self, "_fill_summary"):
+            self._fill_summary = text
+            return
+        self.alerts.info(text)
 
     def _announce_post_cycle_state(self, snap: Any) -> None:
         """Telegram a full portfolio snapshot after a cycle that did work.
@@ -3023,7 +3077,12 @@ class Cycle:
                 )
 
         ccy = getattr(snap, "base_currency", None) or "USD"
-        lines: list[str] = ["📈 *Portfolio after this cycle*"]
+        lines: list[str] = []
+        fills_text = getattr(self, "_fill_summary", None)
+        if fills_text:
+            self._fill_summary = None
+            lines += [fills_text, ""]
+        lines.append("📈 *Portfolio after this cycle*")
         lines.append(f"  Equity: {ccy} {equity:,.2f}    Cash: {ccy} {total_cash:,.2f}")
 
         if per_ccy:
@@ -3332,7 +3391,7 @@ class Cycle:
         # chat history is refused rather than applied to this basket.
         from trading.bot.keyboards import approval_keyboard
 
-        self.alerts.info(prompt, buttons=approval_keyboard(cycle_id))
+        self.alerts.info(prompt + _take_cycle_notes(self), buttons=approval_keyboard(cycle_id))
 
         def _cleanup() -> None:
             try:
@@ -3871,7 +3930,9 @@ class Cycle:
         fills or grep order_store.
         """
         if not orders:
-            self.alerts.info("📊 cycle plan: no orders — portfolio already on target.")
+            self.alerts.info(
+                "📊 cycle plan: no orders — portfolio already on target." + _take_cycle_notes(self)
+            )
             return
 
         from trading.runner.approval_view import build_plan, format_trade_review
@@ -3881,6 +3942,7 @@ class Cycle:
                 {"plan": build_plan(orders, account, last_prices, fx_rates=fx_rates)},
                 heading="📊 *Cycle plan*",
             )
+            + _take_cycle_notes(self)
         )
 
     def _apply_operator_mode(
@@ -3905,9 +3967,10 @@ class Cycle:
             return weights  # fast path — no reshape
         adjusted = apply_mode(weights, prices, state.mode)
         if announce:
-            self.alerts.info(
+            _cycle_note(
+                self,
                 f"mode active: {state.mode.value} "
-                f"(set by {state.set_by} at {state.set_at[:19] if state.set_at else '?'})"
+                f"(set by {state.set_by} at {state.set_at[:19] if state.set_at else '?'})",
             )
         return adjusted
 
