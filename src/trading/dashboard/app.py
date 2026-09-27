@@ -233,6 +233,27 @@ def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:
     except Exception:
         out["market_watch"] = {}
 
+    # Macro dial + vol surface, read straight from the monitors' files with
+    # their poll time. The agents' context drops readings older than 36 h
+    # (right for a desk that must not reason on stale VIX), which blanked
+    # these panels every weekend; a chart can show the last reading and
+    # say how old it is instead.
+    monitors: dict[str, Any] = {}
+    for key, fname, field in (
+        ("macro", "macro_monitor.json", "readings"),
+        ("options", "options_monitor.json", "metrics"),
+    ):
+        try:
+            raw = json.loads((state_dir / fname).read_text())
+            monitors[key] = {
+                "values": raw.get(field) or {},
+                "as_of": raw.get("last_polled_at"),
+                "active": raw.get("active") or [],
+            }
+        except Exception:
+            monitors[key] = {}
+    out["monitors"] = monitors
+
     # Holdings + watchlist: 6 months of closes per symbol, normalized
     # client-side. Held names from the snapshot; extras from the static
     # config watchlist plus approval-gated operator overrides in state. The

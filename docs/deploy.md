@@ -474,6 +474,13 @@ Audit of every limit on what one agent hands another, and the fixes:
   the momentum ranking's own top picks vs ranks below the cut, recorded
   before the PM merge — it does not measure the PM (`pm_selection` does).
   The sample is counted in different stocks and flagged under 20 / 50.
+- **Restored 2026-09-27** (v2 had shrunk or dropped them): Macro tab with
+  the yield-curve, VIX-term, breadth and credit history charts, macro dial
+  and vol surface (last reading with its age, not blanked after 36 h);
+  Rotation tab with the animated relative-rotation graph (play, 3M/6M/1Y,
+  scrub, hover), money map, investment clock since 2000 and radar; Economy
+  tab with the seven FRED panels and a 5Y/10Y/ALL range. The regime box now
+  reads the real playbook shape (it showed no colours on live data).
 
 ## Troubleshooting
 

@@ -148,6 +148,39 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 .comp{display:grid;grid-template-columns:minmax(120px,1fr) 2fr auto;gap:10px;align-items:center;font-size:12.5px;padding:5px 0}
 .comp .track{position:relative;height:8px;border-radius:4px;background:linear-gradient(90deg,rgba(61,220,151,.35),rgba(124,196,255,.15) 50%,rgba(255,107,129,.35))}
 .comp .pin{position:absolute;top:-4px;width:4px;height:16px;border-radius:2px;background:var(--text)}
+/* macro + economy charts (restored 2026-09-27 from the v1 Macro / Economy tabs) */
+.chart.m{height:clamp(200px,calc(46vh - 150px),340px)}
+.chart.ec{height:clamp(280px,46vh,440px)}
+.tiles{display:flex;gap:20px;flex-wrap:wrap;margin:0 0 8px}
+.tiles .t1 b{font:500 19px var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
+.tiles .t1 b.pos{color:var(--up)}.tiles .t1 b.neg{color:var(--down)}.tiles .t1 b.warn{color:var(--warn)}
+.tiles .t1 span{display:block;font-size:11.5px;color:var(--muted);margin-top:1px}
+.read.ok{border-left-color:var(--up)}.read.warn{border-left-color:var(--warn)}.read.neg{border-left-color:var(--down)}
+/* rotation (restored 2026-09-27 from the v1 Rotation tab) */
+.rrgbar{display:flex;align-items:center;gap:12px;margin:2px 0 10px;flex-wrap:wrap}
+.playbtn{font:600 12px var(--display);letter-spacing:.08em;text-transform:uppercase;color:var(--up);background:rgba(61,220,151,.1);border:1px solid var(--up);border-radius:999px;padding:5px 14px;cursor:pointer}
+.playbtn:hover{background:rgba(61,220,151,.22)}
+#rrgScrub{flex:1;min-width:140px;accent-color:var(--up)}
+.rrgbox{position:relative;height:min(62vh,560px);min-height:380px;width:100%;border-radius:8px;overflow:hidden;background:radial-gradient(120% 120% at 50% 45%,#0c1428 0%,#070b16 100%)}
+.rrgbox canvas{position:absolute;inset:0;width:100%;height:100%}
+.tip{position:absolute;pointer-events:none;display:none;background:rgba(11,18,36,.96);border:1px solid var(--line-2);border-radius:8px;padding:8px 11px;font-size:12px;line-height:1.5;z-index:5;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+.tmap{position:relative;height:min(46vh,420px);min-height:300px;border-radius:8px;overflow:hidden}
+.tmap .tile2{position:absolute;overflow:hidden;border:1px solid rgba(8,13,26,.9);border-radius:5px;display:flex;flex-direction:column;justify-content:center;align-items:center;font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
+.tmap .tile2:hover{filter:brightness(1.25);z-index:2}
+.tmap .tile2 b{font-size:13px;letter-spacing:.03em}.tmap .tile2 span{font-size:11px;opacity:.85}.tmap .tile2 i{font:normal 10px var(--sans);opacity:.65}
+.regribbon{display:flex;height:26px;border-radius:6px;overflow:hidden;margin:10px 0 2px}
+.regribbon i{flex:1;min-width:1px}
+.raxis{display:flex;justify-content:space-between;font:10.5px var(--mono);color:var(--muted);margin-bottom:8px}
+.pbrow{display:flex;gap:8px;align-items:baseline;margin:4px 0;font-size:12.5px;flex-wrap:wrap}
+.pbrow.now{background:rgba(167,139,250,.09);border-radius:6px;padding:3px 6px;margin-left:-6px}
+.pbdot{width:9px;height:9px;border-radius:3px;flex:none;position:relative;top:1px}
+.radrow{margin:7px 0;font-size:13px;line-height:1.45;padding:7px 10px;border-radius:8px;background:var(--ground-2);border:1px solid var(--line)}
+.radrow .rd{display:block;color:var(--muted);font-size:11.5px;margin-top:3px}
+.qboard{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.qcell{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px}
+.qcell h3{margin:0 0 5px;font:600 10.5px var(--display);letter-spacing:.1em;text-transform:uppercase}
+.qcell .qs{display:flex;justify-content:space-between;margin:2px 0;font-family:var(--mono)}
+.qcell .qs .dq{color:var(--muted);font-size:10.5px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -161,7 +194,9 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 <nav class="tabs" id="tabs">
  <button data-tab="cockpit" class="on">Cockpit</button>
  <button data-tab="portfolio">Portfolio</button>
- <button data-tab="market">Market</button>
+ <button data-tab="market">Macro</button>
+ <button data-tab="rotation">Rotation</button>
+ <button data-tab="economy">Economy</button>
  <button data-tab="agents">Agents</button>
 </nav>
 <main class="wrap">
@@ -293,26 +328,64 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <div id="regBox"></div>
   </div>
 
-  <div class="panel c8">
-   <h2>Sector rotation <span class="sub">relative strength vs relative momentum · drag to replay</span><span class="right" id="rrgTrail"></span></h2>
-   <div class="chart tall" id="rrgChart"></div>
-   <input type="range" class="slider" id="rrgSlider" aria-label="Rotation replay date">
+  <div class="panel c4"><h2>Yield curve <span class="sub">10y − 3m</span></h2><div class="tiles" id="curveTile"></div><div class="chart m" id="curveCh"></div><div class="read" id="curveInt"></div></div>
+  <div class="panel c4"><h2>VIX term structure</h2><div class="tiles" id="vixTile"></div><div class="chart m" id="vixCh"></div><div class="read" id="vixInt"></div></div>
+  <div class="panel c4"><h2>Breadth <span class="sub">% of members above their average</span></h2><div class="tiles" id="brTile"></div><div class="chart m" id="brCh"></div><div class="read" id="brInt"></div></div>
+  <div class="panel c4"><h2>Credit &amp; risk appetite <span class="sub">1y base = 100</span></h2><div class="tiles" id="ratioTile"></div><div class="chart m" id="ratioCh"></div><div class="read" id="ratioInt"></div></div>
+  <div class="panel c4"><h2>Macro dial <span class="sub">z-scores vs normal</span></h2><div class="tiles" id="macroDial"></div><div class="chart m" id="macroCh"></div><div class="read" id="macroInt"></div></div>
+  <div class="panel c4"><h2>Vol surface <span class="sub">SPY options</span></h2><div class="tiles" id="volTile"></div><div class="read" id="volInt"></div></div>
+ </div>
+</section>
+
+<!-- ================= ROTATION ================= -->
+<section class="tab" id="tab-rotation">
+ <div class="grid">
+  <div class="panel c12">
+   <h2>Relative rotation <span class="sub">sectors vs SPY · x: relative strength · y: momentum of that strength · sectors orbit clockwise</span></h2>
+   <div class="rrgbar" id="rrgBar">
+    <button id="rrgPlay" class="playbtn">▶ play</button>
+    <span id="rrgRange" style="display:inline-flex;gap:4px"></span>
+    <input id="rrgScrub" type="range" min="0" max="1" value="1" step="1" aria-label="Rotation replay date">
+    <span id="rrgDate" class="mono muted" style="font-size:12px"></span>
+   </div>
+   <div class="rrgbox" id="rrgBox"><canvas id="rrg"></canvas><div id="rrgTip" class="tip"></div></div>
+   <div class="empty" id="rrgEmpty" hidden>no rotation data yet — needs about 15 months of sector-ETF closes in the cache</div>
    <div class="read" id="rrgNote"></div>
+  </div>
+  <div class="panel c8">
+   <h2>Money map <span class="sub">tile = 90-day traded dollars · colour = 1M vs SPY</span></h2>
+   <div id="treemap" class="tmap"></div>
   </div>
   <div class="panel c4">
    <h2>Sector leadership <span class="sub">vs SPY, percentage points</span></h2>
    <div class="chart tall" id="heatChart"></div>
    <div class="read" id="rdHeat"></div>
   </div>
+  <div class="panel c6">
+   <h2>Macro regime <span class="sub">investment clock since 2000</span></h2>
+   <div id="regNow"></div><div id="regRibbon" class="regribbon"></div><div id="regAxis" class="raxis"></div>
+   <div id="playbook"></div>
+   <div class="note">Classic playbook per regime — folklore with a good track record, not a backtest.</div>
+  </div>
+  <div class="panel c6">
+   <h2>Rotation radar <span class="sub">early signals</span></h2>
+   <div id="radar"></div>
+   <div class="read" id="radarInt"></div>
+  </div>
+ </div>
+</section>
 
-  <div class="panel c12">
-   <h2>Macro gauges</h2>
-   <div class="grid" id="macroTiles" style="gap:10px"></div>
-  </div>
-  <div class="panel c12">
-   <h2>Economy <span class="sub">FRED, latest vs three readings ago</span></h2>
-   <div class="tscroll"><table class="t" id="econT"></table></div>
-  </div>
+<!-- ================= ECONOMY ================= -->
+<section class="tab" id="tab-economy">
+ <div class="grid">
+  <div class="panel c12" style="padding-block:10px"><h2 style="margin:0">Economy <span class="sub">FRED, monthly</span><span class="right" id="ecRange"></span></h2></div>
+  <div class="panel c12"><h2>Inflation vs policy</h2><div class="tiles" id="ecInfT"></div><div class="chart ec" id="ecInf"></div></div>
+  <div class="panel c12"><h2>Inflation complex <span class="sub">the five measures</span></h2><div class="tiles" id="ecIcxT"></div><div class="chart ec" id="ecIcx"></div></div>
+  <div class="panel c12"><h2>Policy rates <span class="sub">US · ECB · Japan</span></h2><div class="tiles" id="ecPolT"></div><div class="chart ec" id="ecPol"></div></div>
+  <div class="panel c12"><h2>Housing</h2><div class="tiles" id="ecHouT"></div><div class="chart ec" id="ecHou"></div></div>
+  <div class="panel c12"><h2>Labor</h2><div class="tiles" id="ecLabT"></div><div class="chart ec" id="ecLab"></div></div>
+  <div class="panel c12"><h2>Credit &amp; liquidity</h2><div class="tiles" id="ecCrT"></div><div class="chart ec" id="ecCr"></div></div>
+  <div class="panel c12"><h2>Consumer</h2><div class="tiles" id="ecCoT"></div><div class="chart ec" id="ecCo"></div></div>
  </div>
 </section>
 
@@ -499,8 +572,8 @@ const rangeButtons=(id,cur,on)=>{const el=$(id);if(!el)return;el.innerHTML=RANGE
 
 // ------------------------------------------------------------------ state
 let D={};
-const UI={tab:'cockpit',perfCcy:null,raceRange:'all',raceOff:new Set(),eqRange:'1y',cmpRange:'6m',cmpSel:null,rrgIdx:null,rrgTrail:8,holdSort:'value_base',holdDir:-1};
-try{const h=location.hash.replace('#','');if(['cockpit','portfolio','market','agents'].includes(h))UI.tab=h;}catch(e){}
+const UI={tab:'cockpit',perfCcy:null,raceRange:'all',raceOff:new Set(),eqRange:'1y',cmpRange:'6m',cmpSel:null,ecRange:'all',holdSort:'value_base',holdDir:-1};
+try{const h=location.hash.replace('#','');if(h==='macro')UI.tab='market';else if(['cockpit','portfolio','market','rotation','economy','agents'].includes(h))UI.tab=h;}catch(e){}
 
 function setTab(t){UI.tab=t;
  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));
@@ -981,7 +1054,7 @@ function renderMovers(){
 }
 
 // ------------------------------------------------------------------- market
-function renderMarket(){renderTemp();renderSpy();renderRegime();renderRRG();renderHeat();renderMacro();renderEcon();}
+function renderMarket(){renderTemp();renderSpy();renderRegime();renderMacro();}
 function renderTemp(){
  const m=D.market||{};const c=chart('tempGauge');
  const t=m.temperature;
@@ -1022,45 +1095,15 @@ function renderSpy(){
    {name:'200-day',type:'line',showSymbol:false,data:ma.slice(from),lineStyle:{width:1.2,color:C.warn,type:'dashed'}}]}),true);
 }
 function renderRegime(){
- const g=(D.rotation||{}).regimes||{};const cur=g.current||{};const hmm=null;
+ // Regime shape is rotation.classify_regimes(): r = "hot_hiking" etc., playbook = {r: {label, color, favors}}.
+ // (Before 2026-09-27 this read a sample-data shape, so live showed no colours and no playbook.)
+ const g=(D.rotation||{}).regimes||{};const cur=g.current||{};const pb=g.playbook||{};
  $('regSub').textContent=cur.since?('since '+cur.since):'';
- if(!cur.label){$('regBox').innerHTML='<div class="empty">no regime classification cached</div>';return;}
- const pb=g.playbook||{};const play=(pb[cur.r]||pb[cur.label]||[]);
- $('regBox').innerHTML=`<div class="kpi"><div class="value" style="font-size:22px">${esc(cur.label)}</div><div class="delta muted">CPI ${pct(cur.cpi_yoy!=null?cur.cpi_yoy/100:null,1)} y/y · Fed funds ${cur.ff_chg_6m!=null?(cur.ff_chg_6m>=0?'+':'')+Number(cur.ff_chg_6m).toFixed(2)+' pp':'–'} over 6m</div></div>`+
-  (Array.isArray(play)&&play.length?`<div class="note">Historically leads: ${esc(play.join(', '))}</div>`:(typeof play==='string'?`<div class="note">${esc(play)}</div>`:''))+
-  `<div style="display:flex;gap:2px;margin-top:10px">${(g.history||[]).slice(-72).map(h=>`<span title="${esc(h.t)}" style="flex:1;height:14px;border-radius:2px;background:${['#3b6d99','#3ddc97','#f6b94d','#ff6b81'][(+h.r)%4]}"></span>`).join('')}</div><div class="note">last 6 years by month</div>`;
-}
-function rrgDates(){const secs=((D.rotation||{}).sectors||[]);const ds=new Set();secs.forEach(s=>(s.trail||[]).forEach(p=>ds.add(p.t)));return [...ds].sort();}
-function renderRRG(){
- const secs=((D.rotation||{}).sectors||[]);const c=chart('rrgChart');if(!c)return;
- const dates=rrgDates();const sl=$('rrgSlider');
- if(!secs.length||!dates.length){c.clear();c.setOption({title:{text:'rotation not computed yet',left:'center',top:'middle',textStyle:{color:C.muted,fontSize:13,fontWeight:400}}});sl.hidden=true;return;}
- sl.hidden=false;sl.min=0;sl.max=dates.length-1;if(UI.rrgIdx==null||UI.rrgIdx>dates.length-1)UI.rrgIdx=dates.length-1;sl.value=UI.rrgIdx;
- sl.oninput=()=>{UI.rrgIdx=+sl.value;renderRRG();};
- $('rrgTrail').innerHTML=[4,8,16].map(n=>`<button class="chipbtn${UI.rrgTrail===n?' on':''}" data-n="${n}">${n}W</button>`).join('');
- $('rrgTrail').querySelectorAll('button').forEach(b=>b.onclick=()=>{UI.rrgTrail=+b.dataset.n;renderRRG();});
- const at=dates[UI.rrgIdx];const step=5;
- let xs=[],ys=[];const series=[];
- secs.forEach((s,i)=>{const tr=(s.trail||[]).filter(p=>p.t<=at);const pick=[];for(let k=tr.length-1;k>=0&&pick.length<UI.rrgTrail;k-=step)pick.unshift(tr[k]);
-  if(!pick.length)return;const col=PALETTE[i%PALETTE.length];pick.forEach(p=>{xs.push(p.x);ys.push(p.y);});
-  series.push({type:'line',name:s.sym,data:pick.map(p=>[p.x,p.y]),smooth:.3,showSymbol:true,symbolSize:(v,pr)=>pr.dataIndex===pick.length-1?11:4,
-   lineStyle:{color:col,width:1.5,opacity:.8},itemStyle:{color:col},
-   label:{show:true,formatter:(p)=>p.dataIndex===pick.length-1?s.sym:'',position:'right',color:C.text,fontSize:11,fontFamily:'IBM Plex Mono'},
-   tooltip:{formatter:(p)=>`${esc(s.name||s.sym)}<br>RS ${p.value[0].toFixed(1)} · momentum ${p.value[1].toFixed(1)}<br>1M ${pct((s.rel_1m??0)/100,1)} vs SPY`}});});
- const pad=1.2;const xr=[Math.min(98,...xs)-pad,Math.max(102,...xs)+pad],yr=[Math.min(98,...ys)-pad,Math.max(102,...ys)+pad];
- const q=(x0,x1,y0,y1,col,label)=>[{xAxis:x0,yAxis:y0,itemStyle:{color:col},label:{show:true,position:'insideTopLeft',color:C.muted,fontSize:10,fontFamily:'Chakra Petch',formatter:label}},{xAxis:x1,yAxis:y1}];
- series.push({type:'scatter',data:[],silent:true,markArea:{silent:true,data:[
-  q(100,xr[1],100,yr[1],'rgba(61,220,151,.07)','LEADING'),q(100,xr[1],yr[0],100,'rgba(246,185,77,.07)','WEAKENING'),
-  q(xr[0],100,yr[0],100,'rgba(255,107,129,.07)','LAGGING'),q(xr[0],100,100,yr[1],'rgba(124,196,255,.07)','IMPROVING')]},
-  markLine:{silent:true,symbol:'none',lineStyle:{color:C['line-2']},label:{show:false},data:[{xAxis:100},{yAxis:100}]}});
- c.setOption({backgroundColor:'transparent',animationDurationUpdate:250,tooltip:{trigger:'item',backgroundColor:C.panel,borderColor:C['line-2'],textStyle:{color:C.text,fontSize:12}},grid:{left:44,right:36,top:16,bottom:34},
-  xAxis:Object.assign({type:'value',min:+xr[0].toFixed(1),max:+xr[1].toFixed(1),name:'relative strength →',nameLocation:'middle',nameGap:22,nameTextStyle:{color:C.muted,fontSize:10}},AX),
-  yAxis:Object.assign({type:'value',min:+yr[0].toFixed(1),max:+yr[1].toFixed(1),name:'momentum',nameTextStyle:{color:C.muted,fontSize:10}},AX),series},true);
- const inQ=(k)=>secs.filter(s=>s.quadrant===k).map(s=>s.sym);
- $('rrgNote').innerHTML=`As of ${esc(at)} — <b>leading</b> (strong and gaining): ${esc(inQ('leading').join(', ')||'none')}; <b>weakening</b> (strong, losing momentum): ${esc(inQ('weakening').join(', ')||'none')}; `+
-  `<b>lagging</b>: ${esc(inQ('lagging').join(', ')||'none')}; <b>improving</b> (weak, gaining): ${esc(inQ('improving').join(', ')||'none')}. `+
-  `Sectors normally circle <b>clockwise</b> — improving → leading → weakening → lagging → improving. A tail hooking back the other way (e.g. weakening straight back to leading) is a real, common event: renewed buying before the rotation completed.`+
-  ((D.rotation||{}).alerts||[]).slice(0,2).map(a=>' '+esc(stripMd(a.msg))+'.').join('');
+ if(!cur.label){$('regBox').innerHTML='<div class="empty">no regime classification yet — needs the FRED history</div>';return;}
+ const play=pb[cur.r]||{};const favors=(play.favors||[]).map(f=>String(f).replace(/_/g,' '));
+ $('regBox').innerHTML=`<div class="kpi"><div class="value" style="font-size:22px;color:${esc(play.color||C.text)}">${esc(cur.label)}</div><div class="delta muted">CPI ${cur.cpi_yoy!=null?Number(cur.cpi_yoy).toFixed(1)+'%':'–'} y/y · Fed funds ${cur.ff_chg_6m!=null?(cur.ff_chg_6m>=0?'+':'')+Number(cur.ff_chg_6m).toFixed(2)+' pp':'–'} over 6m</div></div>`+
+  (favors.length?`<div class="note">Classically leads: ${esc(favors.join(', '))}</div>`:'')+
+  `<div style="display:flex;gap:2px;margin-top:10px">${(g.history||[]).slice(-72).map(h=>`<span title="${esc(h.t)} · ${esc((pb[h.r]||{}).label||h.r)}" style="flex:1;height:14px;border-radius:2px;background:${esc((pb[h.r]||{}).color||C['line-2'])}"></span>`).join('')}</div><div class="note">last 6 years by month · the full clock since 2000 is on the Rotation tab</div>`;
 }
 function renderHeat(){
  const secs=((D.rotation||{}).sectors||[]).slice().sort((a,b)=>(b.rel_3m??0)-(a.rel_3m??0));const c=chart('heatChart');if(!c)return;
@@ -1077,23 +1120,250 @@ function renderHeat(){
  $('rdHeat').innerHTML=`Over 3 months <b>${esc(top.join(', '))}</b> led and <b>${esc(bot.join(', '))}</b> trailed SPY. `+
   (turning.length?`Turning up this month after a weak quarter: <b>${esc(turning.join(', '))}</b>. `:'')+(fading.length?`Fading this month after a strong quarter: <b>${esc(fading.join(', '))}</b>.`:'');
 }
+// ----------------------------------------------------- macro (restored)
+// The v1 Macro tab had four full history charts, the macro dial and the
+// vol surface, each with a plain-language reading. v2 shrank them to
+// sparkline tiles, which hid exactly the shape (a curve inverting, VIX
+// flipping into backwardation, breadth narrowing) that made them useful.
+// Restored 2026-09-27 at Yan's request.
+const tiles=(id,arr,empty)=>{const el=$(id);if(!el)return;const a=(arr||[]).filter(Boolean);
+ el.innerHTML=a.length?a.map(([v,l,c])=>`<div class="t1"><b class="${c||''}">${v}</b><span>${esc(l)}</span></div>`).join(''):`<span class="muted">${esc(empty||'no reading yet')}</span>`;};
+const interp=(id,c,txt)=>{const e=$(id);if(!e)return;e.className='read'+(c?' '+c:'');e.innerHTML=txt||'';e.hidden=!txt;};
+function mline(id,labels,series,opt){const c=chart(id);if(!c)return;opt=opt||{};
+ if(!labels.length||!series.some(s=>s.data.some(v=>v!=null))){c.clear();c.setOption({title:{text:opt.empty||'no readings yet',left:'center',top:'middle',textStyle:{color:C.muted,fontSize:12,fontWeight:400}}});return;}
+ const two=series.some(s=>s.axis===1);const dp=opt.dp??2;
+ c.setOption(base({legend:{top:0,left:0,itemWidth:14,itemHeight:3,textStyle:{color:C['text-2'],fontSize:11}},
+  grid:{left:46,right:two?52:14,top:30,bottom:26},
+  tooltip:Object.assign({},TT,{valueFormatter:(v)=>v==null||!isFinite(v)?'–':Number(v).toFixed(dp)}),
+  xAxis:Object.assign({},AX,{type:'category',data:labels,boundaryGap:false}),
+  yAxis:[Object.assign({},AX,{type:'value',scale:true})].concat(two?[Object.assign({},AX,{type:'value',scale:true,splitLine:{show:false}})]:[]),
+  series:series.map(s=>({name:s.name,type:'line',showSymbol:false,connectNulls:true,yAxisIndex:s.axis||0,data:s.data,
+   lineStyle:{width:1.6,color:s.color},itemStyle:{color:s.color},
+   markLine:s.ref!=null?{silent:true,symbol:'none',lineStyle:{color:C['line-2'],type:'dashed'},label:{show:false},data:[{yAxis:s.ref}]}:undefined}))}),true);}
+const monAge=(m)=>{if(!m||!m.as_of)return '';const h=(Date.now()-new Date(m.as_of).getTime())/36e5;
+ return isFinite(h)?(h>36?` · last reading ${ago(m.as_of)} (market closed or monitor idle)`:` · ${ago(m.as_of)}`):'';};
 function renderMacro(){
- const mw=D.market_watch||{};const h=(mw.history||[]).slice(-260);const L=mw.latest||{};
- const tiles=[
-  ['curve_10y3m','Yield curve 10y−3m',v=>Number(v).toFixed(2)+' pp',v=>v<0?'inverted — recession signal historically':'positively sloped'],
-  ['vix_ratio','VIX ÷ VIX3M',v=>Number(v).toFixed(2),v=>v>1?'inverted term structure: stress':v<.85?'complacent':'normal contango'],
-  ['pct_above_200','Members above 200-day',v=>pctU(v,0),v=>v>.75?'broad, possibly stretched':v<.35?'washed out':'mixed breadth'],
-  ['hyg_ief','Credit HYG÷IEF (1y = 100)',v=>Number(v).toFixed(1),v=>v<97?'credit weakening':'credit healthy'],
-  ['vix','VIX',v=>Number(v).toFixed(1),v=>v>25?'elevated fear':v<14?'very calm':'normal'],
-  ['qqq_spy','Growth QQQ÷SPY (1y = 100)',v=>Number(v).toFixed(1),v=>v>100?'growth leading':'growth lagging']];
- $('macroTiles').innerHTML=tiles.map(([k,label,f,read])=>{const vals=h.map(r=>r[k]).filter(v=>v!=null);const v=L[k];
-  return `<div class="c4"><div class="panel" style="background:var(--ground-2)"><div class="kpi"><div class="label">${esc(label)}</div><div class="value" style="font-size:20px">${v==null?'–':f(v)}</div><div class="delta muted">${v==null?'no reading':esc(read(v))}</div></div><div style="margin-top:6px">${spark(vals,300,34,C.ice)}</div></div></div>`;}).join('');
+ const mw=D.market_watch||{};const mh=mw.history||[];const L=mw.latest||{};
+ const lab=mh.map(h=>String(h.t).slice(0,10));
+ const col=(k,m)=>mh.map(h=>h[k]==null||!isFinite(h[k])?null:+(m?h[k]*m:h[k]).toFixed(4));
+ const f=(v,d=2)=>v==null||!isFinite(v)?'–':Number(v).toFixed(d);
+ const none='the collector runs daily after the close — first reading tonight';
+ const cur=L.curve_10y3m,vr=L.vix_ratio,vx=L.vix,b50=L.pct_above_50,b200=L.pct_above_200,hy=L.hyg_ief;
+ tiles('curveTile',cur==null?[]:[[f(cur)+' pp',(cur<0?'INVERTED':'spread')+' · 10y '+f(L.y_10y)+'% / 3m '+f(L.y_3m)+'%',cur<0?'neg':cur<0.3?'warn':'pos']],none);
+ mline('curveCh',lab,[{name:'10y − 3m',data:col('curve_10y3m'),color:C.ice,ref:0}],{empty:none});
+ tiles('vixTile',vx==null?[]:[[f(vx,1),'VIX'],[f(vr,2),'VIX ÷ VIX3M'+(vr>1?' · backwardation':''),vr>1?'neg':'pos']],none);
+ mline('vixCh',lab,[{name:'VIX',data:col('vix'),color:C.warn},{name:'VIX3M',data:col('vix3m'),color:C.muted}],{dp:1,empty:none});
+ tiles('brTile',b50==null&&b200==null?[]:[[pctU(b50,0),'above 50-day'],[pctU(b200,0),'above 200-day']],none);
+ mline('brCh',lab,[{name:'% above 50-day',data:col('pct_above_50',100),color:C.up},{name:'% above 200-day',data:col('pct_above_200',100),color:C.ice,ref:50}],{dp:0,empty:none});
+ tiles('ratioTile',['hyg_ief','spy_tlt','qqq_spy','gld_dbc'].filter(k=>L[k]!=null).map(k=>[f(L[k],1),k.replace('_','/').toUpperCase()]),none);
+ mline('ratioCh',lab,[{name:'HYG/IEF credit',data:col('hyg_ief'),color:C.down,ref:100},{name:'SPY/TLT',data:col('spy_tlt'),color:C.up},{name:'QQQ/SPY',data:col('qqq_spy'),color:C.ice}],{dp:1,empty:none});
+ interp('curveInt',cur==null?'':cur<0?'neg':cur<0.3?'warn':'ok',cur==null?'':
+  cur<0?'<b>Inverted</b> — short rates above long. Has preceded nearly every US recession by 6–18 months. Risk-off bias.'
+  :cur<0.3?'<b>Nearly flat</b> — a late-cycle shape. The bond market is unsure; watch for inversion.'
+  :'<b>Positively sloped</b> — no recession signal from the bond market. Normal regime.');
+ interp('vixInt',vr==null?'':vr>1?'neg':vx>25?'warn':'ok',vr==null?'':
+  vr>1?'<b>Backwardation</b> — near-term fear above 3-month. A stress regime: the market pays up for immediate protection.'
+  :vx>25?'<b>Elevated VIX in contango</b> — nervous but orderly. Hedges are getting expensive.'
+  :'<b>Contango</b> with VIX '+(vx<20?'under 20':'near 20')+' — a calm regime. Insurance is cheap; complacency is the only risk.');
+ interp('brInt',b50==null?'':b50<0.4?'neg':b50>0.8?'warn':'ok',b50==null?'':
+  b50<0.4?'<b>Narrow market</b> — most members below their 50-day average. Index gains are carried by a few names; rallies are fragile.'
+  :b50>0.8?'<b>Very broad participation</b> — strong but stretched; often precedes consolidation.'
+  :'<b>Healthy participation</b> — a majority of members above their averages supports the trend.'+(b200!=null?` ${pctU(b200,0)} are above their 200-day.`:''));
+ interp('ratioInt',hy==null?'':hy<97?'neg':hy<100?'warn':'ok',hy==null?'':
+  hy<97?'<b>Credit underperforming</b> — junk bonds lagging safe bonds. Credit usually smells trouble before equities do.'
+  :hy<100?'<b>Credit appetite softening</b> — not stress, but leaning cautious.'
+  :'<b>Credit appetite intact</b> — junk holding up against Treasuries; no stress signal from the bond market.');
+ // Macro dial: last reading from the monitor, with its age.
+ const Mm=(D.monitors||{}).macro||{};const mm=Mm.values&&Object.keys(Mm.values).length?Mm.values:((D.context||{}).macro_dial||{});
+ const MK=[['rates_shock_z','rates shock'],['dollar_z','dollar'],['energy_z','energy'],['btc_confirm_z','bitcoin confirm']];
+ const comps=MK.filter(([k])=>mm[k]!=null&&isFinite(mm[k])).map(([k,l])=>({l,v:+mm[k]}));
+ const cmp=mm.composite!=null&&isFinite(mm.composite)?+mm.composite:null;
+ tiles('macroDial',cmp==null?[]:[[(cmp>=0?'+':'')+cmp.toFixed(1)+'σ','composite'+monAge(Mm),cmp<=-1?'neg':cmp<=-.25?'warn':'pos']]);
+ const mc=chart('macroCh');
+ if(mc){if(!comps.length){mc.clear();mc.setOption({title:{text:'no macro dial reading yet',left:'center',top:'middle',textStyle:{color:C.muted,fontSize:12,fontWeight:400}}});}
+  else{const lim=Math.max(3,...comps.map(c=>Math.abs(c.v)))*1.05;
+   mc.setOption({backgroundColor:'transparent',grid:{left:104,right:24,top:8,bottom:24},
+    tooltip:{trigger:'item',backgroundColor:C.panel,borderColor:C['line-2'],textStyle:{color:C.text,fontSize:12},formatter:(p)=>`${esc(p.name)}: ${(p.value>=0?'+':'')+Number(p.value).toFixed(2)}σ`},
+    xAxis:Object.assign({},AX,{type:'value',min:-lim,max:lim,axisLabel:Object.assign({},AX.axisLabel,{formatter:(v)=>v.toFixed(0)+'σ'})}),
+    yAxis:{type:'category',data:comps.map(c=>c.l),inverse:true,axisLine:{show:false},axisTick:{show:false},axisLabel:{color:C['text-2'],fontSize:11}},
+    series:[{type:'bar',barWidth:14,data:comps.map(c=>({value:+c.v.toFixed(2),itemStyle:{color:c.v<=-1?C.down:c.v<=-.25?C.warn:C.up,borderRadius:3}})),
+     label:{show:true,position:'right',color:C['text-2'],fontFamily:'IBM Plex Mono',fontSize:11,formatter:(p)=>(p.value>=0?'+':'')+p.value.toFixed(1)},
+     markLine:{silent:true,symbol:'none',lineStyle:{color:C['line-2'],type:'dashed'},label:{show:false},data:[{xAxis:-1},{xAxis:0},{xAxis:1}]}}]},true);}}
+ if(cmp!=null){const worst=comps.slice().sort((a,b)=>a.v-b.v)[0];
+  interp('macroInt',cmp<=-1?'neg':cmp<=-0.25?'warn':'ok',(cmp<=-1?'<b>Strong macro headwind.</b> ':cmp<=-0.25?'<b>Mild macro headwind</b> — neutral to cautious. ':'<b>Macro broadly supportive.</b> ')+
+   (worst&&worst.v<-1?`Loudest warning: ${esc(worst.l)} at ${worst.v.toFixed(1)}σ — more than one standard deviation from normal.`:'No component is at an extreme.')+' Negative = headwind for risk assets.');}
+ else interp('macroInt','','');
+ // Vol surface.
+ const Vm=(D.monitors||{}).options||{};const vv=Vm.values&&Object.keys(Vm.values).length?Vm.values:((D.context||{}).vol_surface||{});
+ tiles('volTile',vv.atm_iv==null?[]:[[(100*vv.atm_iv).toFixed(0)+'%','ATM implied vol'+monAge(Vm),vv.atm_iv>.25?'neg':''],[(100*(vv.put_skew||0)).toFixed(1),'put skew',(vv.put_skew||0)>.06?'warn':''],
+  [(100*(vv.term_slope||0)).toFixed(1),'term slope'],[(vv.pc_oi_ratio||0).toFixed(2),'put/call open interest',(vv.pc_oi_ratio||0)>1.3?'warn':'']]);
+ if(vv.atm_iv!=null){const skewHigh=(vv.put_skew||0)>0.06,ivHigh=vv.atm_iv>0.25,pcHigh=(vv.pc_oi_ratio||0)>1.3;
+  interp('volInt',ivHigh?'neg':(skewHigh||pcHigh)?'warn':'ok',
+   ivHigh?'<b>Options pricing real fear</b> — implied vol elevated across the board.'
+   :skewHigh?'<b>Heavy downside skew</b> — big players paying up for crash protection despite calm indices.'
+   :pcHigh?'<b>Put-heavy positioning</b> — the market is hedged; dips may find buyers as hedges unwind.'
+   :'<b>Orderly options market</b> — modest skew, normal positioning. No one is bracing for impact.');}
+ else interp('volInt','','');
 }
-function renderEcon(){
- const s=((D.econ||{}).series)||{};const rows=Object.entries(s).filter(([,v])=>v&&v.points&&v.points.length);
- $('econT').innerHTML='<thead><tr><th>Series</th><th>Latest</th><th>vs 3 prior</th><th>As of</th><th>Trend</th></tr></thead><tbody>'+
-  (rows.length?rows.map(([id,v])=>{const p=v.points;const last=p[p.length-1],prev=p.length>3?p[p.length-4]:null;const ch=prev?last.v-prev.v:null;
-   return `<tr><td style="font-family:var(--sans)">${esc(v.label||id)} <span class="faint">${esc(v.unit||'')}</span></td><td>${num(last.v,2)}</td><td class="${ch==null?'':ch>=0?'pos':'neg'}">${ch==null?'–':(ch>=0?'+':'')+num(ch,2)}</td><td class="faint">${esc(last.t)}</td><td>${spark(p.slice(-36).map(x=>x.v),110,22,C.ice)}</td></tr>`;}).join(''):'<tr><td colspan="5" class="empty">no FRED series cached</td></tr>')+'</tbody>';
+
+// -------------------------------------------------- rotation (restored)
+// The v1 Rotation tab, restored 2026-09-27: the animated relative-rotation
+// graph (daily comet trails, play / range / scrub, hover detail), the money
+// map, the investment-clock ribbon since 2000 with its playbook, and the
+// radar with the quadrant board. Control handlers are assigned as
+// properties, so the 60-second refresh never stacks listeners, and a
+// refresh during playback leaves the replay alone.
+const RR={playing:false,raf:0,last:0,k:null,range:0,startIdx:0,days:[],secs:[],W:0,H:0,heads:[],mx:2.5,my:2.5};
+const RRG_SHORT={healthcare:'health',cons_discretionary:'discret',cons_staples:'staples',real_estate:'REIT',communications:'comms',semiconductors:'semis',defense_aero:'defense'};
+const rrgQuad=(p)=>p.x>=100?(p.y>=100?'leading':'weakening'):(p.y>=100?'improving':'lagging');
+const RRG_COL=()=>({leading:C.up,improving:C.ice,weakening:C.warn,lagging:C.down});
+function renderRotation(){renderRRG();renderMoneyMap();renderHeat();renderRegimeClock();renderRadar();}
+function rrgFit(){const cv=$('rrg');if(!cv||!cv.getContext)return false;const r=cv.parentElement.getBoundingClientRect();if(r.width<10)return false;
+ const dpr=window.devicePixelRatio||1;RR.W=r.width;RR.H=r.height;cv.width=RR.W*dpr;cv.height=RR.H*dpr;cv.getContext('2d').setTransform(dpr,0,0,dpr,0,0);return true;}
+function rrgAt(s,kf){const i=Math.floor(kf),f=kf-i;const a=s.arr[i];if(!a)return null;const b=s.arr[Math.min(i+1,RR.days.length-1)];
+ if(!b||f<=0)return a;return {x:a.x+(b.x-a.x)*f,y:a.y+(b.y-a.y)*f};}
+function rrgDraw(){
+ const cv=$('rrg');if(!cv||!cv.getContext||!RR.days.length)return;if(!RR.W&&!rrgFit())return;
+ const ctx=cv.getContext('2d');const W=RR.W,H=RR.H,k=RR.k;const QC=RRG_COL();
+ const X=(v)=>W*(0.5+(v-100)/(2*RR.mx)),Y=(v)=>H*(0.5-(v-100)/(2*RR.my));
+ RR.heads=[];ctx.clearRect(0,0,W,H);
+ const tint=(x,y,w,h,c)=>{ctx.fillStyle=c;ctx.fillRect(x,y,w,h);};
+ tint(W/2,0,W/2,H/2,'rgba(61,220,151,.05)');tint(0,0,W/2,H/2,'rgba(124,196,255,.05)');
+ tint(W/2,H/2,W/2,H/2,'rgba(246,185,77,.05)');tint(0,H/2,W/2,H/2,'rgba(255,107,129,.05)');
+ ctx.font='600 11px "Chakra Petch",system-ui';ctx.globalAlpha=.55;
+ ctx.fillStyle=QC.leading;ctx.textAlign='right';ctx.fillText('LEADING',W-12,20);
+ ctx.fillStyle=QC.improving;ctx.textAlign='left';ctx.fillText('IMPROVING',12,20);
+ ctx.fillStyle=QC.weakening;ctx.textAlign='right';ctx.fillText('WEAKENING',W-12,H-12);
+ ctx.fillStyle=QC.lagging;ctx.textAlign='left';ctx.fillText('LAGGING',12,H-12);ctx.globalAlpha=1;
+ ctx.strokeStyle='rgba(126,140,171,.28)';ctx.lineWidth=1;
+ ctx.beginPath();ctx.moveTo(W/2,0);ctx.lineTo(W/2,H);ctx.moveTo(0,H/2);ctx.lineTo(W,H/2);ctx.stroke();
+ ctx.strokeStyle='rgba(126,140,171,.09)';
+ for(let g=1;g<=3;g++){const dx=W/2*g/3.5,dy=H/2*g/3.5;ctx.beginPath();
+  ctx.moveTo(W/2+dx,0);ctx.lineTo(W/2+dx,H);ctx.moveTo(W/2-dx,0);ctx.lineTo(W/2-dx,H);
+  ctx.moveTo(0,H/2+dy);ctx.lineTo(W,H/2+dy);ctx.moveTo(0,H/2-dy);ctx.lineTo(W,H/2-dy);ctx.stroke();}
+ for(const s of RR.secs){
+  const head=rrgAt(s,k);if(!head)continue;const end=Math.floor(k);
+  const past=s.arr.slice(Math.max(RR.startIdx,end-42),end+1).filter(Boolean);   // ~2 months of comet trail
+  const col=QC[rrgQuad(head)];
+  for(let i=1;i<past.length;i++){ctx.globalAlpha=.08+.45*i/past.length;ctx.strokeStyle=col;ctx.lineWidth=1.5;
+   ctx.beginPath();ctx.moveTo(X(past[i-1].x),Y(past[i-1].y));ctx.lineTo(X(past[i].x),Y(past[i].y));ctx.stroke();}
+  ctx.globalAlpha=1;const hx=X(head.x),hy=Y(head.y);
+  ctx.shadowColor=col;ctx.shadowBlur=12;ctx.fillStyle=col;ctx.beginPath();ctx.arc(hx,hy,5.2,0,7);ctx.fill();ctx.shadowBlur=0;
+  ctx.fillStyle=C.text;ctx.font='600 10.5px "IBM Plex Sans",system-ui';ctx.textAlign='left';
+  const tw=ctx.measureText(s.lbl).width;
+  if(hx+8+tw>W-4){ctx.textAlign='right';ctx.fillText(s.lbl,hx-8,hy+4);}else ctx.fillText(s.lbl,hx+8,hy+4);
+  RR.heads.push({x:hx,y:hy,s,head});}
+ $('rrgDate').textContent=RR.days[Math.round(k)]||'';
+}
+function rrgStop(label){RR.playing=false;RR.last=0;if(RR.raf&&typeof cancelAnimationFrame!=='undefined')cancelAnimationFrame(RR.raf);RR.raf=0;const b=$('rrgPlay');if(b)b.textContent=label||'▶ play';}
+function rrgTick(ts){if(!RR.playing)return;
+ if(RR.last)RR.k=Math.min(RR.k+(ts-RR.last)/1000*4.5,RR.days.length-1);   // 4.5 sessions per second
+ RR.last=ts;$('rrgScrub').value=Math.round(RR.k);rrgDraw();
+ if(RR.k>=RR.days.length-1){rrgStop('▶ replay');return;}RR.raf=requestAnimationFrame(rrgTick);}
+function rrgToggle(){if(RR.playing){rrgStop();return;}if(RR.k>=RR.days.length-1.5)RR.k=RR.startIdx;
+ RR.playing=true;$('rrgPlay').textContent='⏸ pause';RR.raf=requestAnimationFrame(rrgTick);}
+function rrgHover(e){const cv=$('rrg');const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;const tip=$('rrgTip');
+ const h=RR.heads.find(p=>(p.x-x)**2+(p.y-y)**2<196);if(!h){tip.style.display='none';return;}
+ const sg=(v)=>v==null?'–':(v>=0?'+':'')+Number(v).toFixed(1)+'%';
+ tip.innerHTML=`<b>${esc(String(h.s.name||h.s.sym).replace(/_/g,' '))}</b> · ${esc(h.s.sym)}<br>RS ${h.head.x.toFixed(1)} · momentum ${h.head.y.toFixed(1)}<br>`+
+  `<span class="${(h.s.rel_1m||0)>=0?'pos':'neg'}">1M vs SPY ${sg(h.s.rel_1m)}</span> · <span class="${(h.s.rel_3m||0)>=0?'pos':'neg'}">3M ${sg(h.s.rel_3m)}</span>`;
+ tip.style.display='block';tip.style.left=Math.min(x+14,r.width-180)+'px';tip.style.top=(y-10)+'px';}
+function renderRRG(){
+ if(RR.playing)return;   // a refresh must not yank the replay out from under you
+ const secs=((D.rotation||{}).sectors||[]).filter(s=>(s.trail||[]).length);
+ const has=secs.length>0;$('rrgEmpty').hidden=has;$('rrgBox').hidden=!has;$('rrgBar').hidden=!has;
+ if(!has){RR.days=[];$('rrgNote').innerHTML='';$('rrgNote').hidden=true;return;}
+ const days=[...new Set(secs.flatMap(s=>s.trail.map(p=>p.t)))].sort();const dix=Object.fromEntries(days.map((t,i)=>[t,i]));
+ secs.forEach(s=>{s.lbl=`${(RRG_SHORT[s.name]||String(s.name||s.sym)).replace(/_/g,' ')} (${s.sym})`;s.arr=new Array(days.length).fill(null);
+  s.trail.forEach(p=>{s.arr[dix[p.t]]=p;});let lp=null;for(let i=0;i<days.length;i++){if(s.arr[i])lp=s.arr[i];else s.arr[i]=lp;}});
+ let mx=2.5,my=2.5;secs.forEach(s=>s.trail.forEach(p=>{mx=Math.max(mx,Math.abs(p.x-100)*1.18);my=Math.max(my,Math.abs(p.y-100)*1.18);}));
+ const atEnd=RR.k==null||RR.k>=RR.days.length-1;
+ Object.assign(RR,{secs,days,mx,my});RR.startIdx=RR.range?Math.max(0,days.length-1-RR.range):0;
+ RR.k=atEnd?days.length-1:Math.min(Math.max(RR.k,RR.startIdx),days.length-1);
+ const sc=$('rrgScrub');sc.min=RR.startIdx;sc.max=days.length-1;sc.value=Math.round(RR.k);
+ sc.oninput=()=>{if(RR.playing)rrgStop();RR.k=+sc.value;rrgDraw();};
+ $('rrgPlay').onclick=(e)=>{e.stopPropagation();rrgToggle();};
+ $('rrgRange').innerHTML=[[63,'3M'],[126,'6M'],[252,'1Y'],[0,'ALL']].map(([d,l])=>`<button class="chipbtn${d===RR.range?' on':''}" data-d="${d}">${l}</button>`).join('');
+ $('rrgRange').querySelectorAll('button').forEach(b=>b.onclick=(e)=>{e.stopPropagation();RR.range=+b.dataset.d;rrgStop();RR.k=null;renderRRG();});
+ const box=$('rrgBox');box.onclick=()=>{if(RR.playing)rrgStop();};box.onmousemove=rrgHover;box.onmouseleave=()=>{$('rrgTip').style.display='none';};
+ rrgFit();rrgDraw();
+ const inQ=(q)=>secs.filter(s=>s.quadrant===q).map(s=>s.sym).join(', ')||'none';
+ $('rrgNote').hidden=false;
+ $('rrgNote').innerHTML=`As of ${esc(days[days.length-1])} — <b>leading</b> (strong and gaining): ${esc(inQ('leading'))}; <b>weakening</b> (strong, losing momentum): ${esc(inQ('weakening'))}; `+
+  `<b>lagging</b>: ${esc(inQ('lagging'))}; <b>improving</b> (weak, gaining): ${esc(inQ('improving'))}. Press play to watch the last `+
+  `${RR.range?RR.range+' sessions':'two years'} rotate; sectors normally circle clockwise, and a tail hooking back the other way is renewed buying before the rotation completed.`;
+}
+function renderMoneyMap(){
+ const el=$('treemap');if(!el)return;
+ const items=((D.rotation||{}).sectors||[]).filter(s=>s.rel_1m!=null).map(s=>Object.assign({},s,{sz:Math.sqrt(s.dollar_vol||1e9)})).sort((a,b)=>b.sz-a.sz);
+ const r=el.getBoundingClientRect();
+ if(!items.length){el.innerHTML='<div class="empty">no sector data yet</div>';return;}
+ if(r.width<10)return;
+ const shade=(v)=>{const t=Math.max(-1,Math.min(1,v/6)),u=Math.abs(t);const mix=(a,b)=>Math.round(a+(b-a)*u);
+  const from=[27,37,66],to=t>=0?[31,122,88]:[150,52,70];return `rgb(${mix(from[0],to[0])},${mix(from[1],to[1])},${mix(from[2],to[2])})`;};
+ const squarify=(list,x,y,w,h,out)=>{if(!list.length)return;if(list.length===1){out.push(Object.assign({},list[0],{x,y,w,h}));return;}
+  const total=list.reduce((s,i)=>s+i.sz,0);let acc=0,i=0;while(i<list.length-1&&acc+list[i].sz<total/2)acc+=list[i++].sz;
+  acc=Math.max(acc,list[0].sz);i=Math.max(i,1);const f=acc/total;
+  if(w>=h){squarify(list.slice(0,i),x,y,w*f,h,out);squarify(list.slice(i),x+w*f,y,w*(1-f),h,out);}
+  else{squarify(list.slice(0,i),x,y,w,h*f,out);squarify(list.slice(i),x,y+h*f,w,h*(1-f),out);}};
+ const rects=[];squarify(items,0,0,r.width,r.height,rects);
+ const sg=(v)=>v==null?'–':(v>=0?'+':'')+Number(v).toFixed(1)+'%';
+ el.innerHTML=rects.map(t=>{const big=t.w>86&&t.h>52;const nm=String(t.name||'').replace(/_/g,' ');
+  return `<div class="tile2" style="left:${t.x}px;top:${t.y}px;width:${t.w}px;height:${t.h}px;background:${shade(t.rel_1m)}" title="${esc(nm)} (${esc(t.sym)}) · 1M vs SPY ${sg(t.rel_1m)} · 3M ${sg(t.rel_3m)}"><b>${esc(t.sym)}</b><span>${sg(t.rel_1m)}</span>${big?`<i>${esc(nm)}</i>`:''}</div>`;}).join('');
+}
+function renderRegimeClock(){
+ const rg=(D.rotation||{}).regimes||{};const hist=rg.history||[];const pb=rg.playbook||{};const cur=rg.current||{};
+ if(!hist.length){$('regNow').innerHTML='<span class="muted">needs the FRED history — the econ collector runs weekdays</span>';$('regRibbon').innerHTML='';$('regAxis').innerHTML='';$('playbook').innerHTML='';return;}
+ $('regRibbon').innerHTML=hist.map(h=>`<i style="background:${esc((pb[h.r]||{}).color||C['line-2'])}" title="${esc(h.t)} · ${esc((pb[h.r]||{}).label||h.r)}"></i>`).join('');
+ $('regAxis').innerHTML=`<span>${esc(String(hist[0].t).slice(0,4))}</span><span>${esc(String(hist[Math.floor(hist.length/2)].t).slice(0,4))}</span><span>${esc(hist[hist.length-1].t)}</span>`;
+ const now=pb[cur.r]||{};
+ $('regNow').innerHTML=`<div class="tiles"><div class="t1"><b style="color:${esc(now.color||C.text)}">${esc(cur.label||'–')}</b><span>since ${esc(cur.since||'–')} · CPI ${cur.cpi_yoy!=null?Number(cur.cpi_yoy).toFixed(1)+'%':'–'} · Fed funds ${cur.ff_chg_6m!=null?(cur.ff_chg_6m>=0?'+':'')+Number(cur.ff_chg_6m).toFixed(2)+' pp':'–'} over 6m</span></div></div>`;
+ $('playbook').innerHTML=Object.entries(pb).map(([k,v])=>`<div class="pbrow${k===cur.r?' now':''}"><span class="pbdot" style="background:${esc(v.color)}"></span><span style="min-width:190px">${esc(v.label)}</span><span class="muted">${esc((v.favors||[]).map(f=>String(f).replace(/_/g,' ')).join(' · '))}</span></div>`).join('');
+}
+function renderRadar(){
+ const rot=D.rotation||{};const secs=rot.sectors||[];const al=rot.alerts||[];const QC=RRG_COL();
+ const sg=(v)=>v==null?'–':(v>=0?'+':'')+Number(v).toFixed(1)+'%';
+ const sigs=al.length?al.map(a=>`<div class="radrow">${esc(a.msg)}${a.t?` <span class="muted" style="font-size:11px">· ${esc(a.t)}</span>`:''}${a.detail?`<span class="rd">${esc(a.detail)}</span>`:''}</div>`).join('')
+  :'<div class="muted">no quadrant crossings in the last 3 weeks — rotation is stable</div>';
+ const QMETA=[['leading','Leading','outperforming and accelerating — trend intact'],['weakening','Weakening','still ahead of SPY but losing steam — tighten stops'],
+  ['improving','Improving','underperformer gaining momentum — watch list'],['lagging','Lagging','weak and getting weaker — avoid']];
+ const board=secs.length?`<div class="qboard">`+QMETA.map(([q,label,note])=>{
+  const rows=secs.filter(s=>s.quadrant===q).sort((a,b)=>(b.rel_1m??-99)-(a.rel_1m??-99))
+   .map(s=>`<div class="qs"><span>${esc(s.sym)} <span class="dq">${s.days_in_quadrant??'–'}d</span></span><span class="${(s.rel_1m||0)>=0?'pos':'neg'}">${sg(s.rel_1m)}</span></div>`).join('')||'<div class="muted" style="font-size:11px">none</div>';
+  return `<div class="qcell" style="border-left:3px solid ${QC[q]}"><h3 style="color:${QC[q]}" title="${esc(note)}">${label}</h3>${rows}</div>`;}).join('')+'</div>':'';
+ $('radar').innerHTML=sigs+board;
+ interp('radarInt','',secs.length?'Sectors orbit clockwise — improving (momentum turns up) → leading (outperformance confirmed) → weakening (momentum fades) → lagging. The crossings above are the earliest mechanical tells; the board shows where every sector sits now, how long it has been there ("34d" = sessions in that quadrant) and its 1-month return vs SPY. The scout reads news for the same shift — price and news agreeing is the real signal.':'');
+}
+window.addEventListener('resize',()=>{if(UI.tab==='rotation'){if(rrgFit())rrgDraw();renderMoneyMap();}});
+
+// --------------------------------------------------- economy (restored)
+// The v1 Economy tab: seven FRED panels, one per row, scanned like a macro
+// terminal. v2 had folded them into one table of sparklines. Restored
+// 2026-09-27, with a 5Y / 10Y / ALL range for the 26-year monthly history.
+const EC_GROUPS=[
+ ['ecInf','ecInfT',[['cpi_yoy','down'],['core_cpi_yoy','warn'],['breakeven_10y','ice'],['fed_funds','violet']]],
+ ['ecIcx','ecIcxT',[['cpi_yoy','down'],['core_cpi_yoy','warn'],['pce_yoy','up'],['core_pce_yoy','ice'],['ppi_yoy','muted']]],
+ ['ecPol','ecPolT',[['fed_funds','violet'],['ecb_rate','ice'],['boj_rate','down']]],
+ ['ecHou','ecHouT',[['mortgage_30y','ice'],['case_shiller_yoy','up'],['housing_starts','muted',1]]],
+ ['ecLab','ecLabT',[['unemployment','down'],['claims','ice',1]]],
+ ['ecCr','ecCrT',[['hy_oas','down'],['curve_2s10s','up'],['fed_bs','muted',1]]],
+ ['ecCo','ecCoT',[['retail_yoy','up'],['sentiment','violet',1]]]];
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function renderEconomy(){
+ const ec=((D.econ||{}).series)||{};const rng=UI.ecRange||'all';
+ $('ecRange').innerHTML=[['5y','5Y'],['10y','10Y'],['all','ALL']].map(([k,l])=>`<button class="chipbtn${k===rng?' on':''}" data-r="${k}">${l}</button>`).join('');
+ $('ecRange').querySelectorAll('button').forEach(b=>b.onclick=()=>{UI.ecRange=b.dataset.r;renderEconomy();});
+ const now=new Date();const cut=rng==='all'?'':`${now.getFullYear()-(rng==='5y'?5:10)}-${String(now.getMonth()+1).padStart(2,'0')}`;
+ const fmtV=(v,u)=>v==null||!isFinite(v)?'–':u==='%'?(+v).toFixed(1)+'%':u==='$tn'?'$'+(+v).toFixed(1)+'tn':u==='k'?Math.round(+v)+'k':u==='pp'?(+v).toFixed(2)+' pp':(+v).toFixed(1);
+ const mon=(t)=>{const [y,m]=String(t).split('-');return (MON[+m-1]||'')+' '+String(y).slice(2);};
+ EC_GROUPS.forEach(([el,tEl,keys])=>{
+  const ss=keys.map(([k,col,ax])=>({s:ec[k],color:C[col]||col,ax})).filter(x=>x.s&&x.s.points&&x.s.points.length>1);
+  tiles(tEl,ss.map(x=>{const p=x.s.points;const last=p[p.length-1];return [fmtV(x.s.latest??last.v,x.s.unit),`${x.s.label} · ${last.t}`];}),'the econ collector runs weekdays — first reading soon');
+  if(!ss.length){mline(el,[],[]);return;}
+  const dates=[...new Set(ss.flatMap(x=>x.s.points.map(p=>String(p.t))))].filter(t=>!cut||t>=cut).sort();
+  mline(el,dates.map(mon),ss.map(x=>{const m=Object.fromEntries(x.s.points.map(p=>[String(p.t),p.v]));
+   return {name:x.s.label+(x.s.unit&&x.s.unit!=='%'?' ('+x.s.unit+')':'')+(x.ax?' · right axis':''),data:dates.map(d=>m[d]??null),color:x.color,axis:x.ax?1:0};}),{dp:2});
+ });
 }
 
 // ------------------------------------------------------------------- agents
@@ -1255,7 +1525,7 @@ function renderLLM(){
 
 // ------------------------------------------------------------- boot/refresh
 const rendered={};
-function renderTab(t){try{({cockpit:renderCockpit,portfolio:renderPortfolio,market:renderMarket,agents:renderAgents})[t]();rendered[t]=true;}catch(e){console.error(e);showBanner('A panel failed to render: '+e.message);}}
+function renderTab(t){try{({cockpit:renderCockpit,portfolio:renderPortfolio,market:renderMarket,rotation:renderRotation,economy:renderEconomy,agents:renderAgents})[t]();rendered[t]=true;}catch(e){console.error(e);showBanner('A panel failed to render: '+e.message);}}
 function showBanner(msg){$('banner').style.display=msg?'block':'none';$('bannerText').textContent=msg||'';}
 async function load(){
  try{
