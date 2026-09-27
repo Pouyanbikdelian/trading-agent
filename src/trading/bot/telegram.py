@@ -3015,7 +3015,30 @@ def _read_cycle_review() -> dict[str, Any] | None:
     # current proposal; a new `/cycle` will create fresh state if needed.
     if payload.get("halted") and not _execution_halt_state()[0]:
         return None
+    # Same for a card built before the PM's latest decision: `/pm run` then
+    # `/review` replayed the old basket, which read as "the PM ignored my
+    # change" (2026-09-27). A new `/review` builds it from the new targets.
+    if _review_predates_pm_decision(payload):
+        return None
     return payload
+
+
+def _review_predates_pm_decision(review: dict[str, Any]) -> bool:
+    from trading.agents.pm_signal import pm_decision_path
+
+    try:
+        built = datetime.fromisoformat(str(review.get("built_at")))
+        raw = json.loads(pm_decision_path(settings.state_dir).read_text())
+        if not isinstance(raw, dict) or not raw.get("ok"):
+            return False
+        decided = datetime.fromisoformat(str(raw["ts"]))
+    except Exception:
+        return False
+    if built.tzinfo is None:
+        built = built.replace(tzinfo=timezone.utc)
+    if decided.tzinfo is None:
+        decided = decided.replace(tzinfo=timezone.utc)
+    return decided > built
 
 
 def _format_cycle_review(review: dict[str, Any]) -> str:

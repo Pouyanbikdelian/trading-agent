@@ -152,3 +152,56 @@ def test_review_repeats_real_account_artifact_without_approval_controls(
     assert "✅ Approve as shown" not in reply
     assert not (tmp_path / "cycle_approval_pending.json").exists()
     assert not (tmp_path / "cycle_approval_decision.json").exists()
+
+
+def test_a_review_built_before_the_latest_pm_decision_is_not_replayed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """2026-09-27: `/pm run` then `/review` showed the old basket unchanged."""
+    monkeypatch.setattr(telegram_module, "settings", _settings(tmp_path))
+    (tmp_path / "cycle_halted_review.json").write_text(
+        json.dumps(
+            {
+                "kind": "halted_review",
+                "id": "review-old",
+                "halted": False,
+                "built_at": "2026-09-27T12:09:08+00:00",
+                "account": {"base_currency": "CHF", "equity": 54100.0},
+                "plan": {"orders": []},
+            }
+        )
+    )
+    (tmp_path / "agent_pm").mkdir()
+    (tmp_path / "agent_pm" / "last_run.json").write_text(
+        json.dumps({"ok": True, "ts": "2026-09-27T12:15:40+00:00"})
+    )
+
+    reply = _cmd_review()
+
+    assert "review-old" not in reply
+    assert json.loads((tmp_path / "trigger_now.flag").read_text())["mode"] == "review"
+
+
+def test_a_review_built_after_the_pm_decision_is_repeated(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(telegram_module, "settings", _settings(tmp_path))
+    (tmp_path / "cycle_halted_review.json").write_text(
+        json.dumps(
+            {
+                "kind": "halted_review",
+                "id": "review-new",
+                "halted": False,
+                "built_at": "2026-09-27T12:20:00+00:00",
+                "account": {"base_currency": "CHF", "equity": 54100.0},
+                "plan": {"orders": []},
+            }
+        )
+    )
+    (tmp_path / "agent_pm").mkdir()
+    (tmp_path / "agent_pm" / "last_run.json").write_text(
+        json.dumps({"ok": True, "ts": "2026-09-27T12:15:40+00:00"})
+    )
+
+    reply = _cmd_review()
+
+    assert "0 orders submitted" in reply
+    assert not (tmp_path / "trigger_now.flag").exists()
