@@ -1775,9 +1775,17 @@ class Cycle:
                 "No part of this plan could be proven to reduce exposure — "
                 f"{defensive_note}. Nothing here is approvable."
             )
+        # Only a real halt needs /resume. The weekend / pre-open baseline gate
+        # lands here too, and telling the operator to /resume a desk that is
+        # not halted sent him looking for a halt that did not exist (2026-09-27).
         notes.append(
             "*0 orders submitted. This review cannot be approved, queued or executed. "
-            "After `/resume`, run a brand-new `/cycle` for a fresh executable approval.*"
+            + (
+                "After `/resume`, run a brand-new `/cycle` for a fresh executable approval.*"
+                if actual_halt
+                else "Run `/cycle` again while the US market is open (Mon–Fri 09:30–16:00 "
+                "New York) for a basket you can approve.*"
+            )
         )
         self.alerts.warning(
             "\n\n".join(["\n".join(headline), rendered, "\n".join(notes)]) + _take_cycle_notes(self)
