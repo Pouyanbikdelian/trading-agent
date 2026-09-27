@@ -1477,8 +1477,14 @@ def format_account_translation(
     equity: float,
     currency: str,
     sleeve_pct: float,
+    desk: bool = False,
 ) -> list[str]:
     """What the PM's weights are worth in the operator's real account.
+
+    ``desk=True`` means ``equity`` is already the desk (pinned holdings
+    removed), which is what the cycle sizes against. Before 2026-09-27 the
+    card used whole-account equity, so it promised ~CHF 34k deployed while
+    the cycle, sizing on the CHF 54k desk, built ~CHF 19k.
 
     Deliberately an UPPER bound, and labelled as one. The cycle also
     applies ``PM_SLEEVE_CAPITAL_USD``, the per-position cap, gross and
@@ -1494,9 +1500,13 @@ def format_account_translation(
         return []
     ccy = (currency or "USD").upper()
     gross = fsum(weights.values())
+    basis = (
+        f"{ccy} {equity:,.0f} desk equity, pinned holdings excluded, before caps"
+        if desk
+        else f"{ccy} {equity:,.0f}, before caps and holds"
+    )
     lines = [
-        f"*In your account* (~{sleeve_pct:.0%} sleeve of {ccy} {equity:,.0f}, "
-        f"before caps and holds):",
+        f"*In your account* (~{sleeve_pct:.0%} sleeve of {basis}):",
         f"  deployed ≈ {ccy} {equity * sleeve_pct * gross:,.0f}",
     ]
     top = sorted(weights.items(), key=lambda kv: -kv[1])[:3]
@@ -1586,6 +1596,7 @@ def format_pm_digest(
             equity=float(account.get("equity") or 0.0),
             currency=str(account.get("currency") or "USD"),
             sleeve_pct=float(account.get("sleeve_pct") or 0.0),
+            desk=bool(account.get("desk")),
         )
         if translation:
             lines.append("")

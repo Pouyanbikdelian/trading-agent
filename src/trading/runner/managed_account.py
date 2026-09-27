@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import isfinite
+from pathlib import Path
 
 from trading.core.types import AccountSnapshot, Position
 from trading.core.valuation import position_value_base
@@ -139,3 +140,23 @@ def managed_view(
         excluded=excluded,
         unconverted=tuple(sorted(set(unconverted))),
     )
+
+
+def desk_equity(snapshot: AccountSnapshot, state_dir: Path | str) -> float | None:
+    """The equity the cycle sizes against: the account minus pinned holdings.
+
+    For display (the PM card's CHF translation). None when the projection
+    cannot be made — callers fall back to saying less, never to a guess.
+    """
+    from trading.runner.holds import load_holds
+
+    try:
+        view = managed_view(
+            snapshot,
+            set(load_holds(Path(state_dir))),
+            fx_rates=dict(getattr(snapshot, "fx_rates", None) or {}),
+        )
+        eq = float(view.account.equity)
+    except Exception:
+        return None
+    return eq if eq > 0 else None

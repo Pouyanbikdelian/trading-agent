@@ -1036,11 +1036,13 @@ def _cmd_pm(args: list[str]) -> str:
     lines.append(f"*Target weights*{_marks_age_note(book)}")
     lines.extend(format_target_book(weights))
 
+    eq, ccy, is_desk = _live_equity_for_pm()
     translation = format_account_translation(
         weights,
-        equity=_live_equity_for_pm()[0],
-        currency=_live_equity_for_pm()[1],
+        equity=eq,
+        currency=ccy,
         sleeve_pct=float(getattr(settings, "agent_pm_sleeve_pct", 0.0) or 0.0),
+        desk=is_desk,
     )
     if translation:
         lines.append("")
@@ -1082,8 +1084,11 @@ def _pm_target_weights(book: dict[str, Any]) -> dict[str, float]:
     return {symbol: value / equity for symbol, value in values.items() if value > 0}
 
 
-def _live_equity_for_pm() -> tuple[float, str]:
-    """Latest account equity and currency, or ``(0.0, "")`` if unknown.
+def _live_equity_for_pm() -> tuple[float, str, bool]:
+    """Desk equity (pinned holdings removed) and currency, or ``(0.0, "", False)``.
+
+    The third value says whether the pinned holdings could be taken out;
+    if not, whole-account equity is returned and labelled as such.
 
     Returning zero rather than a guess matters: ``format_account_translation``
     prints nothing without it, and a translation nobody can compute is
@@ -1092,10 +1097,14 @@ def _live_equity_for_pm() -> tuple[float, str]:
     """
     snap = _latest_account_snapshot()
     if snap is None:
-        return 0.0, ""
+        return 0.0, "", False
+    from trading.runner.managed_account import desk_equity
+
+    desk = desk_equity(snap, settings.state_dir)
     return (
-        float(getattr(snap, "equity", 0.0) or 0.0),
+        desk if desk is not None else float(getattr(snap, "equity", 0.0) or 0.0),
         str(getattr(snap, "base_currency", "") or ""),
+        desk is not None,
     )
 
 

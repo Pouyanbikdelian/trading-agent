@@ -930,6 +930,26 @@ class TestTheCardShowsOnlyThingsThatAreTrue:
         assert "before caps and holds" in text
         assert "≈" in text
 
+    def test_the_translation_names_the_desk_basis(self) -> None:
+        """2026-09-27: the card sized on whole-account equity (CHF 84.8k)
+        while the cycle sizes on the desk (CHF 54.1k, pinned holdings out),
+        so it promised ~CHF 34k deployed for a ~CHF 19k basket."""
+        from trading.agents.pm import format_account_translation
+
+        text = "\n".join(
+            format_account_translation(
+                {"PANW": 0.07}, equity=54_100.0, currency="CHF", sleeve_pct=1.0, desk=True
+            )
+        )
+
+        assert "CHF 54,100 desk equity, pinned holdings excluded" in text
+        assert "3,787" in text  # 54,100 * 0.07
+
+    def test_desk_equity_says_nothing_rather_than_guess(self, tmp_path) -> None:
+        from trading.runner.managed_account import desk_equity
+
+        assert desk_equity(object(), tmp_path) is None  # type: ignore[arg-type]
+
     @pytest.mark.parametrize(
         "kwargs",
         [

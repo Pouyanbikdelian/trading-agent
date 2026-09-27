@@ -2210,12 +2210,15 @@ class Runner:
             # allowed to fail quietly.
             account: dict[str, Any] | None = None
             try:
+                from trading.runner.managed_account import desk_equity
                 from trading.runner.state import RunnerStore
 
                 snap = RunnerStore(settings.state_dir / "runner.db").latest_snapshot()
                 if snap is not None and float(getattr(snap, "equity", 0.0) or 0.0) > 0:
+                    desk = desk_equity(snap, settings.state_dir)
                     account = {
-                        "equity": float(snap.equity),
+                        "equity": desk if desk is not None else float(snap.equity),
+                        "desk": desk is not None,
                         "currency": str(getattr(snap, "base_currency", "") or "USD"),
                         "sleeve_pct": float(settings.agent_pm_sleeve_pct or 0.0),
                     }
