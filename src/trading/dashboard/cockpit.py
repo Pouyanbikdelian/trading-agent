@@ -18,7 +18,6 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
-import os
 import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -654,7 +653,7 @@ def schedule_block(
     from apscheduler.triggers.cron import CronTrigger
 
     from trading.runner.cadence import cadence_from, gate
-    from trading.runner.runner import _historian_trigger, _precycle_trigger
+    from trading.runner.runner import _committee_trigger, _historian_trigger, _precycle_trigger
 
     now = now or _now()
     jobs: list[tuple[str, str, Any]] = []
@@ -676,15 +675,13 @@ def schedule_block(
                 jobs.append(("broker_ready", "Broker readiness check", gated(ready)))
         except Exception as e:
             logger.bind(component="dashboard").warning(f"cycle schedule failed: {e}")
+    try:
+        # Once per scheduled cycle, derived from it (Friday 13:00 NY without one).
+        jobs.append(("committee", "Committee", gated(_committee_trigger(cron, tz))))
+    except Exception as e:
+        logger.bind(component="dashboard").warning(f"committee schedule failed: {e}")
     jobs.extend(
         [
-            (
-                "committee",
-                "Committee",
-                CronTrigger.from_crontab(
-                    os.getenv("AGENTS_COMMITTEE_CRON", "0 13 * * MON,FRI"), timezone=NY
-                ),
-            ),
             (
                 "reconcile",
                 "Broker reconciliation",

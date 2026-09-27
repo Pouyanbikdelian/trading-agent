@@ -408,8 +408,8 @@ AGENTS_TIMEOUT_S=120              # specialists now run on Opus 5.5, the slower 
 - Every agent (specialists, decision nodes, copilot) defaults to
   `claude-opus-5-5`. `AGENTS_MODEL`, `AGENTS_MODEL_FRONTIER` and
   `COPILOT_MODEL` in `.env` override without a deploy.
-- The committee still meets Monday and Friday every week; that is the
-  learning loop, not the order path.
+- ~~The committee still meets Monday and Friday every week.~~ Changed
+  2026-09-27 (§21): once per scheduled cycle, two hours before it.
 
 ## 18. Information-limits release notes (2026-09-26)
 
@@ -487,6 +487,21 @@ Audit of every limit on what one agent hands another, and the fixes:
   asset-class ETFs three years deep (`_add_reference_targets`). After a
   deploy, `/refresh` in Telegram backfills at once; an empty rotation is
   retried every 5 minutes instead of held for 2 hours.
+
+## 21. Committee once per cycle (2026-09-27)
+
+- The scheduled committee now debates once per scheduled cycle, two hours
+  before it (15:00 cycle -> 13:00 New York, cycle Fridays only), so the PM
+  at 14:15 reads a debate that is 75 minutes old. It used to meet Monday
+  and Friday every week: four debates per fortnightly decision.
+- `AGENTS_COMMITTEE_CRON` in `.env` still overrides the time; the
+  cycle-week gate applies either way. **Remove the line if it still says
+  `0 13 * * MON,FRI`.** `AGENTS_COMMITTEE_LEAD_MINUTES` (default 120)
+  moves it relative to the cycle.
+- Unchanged: manual `/committee`, and the late-day de-risk check (15:10 NY,
+  convenes once only if a held name is down hard on the day).
+- Watchdogs: the committee's liveness and `last_committee.json` limits
+  scale with `CYCLE_EVERY_WEEKS`, like the PM's.
 
 ## Troubleshooting
 

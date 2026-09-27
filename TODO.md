@@ -125,6 +125,10 @@ Order of operations:
 - [x] Dashboard: edge panel counts different stocks and flags small
       samples; "ladder" row relabelled as the momentum ranking (it never
       measured the PM); new Agent PM vs SPY panel with a luck check.
+- [x] Committee once per scheduled cycle, 2 h before it (was Mon + Fri
+      weekly); watchdogs scale with the cadence (docs/deploy.md §21).
+- [x] Dashboard: Macro / Rotation / Economy views restored; SPY and sector
+      ETFs kept 3 years deep by the daily refresh.
 - [ ] Deferred by Yan: gateway 2FA / reconnect fix; Flex query columns and
       token for automatic history refresh.
 - [ ] After two cycles: rerun `scripts/llm_cost.py` for real Opus 5.5

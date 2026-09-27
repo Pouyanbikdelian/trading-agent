@@ -76,7 +76,8 @@ _FRESHNESS: dict[str, tuple[str, float]] = {
 #
 # journal kind -> (label, max age in hours before it counts as dead)
 _JOURNAL_CADENCE: dict[str, tuple[str, float]] = {
-    "committee": ("committee debate", 96.0),  # 2x/week
+    # Once per scheduled cycle since 2026-09-27; scaled like the PM.
+    "committee": ("committee debate", 96.0),
     # Weekly cadence baseline; scaled by CYCLE_EVERY_WEEKS in
     # _journal_max_age_h — at two weeks, 240 h raised "PM dead" every six
     # hours on days 10-14 of every fortnight.
@@ -89,9 +90,13 @@ _JOURNAL_CADENCE: dict[str, tuple[str, float]] = {
 }
 
 
+#: Loops that run once per scheduled cycle, so their limits follow it.
+_CYCLE_PACED = frozenset({"agent_pm", "committee"})
+
+
 def _journal_max_age_h(kind: str, default: float) -> float:
-    """The PM decides on the cycle cadence; everything else keeps its own."""
-    if kind != "agent_pm":
+    """The PM and the committee run on the cycle cadence; the rest keep their own."""
+    if kind not in _CYCLE_PACED:
         return default
     try:
         from trading.core.config import settings
@@ -407,6 +412,8 @@ def check_health(state_dir: Path, *, now: datetime | None = None) -> list[str]:
         issues.append(f"memory low: {mem:.0f} MB available")
 
     for label, (rel, max_h) in _FRESHNESS.items():
+        if label == "committee":
+            max_h = _journal_max_age_h("committee", max_h)  # once per cycle
         p = state_dir / rel
         if not p.exists():
             issues.append(f"{label}: missing ({rel})")

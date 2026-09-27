@@ -149,6 +149,37 @@ def _precycle_trigger(cron: str, tz: str, *, lead_minutes: int = 60) -> Any:
     )
 
 
+#: How far ahead of the cycle the committee debates: 15:00 cycle -> 13:00,
+#: leaving 75 minutes before the PM decides at 14:15.
+COMMITTEE_LEAD_MINUTES = 120
+
+
+def _committee_trigger(cron: str, tz: str) -> Any:
+    """The committee's scheduled debate, derived from the cycle (ungated).
+
+    Why (2026-09-27). The committee ran Monday and Friday every week while
+    the cycle moved to every second Friday — four debates per decision,
+    three of them feeding nothing. The operator's intent is one debate
+    just before each scheduled cycle, so it is derived from the cycle
+    cron like the PM and the broker check, and the caller gates it to
+    cycle weeks. ``AGENTS_COMMITTEE_CRON`` still overrides the time (the
+    week gate still applies). Manual ``/committee`` and the late-day
+    de-risk check are unchanged.
+    """
+    from apscheduler.triggers.cron import CronTrigger
+
+    override = os.getenv("AGENTS_COMMITTEE_CRON", "").strip()
+    if override:
+        return CronTrigger.from_crontab(override, timezone="America/New_York")
+    try:
+        lead = int(os.getenv("AGENTS_COMMITTEE_LEAD_MINUTES", str(COMMITTEE_LEAD_MINUTES)))
+    except ValueError:
+        lead = COMMITTEE_LEAD_MINUTES
+    return _precycle_trigger(cron, tz, lead_minutes=lead) or CronTrigger(
+        day_of_week="fri", hour=13, minute=0, timezone="America/New_York"
+    )
+
+
 def _historian_trigger() -> Any:
     """Friday-only distillation, after the nightly grader.
 
@@ -973,10 +1004,9 @@ class Runner:
                 id="options_monitor",
                 replace_existing=True,
             )
-            # Agent committee: TWICE weekly — Mon & Fri, mid-session NYSE time
-            # (default 13:00 ET: prices settled, well clear of the noisy open).
-            # NYSE tz so it tracks the US session across DST. Env-tunable via
-            # AGENTS_COMMITTEE_CRON. Advisory only; requires AGENTS_ENABLED=true
+            # Agent committee: once per scheduled cycle, two hours before it
+            # (15:00 cycle -> 13:00 New York), on cycle weeks only — see
+            # _committee_trigger. Advisory only; requires AGENTS_ENABLED=true
             # + an LLM API key in .env.
             import os as _os
 
@@ -985,9 +1015,8 @@ class Runner:
             ):
                 self._scheduler.add_job(
                     self._run_committee_async,
-                    CronTrigger.from_crontab(
-                        _os.getenv("AGENTS_COMMITTEE_CRON", "0 13 * * MON,FRI"),
-                        timezone="America/New_York",
+                    self._cadence_gate(
+                        _committee_trigger(self.config.schedule_cron, self.config.schedule_tz)
                     ),
                     id="agent_committee",
                     replace_existing=True,

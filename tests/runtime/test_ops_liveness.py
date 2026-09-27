@@ -388,4 +388,6 @@ def test_the_pm_liveness_limit_follows_the_two_week_cadence(monkeypatch) -> None
         config, "settings", config.settings.model_copy(update={"cycle_every_weeks": 2})
     )
     assert _journal_max_age_h("agent_pm", 240.0) >= 14 * 24
-    assert _journal_max_age_h("committee", 96.0) == 96.0
+    # The committee debates once per scheduled cycle (2026-09-27), so it scales too.
+    assert _journal_max_age_h("committee", 96.0) >= 14 * 24
+    assert _journal_max_age_h("daily", 48.0) == 48.0
