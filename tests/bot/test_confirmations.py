@@ -61,7 +61,7 @@ def bot(tmp_path: Path, monkeypatch) -> Path:
 def test_take_requires_the_matching_token_and_clears_on_success(tmp_path: Path) -> None:
     staged = cf.stage(tmp_path, "flatten", {}, "flatten every position", now=T0)
     assert isinstance(cf.take(tmp_path, "WRONG", now=T0), str)
-    assert cf.peek(tmp_path) is not None  # a mismatch never cancels the real one
+    assert cf.peek(tmp_path, now=T0) is not None  # a mismatch never cancels the real one
     assert cf.take(tmp_path, staged.token.lower(), now=T0) == staged
     assert cf.peek(tmp_path) is None
 

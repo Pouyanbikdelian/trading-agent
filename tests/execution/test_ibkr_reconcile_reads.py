@@ -47,6 +47,10 @@ class _Ib:
         self.calls.append(("completed", (api_only,)))
         return self.completed
 
+    async def reqAllOpenOrdersAsync(self):
+        self.calls.append(("working", ()))
+        return []
+
 
 def _broker(ib: _Ib, monkeypatch) -> IbkrBroker:
     broker = IbkrBroker(ib=ib)
@@ -69,6 +73,25 @@ def test_executions_are_mapped_and_filtered_by_since(monkeypatch) -> None:
     assert [f.order_id for f in fills] == ["a"]
     f = fills[0]
     assert (f.quantity, f.price, f.exec_id, f.commission_currency) == (5.0, 101.5, "e1", "USD")
+
+
+def test_retirement_working_order_read_requires_fresh_broker_reply(monkeypatch):
+    ib = _Ib()
+    assert _broker(ib, monkeypatch).get_open_orders_for_reconciliation() == []
+    assert ib.calls == [("working", ())]
+
+
+def test_malformed_working_order_blocks_retirement(monkeypatch):
+    broker = _broker(_Ib(), monkeypatch)
+
+    async def malformed():
+        return [SimpleNamespace()]
+
+    broker._ib.reqAllOpenOrdersAsync = malformed
+    from trading.execution.base import BrokerError
+
+    with pytest.raises(BrokerError, match="retirement blocked"):
+        broker.get_open_orders_for_reconciliation()
 
 
 def test_completed_orders_map_status_perm_id_and_skip_foreign(monkeypatch) -> None:

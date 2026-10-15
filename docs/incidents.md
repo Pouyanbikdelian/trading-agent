@@ -14,6 +14,40 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-10-14 — One stale constituent stopped every manual PM cycle
+
+**Symptoms.** Five manual cycles completed with zero orders. `/refresh`
+reported successful requests and a fresh SPY bar, yet PM preparation still
+said its latest bar was nine days old. `/pm agent` displayed the retained
+simulation as live targets despite the withdrawn decision.
+
+**Cause.** The mature WBD series ended on October 5. The loader excluded
+short IPO histories but kept this stale tail, then `dropna(how="any")`
+discarded October 6–14 from every fresh constituent. The PM freshness gate
+correctly refused that snapshot; the mechanical sleeve was zero. A separate
+`/pm run` during price loading could also withdraw a cycle's decision.
+
+**Correction prepared 2026-10-15.** Validate finite positive prices and aware
+nonfuture timestamps, exclude short and stale tails before aligning, require
+at least 80% mature-universe coverage and sufficient aligned history, and
+refuse a wholly stale daily tape. Refresh reporting measures actual tail
+dates across all symbols. PM decisions and cycle planning share a lock; the
+PM card checks the same decision eligibility as the execution bridge and
+labels retained simulation weights as historical when unavailable.
+
+**Order-ledger follow-up.** Bulk retirement still requires 14 days. The UI
+now explains that cutoff. A separate explicit, exact-ID `confirm-unknown`
+retirement is available after seven days only after successful broker reads
+find no matching working order, completed outcome, or execution. It records
+`unreconciled` with operator provenance, preserving the row and unknown
+outcome. It never submits or cancels an order.
+
+**Lesson.** Request success, fresh SPY, and a newly written snapshot do not
+prove the actual ranking inputs are current. Validate the dates that survive
+alignment and prevent one obsolete constituent from aging the whole book.
+
+---
+
 ## 2026-09-23 — Latent defects found in a code review (no production incident)
 
 Not an outage: a read-through of the order path and the bot, after the

@@ -80,7 +80,8 @@ class ReconcileReport:
             lines.append(
                 "⚠️ open locally, unknown to the broker (not working, not completed): "
                 + ", ".join(f"`{c}`" for c in self.unseen_open)
-                + ". `/orders resolve` retires them once you have checked."
+                + ". Check the IBKR statement. `/orders resolve` can retire unknown "
+                "rows only after 14 days and only if no matching broker order is working."
             )
         if self.ambiguous:
             lines.append(

@@ -355,7 +355,7 @@ def test_cycle_handles_short_history_gracefully(
     tiny_universe_yaml,
     tmp_path: Path,
 ) -> None:
-    # Empty cache (no parquet writes) → cycle must report no_orders and not crash.
+    # Empty cache must be reported as a data failure, not a healthy no-orders run.
     cache = ParquetCache(tmp_path / "parquet_empty")
     cfg = RunnerConfig(
         universe=tiny_universe_yaml,
@@ -380,7 +380,8 @@ def test_cycle_handles_short_history_gracefully(
         clock=lambda: datetime(2024, 1, 1, tzinfo=timezone.utc),
     )
     report = cycle.run_cycle()
-    assert report.status == "no_orders"
+    assert report.status == "error"
+    assert "price coverage blocked" in report.error
 
 
 def test_short_history_symbol_does_not_truncate_price_matrix(

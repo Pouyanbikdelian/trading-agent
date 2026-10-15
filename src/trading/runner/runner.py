@@ -1428,6 +1428,20 @@ class Runner:
         return gate(trigger, every_weeks=every, anchor=anchor, tz=self.config.schedule_tz)
 
     async def _run_cycle_async(self, *, review_only: bool = False) -> None:
+        """Keep a concurrent PM refresh from withdrawing a planning decision.
+
+        October 14: /pm run started while /cycle was loading prices and
+        replaced its usable decision with "in progress". Serialize the PM
+        lifecycle and planning, including approval, with the same lock.
+        """
+        lock = getattr(self, "_agent_pm_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._agent_pm_lock = lock
+        async with lock:
+            await self._run_cycle_serialized(review_only=review_only)
+
+    async def _run_cycle_serialized(self, *, review_only: bool = False) -> None:
         """Run one trading cycle with a hard timeout + Telegram-friendly
         error reporting.
 
@@ -2127,7 +2141,8 @@ class Runner:
         if lock.locked():
             logger.bind(component="agent_pm").info("PM already running; duplicate request skipped")
             self.alerts.info(
-                "🧠 Agent PM is already refreshing candidates or preparing its decision."
+                "🧠 A PM decision or cycle is already in progress. "
+                "This PM request was not started; retry after it finishes."
             )
             return
         async with lock:
@@ -2637,27 +2652,34 @@ class Runner:
             except Exception:
                 logger.bind(component="data").exception("scorecard refresh targets unavailable")
             sem = _asyncio.Semaphore(4)
-            ok = failed = 0
 
-            def _one(sym: str) -> bool:
+            def _one(sym: str) -> str | None:
                 from trading.data.yfinance_source import YFinanceSource
 
                 ins = Instrument(symbol=sym, asset_class=AssetClass.EQUITY)
-                cache.get_bars(YFinanceSource(), ins, starts[sym], end, "1D")
-                return True
+                frame = cache.get_bars(YFinanceSource(), ins, starts[sym], end, "1D")
+                if frame.empty:
+                    return None
+                valid = frame["close"].dropna()
+                return str(valid.index.max().date()) if len(valid) else None
 
-            async def _guarded(sym: str) -> bool:
+            async def _guarded(sym: str) -> tuple[str, str | None]:
                 async with sem:
                     try:
-                        return await _asyncio.to_thread(_one, sym)
+                        return sym, await _asyncio.to_thread(_one, sym)
                     except Exception:
-                        return False
+                        return sym, None
 
-            for res in await _asyncio.gather(*(_guarded(s) for s in sorted(symbols))):
-                if res:
-                    ok += 1
-                else:
-                    failed += 1
+            tails = dict(await _asyncio.gather(*(_guarded(s) for s in sorted(symbols))))
+            newest = max((last for last in tails.values() if last is not None), default=None)
+            stale = sorted(
+                sym
+                for sym, last in tails.items()
+                if last is None
+                or last != newest
+                or (end.date() - _pd.Timestamp(last).date()).days > 4
+            )
+            fresh = len(tails) - len(stale)
 
             from trading.runtime.portfolio_stats import _read_close
 
@@ -2667,8 +2689,19 @@ class Runner:
             if bench is not None and len(bench):
                 age = (_pd.Timestamp.now(tz="UTC").normalize() - bench.index.max().normalize()).days
             logger.bind(component="data").info(
-                f"price cache refresh: {ok} ok, {failed} failed, last SPY bar {last}"
+                f"price cache refresh: {fresh}/{len(tails)} current, "
+                f"{len(stale)} stale/missing, latest {newest}, last SPY bar {last}; "
+                f"stale/missing symbols: {', '.join(stale) or 'none'}"
             )
+            previous = getattr(self, "_last_price_refresh_stale", None)
+            if stale and tuple(stale) != previous:
+                self.alerts.warning(
+                    f"⚠️ Price refresh: {fresh}/{len(tails)} current through {newest}; "
+                    f"{len(stale)} stale/missing: {', '.join(stale[:15])}. "
+                    "Unusable series are excluded from candidate preparation; "
+                    "a broad coverage failure blocks planning."
+                )
+            self._last_price_refresh_stale = tuple(stale)
             if age is not None and age > 4:
                 self.alerts.info(
                     f"⚠️ price cache still stale after refresh — newest bar {last} "

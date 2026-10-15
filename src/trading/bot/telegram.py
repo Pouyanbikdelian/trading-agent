@@ -1017,9 +1017,19 @@ def _cmd_pm(args: list[str]) -> str:
     # number on this card read as a position size somebody could act on.
     # The percentage return is still meaningful — it is the PM's own
     # scorecard — so that stays, in the unit it is actually measured in.
-    lines = [
-        "🧠 *Agent PM — target allocation* (the desk's live targets; they become orders only at a cycle, after your /approve)"
-    ]
+    from trading.agents.pm_signal import load_pm_signal
+
+    decision = load_pm_signal(settings.state_dir, sleeve_pct=1.0)
+    if decision.ok:
+        lines = [
+            "🧠 *Agent PM — target allocation* (fresh decision; subject to cycle checks and /approve)"
+        ]
+    else:
+        lines = [
+            "🧠 *Agent PM — historical portfolio; execution unavailable*",
+            f"Latest decision is unavailable: {decision.reason}",
+            "The weights below describe the retained simulation, not executable targets.",
+        ]
     since = float(perf.get("return_pct", 0.0) or 0.0)
     if "spy_return_pct" in perf:
         alpha = since - perf["spy_return_pct"]
@@ -1031,9 +1041,19 @@ def _cmd_pm(args: list[str]) -> str:
         lines.append(f"{since:+.2f}% since inception")
     lines.append("_frictionless: no fills, fees, slippage or dividends_")
 
-    weights = _pm_target_weights(book)
+    weights = (
+        {key.split(":")[-1]: weight for key, weight in decision.signal.target_weights.items()}
+        if decision.ok and decision.signal is not None
+        else _pm_target_weights(book)
+    )
     lines.append("")
-    lines.append(f"*Target weights*{_marks_age_note(book)}")
+    label = "Target weights" if decision.ok else "Historical weights"
+    age_note = (
+        f" · decision {decision.age_hours:.1f}h old"
+        if decision.ok and decision.age_hours is not None
+        else _marks_age_note(book)
+    )
+    lines.append(f"*{label}*{age_note}")
     lines.extend(format_target_book(weights))
 
     eq, ccy, is_desk = _live_equity_for_pm()
@@ -1044,14 +1064,15 @@ def _cmd_pm(args: list[str]) -> str:
         sleeve_pct=float(getattr(settings, "agent_pm_sleeve_pct", 0.0) or 0.0),
         desk=is_desk,
     )
-    if translation:
+    if translation and decision.ok:
         lines.append("")
         lines.extend(translation)
 
     try:
         last = _json.loads((pm_dir / "last_run.json").read_text())
         lines.append("")
-        lines.append(f"_Last rationale: {_clip(last.get('rationale', ''), 400)}_")
+        if last.get("rationale"):
+            lines.append(f"_Last rationale: {_clip(last['rationale'], 400)}_")
     except Exception:
         pass
     lines += [
@@ -2406,6 +2427,20 @@ def _cmd_orders(args: list[str] | None = None) -> str | None:
     if args and str(args[0]).lower() in ("resolve", "--resolve"):
         # Irreversible and evidence-dependent, so it goes to the runner
         # where the broker lives rather than being decided in the bot.
+        if len(args) > 1:
+            if len(args) != 3 or args[2].lower() != "confirm-unknown":
+                return (
+                    "To retire one checked orphan older than 7 days, use "
+                    "`/orders resolve FULL_ORDER_ID confirm-unknown`. "
+                    "This records an unknown outcome; it does not cancel a broker order."
+                )
+            return _queue_command(
+                "resolve_orders",
+                {
+                    "client_order_id": args[1],
+                    "acknowledge_unknown": True,
+                },
+            )
         return _queue_command("resolve_orders", {})
 
     now = datetime.now(tz=timezone.utc)
@@ -2440,15 +2475,35 @@ def _cmd_orders(args: list[str] | None = None) -> str | None:
         lines.append(f"⏳ *In flight: {len(still_open)} order(s)*")
         for o, st, _bid in still_open[-15:]:
             lines.append(
-                f"  `{o.client_order_id[:14]:<14}` "
+                f"  `{o.client_order_id}` "
                 f"{o.side.value} {o.quantity:g} {o.instrument.symbol} "
                 f"({o.order_type.value}) — {st.value}{_age(o)}"
             )
-        stale = [o for o, _st, _bid in still_open if (now - o.created_at).days >= 7]
-        if stale:
+        from trading.runtime.command_processor import RESOLVE_MIN_AGE_DAYS
+
+        eligible = [
+            o
+            for o, _st, _bid in still_open
+            if (now - o.created_at).total_seconds() > RESOLVE_MIN_AGE_DAYS * 86400
+        ]
+        if eligible:
             lines.append(
-                f"_{len(stale)} of these predate the broker's execution history. "
-                "Check IBKR directly; `/orders resolve` retires them once you have._"
+                f"_{len(eligible)} row(s) are older than {RESOLVE_MIN_AGE_DAYS:g} days. "
+                "Check IBKR directly; `/orders resolve` can retire them as outcome unknown "
+                "if the broker no longer recognises them._"
+            )
+        younger = [
+            o
+            for o, _st, _bid in still_open
+            if 7 <= (now - o.created_at).days < RESOLVE_MIN_AGE_DAYS
+        ]
+        if younger:
+            lines.append(
+                f"_{len(younger)} old row(s) are still inside the {RESOLVE_MIN_AGE_DAYS:g}-day "
+                "reconciliation window. Check the IBKR statement; automatic retirement "
+                "via bulk `/orders resolve` is not yet eligible. After checking its "
+                "statement, an exact `/orders resolve FULL_ORDER_ID confirm-unknown` "
+                "can explicitly retire an unknown orphan._"
             )
         lines.append("")
     lines.append(f"*Recent (last 7d, {len(other)} order(s)):*")

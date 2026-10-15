@@ -39,6 +39,25 @@ class _SilentAlerts(TelegramAlerts):
         self.last_critical = msg
 
 
+def test_pm_cannot_withdraw_decision_while_cycle_is_planning(tmp_path, monkeypatch):
+    runner = _bare_runner(tmp_path)
+    calls = []
+
+    async def planning(*, review_only=False):
+        calls.append("cycle")
+        assert runner._agent_pm_lock.locked()
+        await runner._run_agent_pm_async()
+
+    async def forbidden():
+        pytest.fail("PM withdrew decision during an active cycle")
+
+    runner._run_cycle_serialized = planning
+    runner._run_agent_pm_with_candidates = forbidden
+    asyncio.run(runner._run_cycle_async())
+    assert calls == ["cycle"]
+    assert not runner._agent_pm_lock.locked()
+
+
 def _bare_runner(tmp_path: Path) -> Runner:
     """Build the minimal Runner state the new internals need to read."""
     runner = Runner.__new__(Runner)

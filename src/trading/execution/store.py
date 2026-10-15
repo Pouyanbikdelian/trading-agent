@@ -337,7 +337,7 @@ class OrderStore:
         *,
         note: str,
         at: datetime | None = None,
-    ) -> None:
+    ) -> bool:
         """Retire a row whose outcome can no longer be established.
 
         Deliberately never called automatically. The broker's execution
@@ -347,16 +347,22 @@ class OrderStore:
         caller is responsible for having confirmed the broker has no such
         order working; ``note`` records what that confirmation was.
         """
-        self.conn.execute(
+        # An execution reconciliation may settle the row after the operator
+        # read it. Never overwrite a newly known outcome with "unknown".
+        changed = self.conn.execute(
             "UPDATE orders SET status = ?, resolution_note = ?, resolved_at = ? "
-            "WHERE client_order_id = ?",
+            "WHERE client_order_id = ? AND status IN (?, ?, ?)",
             (
                 OrderStatus.UNRECONCILED.value,
                 note,
                 _ts_to_epoch(at or datetime.now(tz=timezone.utc)),
                 client_order_id,
+                OrderStatus.PENDING.value,
+                OrderStatus.SUBMITTED.value,
+                OrderStatus.PARTIAL.value,
             ),
         )
+        return changed.rowcount == 1
 
     def resolution_note(self, client_order_id: str) -> tuple[str | None, datetime | None]:
         """The audit trail behind an ``unreconciled`` row."""

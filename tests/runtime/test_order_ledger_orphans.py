@@ -110,7 +110,7 @@ class TestOpenRowsAreNeverHiddenByAge:
 
         assert "no orders in the last 7 days" not in out
         assert "In flight: 5 order(s)" in out
-        assert "predate the broker's execution history" in out
+        assert "older than 14 days" in out
         assert "V" in out and "MU" in out and "AMD" in out
 
     def test_pending_command_shows_a_month_old_order(self, tmp_path, monkeypatch) -> None:
@@ -300,7 +300,105 @@ class TestResolvingRequiresBrokerEvidence:
         assert out["n_resolved"] == 0
 
 
+@pytest.mark.parametrize(
+    "evidence", ["unknown", "working", "execution", "completed", "unreachable"]
+)
+def test_targeted_retirement_preserves_broker_evidence(tmp_path, monkeypatch, evidence):
+    import trading.core.config as cfg
+
+    monkeypatch.setattr(cfg, "settings", cfg.settings.model_copy(update={"state_dir": tmp_path}))
+    store = OrderStore(tmp_path / "orders.db")
+    target = _order("CRL", days_ago=8)
+    other = _order("OTHER", days_ago=30)
+    store.save_order(target)
+    store.save_order(other)
+    store.close()
+
+    def executions(**kwargs):
+        if evidence == "unreachable":
+            raise RuntimeError("execution history unavailable")
+        return [SimpleNamespace(order_id=target.client_order_id)] if evidence == "execution" else []
+
+    broker = SimpleNamespace(
+        get_open_orders=lambda: [target] if evidence == "working" else [],
+        get_executions=executions,
+        get_completed_orders=lambda: (
+            [SimpleNamespace(client_order_id=target.client_order_id)]
+            if evidence == "completed"
+            else []
+        ),
+    )
+    cmd = Command(
+        id="retire-one",
+        type=CommandType.RESOLVE_ORDERS,
+        requested_by="yan",
+        args={"client_order_id": target.client_order_id, "acknowledge_unknown": True},
+    )
+    if evidence in {"execution", "completed", "unreachable"}:
+        with pytest.raises((RuntimeError, ValueError)):
+            _h_resolve_orders(cmd, broker)
+    else:
+        out = _h_resolve_orders(cmd, broker)
+        assert out["n_resolved"] == (1 if evidence == "unknown" else 0)
+    reopened = OrderStore(tmp_path / "orders.db")
+    ids = {o.client_order_id for o, *_ in reopened.open_orders()}
+    assert other.client_order_id in ids
+    assert (target.client_order_id not in ids) == (evidence == "unknown")
+    if evidence == "unknown":
+        note, _ = reopened.resolution_note(target.client_order_id)
+        assert "explicit single-order retirement" in note
+        assert "NOT a fill or a cancellation" in note
+
+
+def test_eight_day_orphan_explains_bulk_cutoff(tmp_path, monkeypatch):
+    from trading.bot import telegram as tg
+
+    monkeypatch.setattr(tg, "datetime", SimpleNamespace(now=lambda **_: NOW))
+    monkeypatch.setattr(tg, "settings", SimpleNamespace(state_dir=tmp_path))
+    store = OrderStore(tmp_path / "orders.db")
+    store.save_order(_order("CRL", days_ago=8))
+    store.close()
+    out = tg._cmd_orders()
+    assert "inside the 14-day" in out
+    assert "not yet eligible" in out
+    assert "confirm-unknown" in out
+    assert "predate the broker" not in out
+
+
+@pytest.mark.parametrize("age,ack", [(2, True), (8, False)])
+def test_targeted_retirement_needs_age_and_acknowledgement(tmp_path, monkeypatch, age, ack):
+    import trading.core.config as cfg
+
+    monkeypatch.setattr(cfg, "settings", cfg.settings.model_copy(update={"state_dir": tmp_path}))
+    store = OrderStore(tmp_path / "orders.db")
+    target = _order("CRL", days_ago=age)
+    store.save_order(target)
+    store.close()
+    broker = SimpleNamespace(
+        get_open_orders=lambda: [], get_executions=lambda **_: [], get_completed_orders=lambda: []
+    )
+    cmd = Command(
+        id="one",
+        type=CommandType.RESOLVE_ORDERS,
+        requested_by="yan",
+        args={"client_order_id": target.client_order_id, "acknowledge_unknown": ack},
+    )
+    if not ack:
+        with pytest.raises(ValueError, match="acknowledgement"):
+            _h_resolve_orders(cmd, broker)
+    else:
+        assert _h_resolve_orders(cmd, broker)["n_resolved"] == 0
+    assert len(OrderStore(tmp_path / "orders.db").open_orders()) == 1
+
+
 class TestAResolvedRowStopsAlarming:
+    def test_retirement_cannot_overwrite_a_known_fill(self, tmp_path):
+        store, orders = _store_with_the_august_rows(tmp_path)
+        target = orders[0]
+        store.update_status(target.client_order_id, OrderStatus.FILLED)
+        assert not store.mark_unreconciled(target.client_order_id, note="late retirement", at=NOW)
+        assert store.resolution_note(target.client_order_id) == (None, None)
+
     def test_it_leaves_the_open_set_and_the_reconciliation_window(self, tmp_path) -> None:
         """The alarm and the lookback both key off OPEN_STATUSES, so this
         single transition is what actually ends the month of noise."""

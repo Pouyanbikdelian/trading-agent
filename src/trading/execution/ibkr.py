@@ -784,6 +784,14 @@ class IbkrBroker(Broker):
         so partially filled orders net correctly."""
         self._ensure_connected()
         open_trades = self._bounded("openTrades", self._ib.openTrades)
+        return self._orders_from_open_trades(open_trades)
+
+    def get_open_orders_for_reconciliation(self) -> list[Order]:
+        """A retirement needs a fresh broker reply, not the openTrades cache."""
+        trades = self._strict_request("working orders", "reqAllOpenOrdersAsync")
+        return self._orders_from_open_trades(trades, strict=True)
+
+    def _orders_from_open_trades(self, open_trades: Any, *, strict: bool = False) -> list[Order]:
         out: list[Order] = []
         for trade in open_trades:
             try:
@@ -809,6 +817,10 @@ class IbkrBroker(Broker):
                     )
                 )
             except Exception:
+                if strict:
+                    raise BrokerError(
+                        "could not interpret a broker working order; retirement blocked"
+                    ) from None
                 logger.bind(broker=self.name).exception("get_open_orders: skipping trade")
         return out
 

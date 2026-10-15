@@ -936,12 +936,31 @@ def _h_resolve_orders(cmd: Command, broker: Broker) -> dict[str, Any]:
 
     requested_age = float(cmd.args.get("older_than_days", RESOLVE_MIN_AGE_DAYS))
     age_days = max(requested_age, RESOLVE_MIN_AGE_DAYS)
+    # A human may explicitly retire ONE older orphan before the bulk
+    # cutoff. It remains outcome-unknown, never a manufactured fill/cancel.
+    # A naked bulk request cannot select this path or lower its 14d floor.
+    target_id = str(cmd.args.get("client_order_id", "")).strip()
+    targeted = bool(target_id) and cmd.args.get("acknowledge_unknown") is True
+    if target_id and not targeted:
+        raise ValueError("targeted retirement requires explicit acknowledgement of unknown outcome")
+    if targeted:
+        age_days = 7.0
     now = _utcnow()
     cutoff = now - timedelta(days=age_days)
 
     # Evidence first. A raise here fails the command with nothing written,
     # which is the correct outcome when the broker cannot be consulted.
-    working = list(broker.get_open_orders() or [])
+    working_reader = getattr(broker, "get_open_orders_for_reconciliation", broker.get_open_orders)
+    working = list(working_reader() or [])
+    if targeted:
+        # Do not discard a broker-reported outcome or executions that ordinary
+        # reconciliation can still recover. Unsupported/failed reads block it.
+        executions = broker.get_executions(since=now - timedelta(days=RESOLVE_MIN_AGE_DAYS))
+        completed = broker.get_completed_orders()
+        if any(f.order_id == target_id for f in executions) or any(
+            r.client_order_id == target_id for r in completed
+        ):
+            raise ValueError("broker has outcome evidence; reconcile this order before retirement")
     working_ids = {str(o.client_order_id) for o in working}
     working_legs = {(o.instrument.symbol.upper(), o.side.value) for o in working}
 
@@ -950,6 +969,8 @@ def _h_resolve_orders(cmd: Command, broker: Broker) -> dict[str, Any]:
         resolved: list[str] = []
         skipped: list[str] = []
         for order, _status, broker_order_id in store.open_orders():
+            if targeted and order.client_order_id != target_id:
+                continue
             if order.created_at >= cutoff:
                 continue
             leg = (order.instrument.symbol.upper(), order.side.value)
@@ -960,18 +981,23 @@ def _h_resolve_orders(cmd: Command, broker: Broker) -> dict[str, Any]:
             ):
                 skipped.append(f"{order.instrument.symbol} ({order.client_order_id[:14]})")
                 continue
-            store.mark_unreconciled(
+            changed = store.mark_unreconciled(
                 order.client_order_id,
                 note=(
                     f"resolved by {cmd.requested_by} at {now.isoformat()}: "
                     f"{len(working)} order(s) working at the broker, none matching this row. "
-                    f"Created {(now - order.created_at).days}d ago, past the "
-                    f"{age_days:g}d reconciliation window. "
-                    "True outcome unknown — this is NOT a fill or a cancellation."
+                    f"Created {(now - order.created_at).days}d ago; "
+                    + (
+                        "explicit single-order retirement, unknown outcome acknowledged. "
+                        if targeted
+                        else f"past the {age_days:g}d reconciliation window. "
+                    )
+                    + "True outcome unknown — this is NOT a fill or a cancellation."
                 ),
                 at=now,
             )
-            resolved.append(f"{order.instrument.symbol} ({order.client_order_id[:14]})")
+            if changed:
+                resolved.append(f"{order.instrument.symbol} ({order.client_order_id[:14]})")
         logger.bind(component="command_processor").warning(
             f"resolved {len(resolved)} unreconcilable order row(s); skipped {len(skipped)} "
             f"still recognised by the broker"
@@ -983,6 +1009,7 @@ def _h_resolve_orders(cmd: Command, broker: Broker) -> dict[str, Any]:
             "n_skipped": len(skipped),
             "broker_working": len(working),
             "older_than_days": age_days,
+            "targeted": targeted,
         }
     finally:
         with contextlib.suppress(Exception):

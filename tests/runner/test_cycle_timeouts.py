@@ -120,7 +120,7 @@ class TestNothingHardcodesTheOldNumber:
 
         from trading.runner import runner as runner_module
 
-        source = inspect.getsource(runner_module.Runner._run_cycle_async)
+        source = inspect.getsource(runner_module.Runner._run_cycle_serialized)
         assert "timeouts" in source
         assert "self.CYCLE_TIMEOUT_SECONDS" not in source
 
@@ -133,7 +133,7 @@ class TestTheAbortSaysWhatActuallyHappened:
 
         from trading.runner import runner as runner_module
 
-        source = inspect.getsource(runner_module.Runner._run_cycle_async)
+        source = inspect.getsource(runner_module.Runner._run_cycle_serialized)
         assert "APPROVAL_PENDING_FILE" in source
         gateway_line = next(line for line in source.splitlines() if "wedged IBKR Gateway" in line)
         assert "else" in gateway_line or "if " in gateway_line
