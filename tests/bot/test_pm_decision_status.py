@@ -7,12 +7,16 @@ from types import SimpleNamespace
 import pytest
 
 
-@pytest.mark.parametrize("state", ["failed", "missing", "stale", "fresh"])
+@pytest.mark.parametrize("state", ["failed", "missing", "stale", "fresh", "disabled"])
 def test_pm_card_uses_execution_eligibility(tmp_path, monkeypatch, state):
     from trading.agents import pm
     from trading.bot import telegram as tg
 
-    monkeypatch.setattr(tg, "settings", SimpleNamespace(state_dir=tmp_path, agent_pm_sleeve_pct=1))
+    monkeypatch.setattr(
+        tg,
+        "settings",
+        SimpleNamespace(state_dir=tmp_path, agent_pm_sleeve_pct=0 if state == "disabled" else 1),
+    )
     monkeypatch.setattr(pm, "performance", lambda *_: {"return_pct": 1.0})
     monkeypatch.setattr(pm, "_marks_age_note", lambda *_: " · marks 22h old")
     monkeypatch.setattr(tg, "_live_equity_for_pm", lambda: (70000, "CHF", True))

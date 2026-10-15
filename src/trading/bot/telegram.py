@@ -1019,7 +1019,8 @@ def _cmd_pm(args: list[str]) -> str:
     # scorecard — so that stays, in the unit it is actually measured in.
     from trading.agents.pm_signal import load_pm_signal
 
-    decision = load_pm_signal(settings.state_dir, sleeve_pct=1.0)
+    sleeve = float(getattr(settings, "agent_pm_sleeve_pct", 0.0) or 0.0)
+    decision = load_pm_signal(settings.state_dir, sleeve_pct=sleeve)
     if decision.ok:
         lines = [
             "🧠 *Agent PM — target allocation* (fresh decision; subject to cycle checks and /approve)"
@@ -1042,7 +1043,10 @@ def _cmd_pm(args: list[str]) -> str:
     lines.append("_frictionless: no fills, fees, slippage or dividends_")
 
     weights = (
-        {key.split(":")[-1]: weight for key, weight in decision.signal.target_weights.items()}
+        {
+            key.split(":")[-1]: weight / sleeve
+            for key, weight in decision.signal.target_weights.items()
+        }
         if decision.ok and decision.signal is not None
         else _pm_target_weights(book)
     )

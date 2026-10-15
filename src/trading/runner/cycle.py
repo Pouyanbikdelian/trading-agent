@@ -2697,15 +2697,15 @@ class Cycle:
                     logger.bind(component="cycle").info(
                         f"  …prices {done_count}/{n_total} loaded "
                         f"({len(series)} non-empty, {elapsed:.0f}s elapsed, "
-                        f"refresh: {n_refreshed} ok / {n_refresh_timeout} timeout / "
+                        f"requests: {n_refreshed} returned / {n_refresh_timeout} timeout / "
                         f"{n_refresh_failed} err)"
                     )
 
         elapsed = time.monotonic() - t0
         logger.bind(component="cycle").info(
             f"prices loaded: {len(series)}/{n_total} non-empty in {elapsed:.1f}s "
-            f"(refresh: {n_refreshed} ok, {n_refresh_timeout} timeout, "
-            f"{n_refresh_failed} err)"
+            f"(requests: {n_refreshed} returned, {n_refresh_timeout} timeout, "
+            f"{n_refresh_failed} err; price usability checked next)"
         )
 
         if not series:
