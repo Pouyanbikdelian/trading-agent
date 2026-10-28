@@ -14,6 +14,38 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-10-27 — Retained simulated holdings had no live exception to approve
+
+**Symptoms.** After the operator reset a mismatched pinned-position baseline,
+the next manual cycle completed with zero orders. Its sole PM target, GEN at
+6%, was outside the candidate ladder. The bridge requested operator approval,
+but the exception ledger contained no proposal. GEN remained in the simulated
+book and was absent from the latest live account snapshot.
+
+**Cause.** Proposal creation checked only newly opened simulated positions;
+execution eligibility correctly checked every off-ladder target. Retaining or
+trimming a simulated holding therefore fell between the two checks. With the
+mechanical sleeve disabled, no executable targets remained.
+
+**Correction.** Process all current off-ladder targets, retain active reviews
+across repeated decisions, and renew expired reviews through a new proposal.
+Missing paperwork remains research-only and explicitly requests `/pm run`;
+pending proposals point to `/exceptions`, with `/exceptions ID` showing the
+sources, invalidation condition and risk budget before approval. Ledger writes
+share a lock so PM proposals cannot overwrite concurrent operator decisions.
+Approving an expired proposal is refused. No approval, position or risk limit
+is inferred from simulated ownership.
+
+**Validation.** Hermetic regressions cover a held simulated name falling off
+the ladder, missing paperwork, repeated pending reviews, rejection, expiry,
+explicit approval and retained approval budgets, plus Telegram review details
+and the zero-order cycle message.
+
+**Lesson.** An approval gate must distinguish “proposal missing” from “ready
+for review.” Simulated ownership is neither live ownership nor authorization.
+
+---
+
 ## 2026-10-14 — One stale constituent stopped every manual PM cycle
 
 **Symptoms.** Five manual cycles completed with zero orders. `/refresh`

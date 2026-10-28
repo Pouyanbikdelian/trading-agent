@@ -302,7 +302,7 @@ def load_pm_signal(
             None, "PM decision carries no weights", decided_at=decided_at, age_hours=age_h
         )
 
-    from trading.agents.exceptions import approved_exception_limits
+    from trading.agents.exceptions import approved_exception_limits, exception_block_reason
 
     approved_limits = approved_exception_limits(state_dir, now=now)
     off_ladder_targets = {
@@ -342,7 +342,7 @@ def load_pm_signal(
         return PMSignalResult(
             None,
             (
-                "all off-ladder PM targets await operator approval"
+                exception_block_reason(state_dir, set(approval_blocked), now=now)
                 if approval_blocked
                 else "no PM target survived instrument mapping"
             ),

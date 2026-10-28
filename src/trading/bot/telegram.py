@@ -3923,7 +3923,12 @@ def _cmd_exceptions(args: list[str]) -> str:
     still needs freshness checks, normal risk sizing and the usual cycle
     approval controls.
     """
-    from trading.agents.exceptions import list_exceptions, set_exception_status
+    from trading.agents.exceptions import (
+        exception_block_reason,
+        list_exceptions,
+        set_exception_status,
+    )
+    from trading.agents.pm_signal import pm_decision_path
     from trading.core.text import clip
 
     if args and args[0].lower() in {"approve", "reject"}:
@@ -3932,7 +3937,7 @@ def _cmd_exceptions(args: list[str]) -> str:
         wanted = "approved" if args[0].lower() == "approve" else "rejected"
         row = set_exception_status(settings.state_dir, args[1], wanted)
         if row is None:
-            return "_No pending exception with that id. Use `/exceptions` to review the ledger._"
+            return "_No eligible pending exception with that id (it may have expired). Use `/exceptions` to review the ledger._"
         if wanted == "approved":
             return (
                 f"✅ Exception `{row['id']}` for `{row['symbol']}` approved through "
@@ -3942,12 +3947,37 @@ def _cmd_exceptions(args: list[str]) -> str:
         return f"🗂 Exception `{row['id']}` for `{row['symbol']}` rejected; no order was placed."
 
     rows = list_exceptions(settings.state_dir)
-    if not rows:
-        return (
-            "🧪 *Off-ladder exceptions* — none pending.\n"
-            "_Creative names must carry thesis, sources, horizon, invalidation and risk budget first._"
+    if args:
+        row = next((row for row in rows if row.get("id") == args[0]), None)
+        if row is None or len(args) != 1:
+            return "_No exception with that id. Use `/exceptions` to list the research ledger._"
+        return "\n".join(
+            [
+                f"🧪 *Exception review* · `{row['id']}` · `{row['symbol']}`",
+                f"Status: {row['status']} · expires {str(row['expires_at'])[:10]}",
+                f"Maximum PM weight: {float(row['max_weight']):.1%} · horizon {row['horizon_days']} days",
+                "Thesis: " + clip(str(row.get("thesis", "")), 1500),
+                "Sources: " + clip(", ".join(str(s) for s in row.get("source_ids", [])), 500),
+                "Invalidation: " + clip(str(row.get("invalidation", "")), 800),
+                "Sector impact: " + clip(str(row.get("sector_impact", "")), 300),
+                "Correlation impact: " + clip(str(row.get("correlation_impact", "")), 300),
+                f"Review, then `/exceptions approve {row['id']}` or `/exceptions reject {row['id']}`.",
+                "_Approval makes the bounded target eligible; it does not submit an order._",
+            ]
         )
     lines = ["🧪 *Off-ladder exceptions* — research ledger", ""]
+    try:
+        decision = json.loads(pm_decision_path(settings.state_dir).read_text())
+        symbols = {str(s).upper().strip() for s in decision.get("off_ladder_targets", [])}
+        reason = exception_block_reason(settings.state_dir, symbols)
+        if reason:
+            lines.extend(["Latest PM targets blocked: " + reason, ""])
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    if not rows:
+        lines.append(
+            "No proposals recorded. A complete evidence-backed proposal is required first."
+        )
     for row in rows[:10]:
         lines.append(
             f"`{row.get('id', '?')}` · *{str(row.get('status', '?')).upper()}* · "
@@ -3958,7 +3988,7 @@ def _cmd_exceptions(args: list[str]) -> str:
     lines.extend(
         [
             "",
-            "_`/exceptions approve ID` makes only that bounded thesis eligible for PM bridge; it never submits an order._",
+            "_Use `/exceptions ID` to review sources, invalidation and risk budget before approving._",
         ]
     )
     return "\n".join(lines)

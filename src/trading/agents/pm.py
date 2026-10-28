@@ -217,7 +217,14 @@ PM_CHARTER = (
     "approves it. For EACH such stock give: symbol, thesis, source_ids "
     "(specific evidence keys/headlines), horizon_days, invalidation, "
     "max_weight (never over 0.10), sector_impact, and correlation_impact. "
-    "If you cannot provide every field, do not open it. An operator mandate "
+    "This applies to EVERY off-ladder target, including retained or trimmed "
+    "simulated holdings. A simulated holding is not a live holding or an "
+    "approval; compare operator_live_account_positions_NOT_YOUR_BOOK before "
+    "calling a live target a hold rather than a re-entry. Existing active "
+    "exception records are in off_ladder_exception_review. If there is no "
+    "active record, provide complete paperwork even when the simulated book "
+    "already owns the stock. If you cannot provide every field, explain the "
+    "missing evidence; the target remains research-only. An operator mandate "
     "is a first-class source of an exception, not a reason to bypass this "
     "record or the risk manager.\n"
     "\n"
@@ -1082,9 +1089,11 @@ def run_agent_pm(
     # Standing instructions the operator left from Telegram. Passed as
     # context for the decision — the weights this produces still go
     # through _clamp_weights, so a mandate can never lift a cap.
+    from trading.agents.exceptions import list_exceptions
     from trading.copilot.mandates import for_context as _mandates_for_context
 
     payload: dict[str, Any] = {
+        "off_ladder_exception_review": list_exceptions(state_dir, active_only=True),
         "operator_mandates": _mandates_for_context(Path(state_dir)),
         "operator_held_do_not_trade": sorted(held),
         "operator_excluded_never_buy": sorted(excluded),
@@ -1190,9 +1199,16 @@ def run_agent_pm(
     ladder_payload = (context or {}).get("candidate_ladder")
     ladder_payload = ladder_payload if isinstance(ladder_payload, dict) else {}
     ladder_syms = {
-        str(r.get("symbol")) for r in (ladder_payload.get("ranked") or []) if isinstance(r, dict)
+        str(r.get("symbol", "")).upper().strip()
+        for r in (ladder_payload.get("ranked") or [])
+        if isinstance(r, dict)
     }
     opened_names = sorted(set(new_holdings) - set(prior_holdings))
+    off_ladder_targets = (
+        sorted(s for s in weights if s not in ladder_syms and s not in UNIVERSE)
+        if ladder_syms
+        else []
+    )
     off_ladder = (
         sorted(s for s in opened_names if s not in ladder_syms and s not in UNIVERSE)
         if ladder_syms
@@ -1213,9 +1229,15 @@ def run_agent_pm(
     raw_exceptions = out.get("structured_exceptions")
     if not isinstance(raw_exceptions, list):
         raw_exceptions = []
-    from trading.agents.exceptions import normalise_proposal, record_proposals
+    from trading.agents.exceptions import (
+        approved_exception_limits,
+        normalise_proposal,
+        record_proposals,
+    )
 
-    for symbol in off_ladder:
+    point = datetime.fromisoformat(now_iso)
+    approved = approved_exception_limits(state_dir, now=point)
+    for symbol in off_ladder_targets:
         raw = next(
             (
                 candidate
@@ -1233,11 +1255,17 @@ def run_agent_pm(
             correlation_review=ladder_payload.get("correlation_review"),
             now=datetime.fromisoformat(now_iso),
         )
-        if proposal is None:
-            invalid_exceptions.append(symbol)
-        else:
+        if proposal is not None:
             exception_rows.append(proposal)
-    exception_rows = record_proposals(state_dir, exception_rows)
+    record_proposals(state_dir, exception_rows)
+    # Read retained reviews after writing new proposals. Never write cached
+    # records back: the operator may have rejected one while the PM ran.
+    exception_rows = [
+        row
+        for row in list_exceptions(state_dir, active_only=True, now=point)
+        if row.get("symbol") in off_ladder_targets
+    ]
+    invalid_exceptions = sorted(set(off_ladder_targets) - {row["symbol"] for row in exception_rows})
 
     names_changed = set(new_holdings) != set(prior_holdings)
     cycles_stale = 0 if names_changed else int(book.get("cycles_since_name_change", 0)) + 1
@@ -1338,15 +1366,15 @@ def run_agent_pm(
         # bridge reads this durable fact so a proposal cannot become silently
         # tradeable next week simply because it was opened in the sim book
         # this week.
-        "off_ladder_targets": (
-            sorted(
-                symbol for symbol in weights if symbol not in ladder_syms and symbol not in UNIVERSE
-            )
-            if ladder_syms
-            else []
-        ),
+        "off_ladder_targets": off_ladder_targets,
         "off_ladder_exception_ids": [str(row["id"]) for row in exception_rows],
-        "off_ladder_pending_approval": sorted(row["symbol"] for row in exception_rows),
+        "off_ladder_pending_approval": sorted(
+            {
+                row["symbol"]
+                for row in exception_rows
+                if row["status"] == "proposed" and row["symbol"] not in approved
+            }
+        ),
         "off_ladder_invalid_exception": invalid_exceptions,
         "prior_holdings": prior_holdings,
         "cycles_since_name_change": cycles_stale,
@@ -1582,7 +1610,13 @@ def format_pm_digest(
         lines.append(
             "⚠️ _off-ladder paperwork incomplete: "
             + ", ".join(f"`{s}`" for s in result["off_ladder_invalid_exception"])
-            + " — retained in PM research only_"
+            + " — retained in PM research only. Use `/pm run` for a fresh decision with complete evidence._"
+        )
+    if result.get("off_ladder_pending_approval"):
+        lines.append(
+            "🧪 *Approval required:* "
+            + ", ".join(f"`{s}`" for s in result["off_ladder_pending_approval"])
+            + " — review the evidence and risk budget with `/exceptions`."
         )
     if result.get("stale_marks"):
         lines.append(f"_(marked from stored closes: {', '.join(result['stale_marks'])})_")

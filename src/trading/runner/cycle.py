@@ -2265,14 +2265,18 @@ class Cycle:
             self._PM_BRIDGE_REFUSAL_REASON_METADATA
         )
         if pm_refusal:
+            next_step = (
+                "_Resolve the exception review above before retrying the cycle._"
+                if "`/exceptions`" in pm_refusal or "`/pm run`" in pm_refusal
+                else "_A fresh PM decision is required before a later cycle can propose "
+                "discretionary entries._"
+            )
             self.alerts.warning(
                 "📊 *Cycle plan: no orders*\n"
                 f"Agent PM was withheld: {pm_refusal}.\n"
                 "The mechanical sleeve has no executable targets at its configured size, "
                 "so the cycle intentionally did not manufacture a basket.\n\n"
-                f"{held_note}\n"
-                "_A fresh PM decision is required before a later cycle can propose "
-                "discretionary entries._" + _take_cycle_notes(self)
+                f"{held_note}\n" + next_step + _take_cycle_notes(self)
             )
             return
         self.alerts.info(

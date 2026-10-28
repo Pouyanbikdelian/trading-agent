@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from trading.core.clock import UtcClock
+from trading.core.file_lock import file_lock
 from trading.core.logging import logger
 
 EXCEPTIONS_FILE = "candidate_exceptions.json"
@@ -129,32 +131,57 @@ def normalise_proposal(
 def record_proposals(
     state_dir: Path | str, proposals: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Append pending proposals.  Existing approvals are never overwritten."""
+    """Return durable proposal records, including active retries of the same review.
+
+    Retained simulated holdings need the same review as new ones. Dropping a
+    duplicate from the return value made that pending review disappear from
+    the next PM digest; expired records must also allow a fresh proposal.
+    """
     if not proposals:
         return []
     path = exception_path(state_dir)
-    rows = _read(path)
-    recorded: list[dict[str, Any]] = []
-    for proposal in proposals:
-        # A retry of the same PM response should not create a stack of
-        # indistinguishable approvals.  An expired/rejected record remains
-        # history; a new thesis is allowed through.
-        duplicate = any(
-            row.get("status") in {"proposed", "approved"}
-            and row.get("symbol") == proposal.get("symbol")
-            and row.get("origin") == proposal.get("origin")
-            and row.get("thesis") == proposal.get("thesis")
-            for row in rows
-        )
-        if not duplicate:
-            rows.append(proposal)
-            recorded.append(proposal)
-    if recorded:
-        _atomic_write(path, rows)
-        logger.bind(component="candidate_exceptions").info(
-            f"recorded {len(recorded)} structured exception proposal(s)"
-        )
-    return recorded
+    with file_lock(path):
+        rows = _read(path)
+        recorded: list[dict[str, Any]] = []
+        changed = False
+        for proposal in proposals:
+            # A retry of the same PM response should not create a stack of
+            # indistinguishable approvals.  An expired/rejected record remains
+            # history; a new thesis is allowed through.
+            point = datetime.fromisoformat(str(proposal["created_at"]))
+            review_fields = (
+                "symbol",
+                "origin",
+                "thesis",
+                "source_ids",
+                "horizon_days",
+                "invalidation",
+                "max_weight",
+                "sector_impact",
+                "correlation_impact",
+            )
+            duplicate = next(
+                (
+                    row
+                    for row in rows
+                    if row.get("status") in {"proposed", "approved"}
+                    and _not_expired(row, point)
+                    and all(row.get(key) == proposal.get(key) for key in review_fields)
+                ),
+                None,
+            )
+            if duplicate is not None:
+                recorded.append(duplicate)
+            else:
+                rows.append(proposal)
+                recorded.append(proposal)
+                changed = True
+        if changed:
+            _atomic_write(path, rows)
+            logger.bind(component="candidate_exceptions").info(
+                f"recorded {len(recorded)} structured exception proposal(s)"
+            )
+        return recorded
 
 
 def _not_expired(row: dict[str, Any], now: datetime) -> bool:
@@ -198,20 +225,62 @@ def set_exception_status(
     if status not in {"approved", "rejected", "expired"}:
         raise ValueError(f"unsupported exception status: {status!r}")
     path = exception_path(state_dir)
-    rows = _read(path)
-    point = now or datetime.now(tz=timezone.utc)
-    for row in rows:
-        if row.get("id") != exception_id or row.get("status") != "proposed":
-            continue
-        row["status"] = status
-        row["reviewed_at"] = point.isoformat()
-        _atomic_write(path, rows)
-        return row
-    return None
+    with file_lock(path):
+        rows = _read(path)
+        point = now or datetime.now(tz=timezone.utc)
+        for row in rows:
+            if row.get("id") != exception_id or row.get("status") != "proposed":
+                continue
+            if status == "approved" and not _not_expired(row, point):
+                return None
+            row["status"] = status
+            row["reviewed_at"] = point.isoformat()
+            _atomic_write(path, rows)
+            return row
+        return None
 
 
-def list_exceptions(state_dir: Path | str) -> list[dict[str, Any]]:
+def list_exceptions(
+    state_dir: Path | str, *, active_only: bool = False, now: datetime | None = None
+) -> list[dict[str, Any]]:
     """Newest-first audit view; expired records are preserved as history."""
     rows = _read(exception_path(state_dir))
+    if active_only:
+        point = now or UtcClock().now()
+        rows = [
+            row
+            for row in rows
+            if row.get("status") in {"proposed", "approved"} and _not_expired(row, point)
+        ]
     rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
     return rows
+
+
+def exception_block_reason(
+    state_dir: Path | str, symbols: set[str], *, now: datetime | None = None
+) -> str:
+    """Missing paperwork needs a new PM review, not an impossible approval.
+
+    Read the ledger rather than last_run's cached status: approvals, rejection
+    and expiry can all occur after the PM decided.
+    """
+    point = now or UtcClock().now()
+    blocked = symbols - set(approved_exception_limits(state_dir, now=point))
+    pending = {
+        str(row.get("symbol", "")).upper()
+        for row in list_exceptions(state_dir, active_only=True, now=point)
+        if row.get("status") == "proposed"
+    } & blocked
+    missing = blocked - pending
+    parts = []
+    if missing:
+        parts.append(
+            f"{', '.join(sorted(missing))}: exception proposal missing or expired; "
+            "use `/pm run` for a fresh research decision with complete evidence before approval"
+        )
+    if pending:
+        parts.append(
+            f"{', '.join(sorted(pending))}: operator approval required; "
+            "review the proposal with `/exceptions`"
+        )
+    return "; ".join(parts)

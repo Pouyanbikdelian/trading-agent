@@ -1172,9 +1172,27 @@ def test_exceptions_command_approves_research_without_submitting_an_order(
     saved = record_proposals(tmp_path, [proposal])[0]
 
     listed = asyncio.run(_dispatch("/exceptions")) or ""
+    detail = asyncio.run(_dispatch(f"/exceptions {saved['id']}")) or ""
     approved = asyncio.run(_dispatch(f"/exceptions approve {saved['id']}")) or ""
     assert saved["id"] in listed
+    assert "headline:earnings-revision" in detail
+    assert "The next earnings update cuts" in detail
+    assert "5.0%" in detail and "21 days" in detail
     assert "No order was placed" in approved
+
+
+def test_exceptions_explains_missing_review_for_legacy_retained_target(tmp_path, monkeypatch):
+    from trading.agents.pm_signal import pm_decision_path
+    from trading.bot import telegram as telegram_module
+
+    monkeypatch.setattr(telegram_module, "settings", _settings_stub(tmp_path))
+    path = pm_decision_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"ok": True, "off_ladder_targets": ["GEN"]}))
+    listed = asyncio.run(_dispatch("/exceptions")) or ""
+    assert "GEN" in listed and "proposal missing" in listed
+    assert "`/pm run`" in listed
+    assert "none pending" not in listed
 
 
 def test_soften_and_harden_regrade(tmp_path: Path, monkeypatch) -> None:

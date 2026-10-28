@@ -799,3 +799,17 @@ class TestTheNoOrderMessageNamesTheRealCause:
         (msg,) = cycle.alerts.warning_msgs
         assert "Agent PM was withheld: PM candidate snapshot is stale" in msg
         assert "warm-up" not in msg
+
+    def test_pending_exception_points_to_review_without_demanding_another_pm_run(self, cycle):
+        signal = Signal(
+            ts=NOW,
+            strategy="top_k_momentum",
+            target_weights={},
+            metadata={
+                cycle._PM_BRIDGE_REFUSAL_REASON_METADATA: "GEN: operator approval required; review the proposal with `/exceptions`"
+            },
+        )
+        cycle._announce_no_orders(signal, self._account())
+        (msg,) = cycle.alerts.warning_msgs
+        assert "GEN" in msg and "`/exceptions`" in msg
+        assert "fresh PM decision is required" not in msg
