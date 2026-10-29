@@ -8,6 +8,7 @@ import pytest
 from trading.agents.exceptions import (
     exception_path,
     list_exceptions,
+    normalise_proposal,
     set_exception_status,
 )
 from trading.agents.pm import format_pm_digest, run_agent_pm
@@ -21,13 +22,14 @@ def research(tmp_path, monkeypatch):
     monkeypatch.setattr("trading.agents.pm._stock_universe", lambda: ("GEN",))
     mem = MemoryStore(tmp_path / "memory")
 
-    def decide(*, on_ladder=False, paperwork=True):
+    def decide(*, on_ladder=False, paperwork=True, thesis=None):
         response = {"target_weights": {"GEN": 0.06}, "rationale": "Retain the simulated holding."}
         if paperwork:
             response["structured_exceptions"] = [
                 {
                     "symbol": "GEN",
-                    "thesis": "Recurring revenue supports a bounded earnings revision thesis.",
+                    "thesis": thesis
+                    or "Recurring revenue supports a bounded earnings revision thesis.",
                     "source_ids": ["committee:street:2026-10-27"],
                     "horizon_days": 14,
                     "invalidation": "The next report reduces recurring revenue guidance.",
@@ -134,3 +136,31 @@ def test_expired_pending_proposal_cannot_be_approved(research, tmp_path):
     exception_path(tmp_path).write_text(json.dumps(rows))
     assert set_exception_status(tmp_path, result["off_ladder_exception_ids"][0], "approved") is None
     assert load_pm_signal(tmp_path, sleeve_pct=1.0).signal is None
+
+
+def test_changed_thesis_cannot_reuse_an_older_approval_for_the_same_ticker(research, tmp_path):
+    first = research()
+    approved_id = first["off_ladder_exception_ids"][0]
+    set_exception_status(tmp_path, approved_id, "approved")
+    second = research(thesis="A new acquisition thesis replaces the original revenue outlook.")
+    assert approved_id not in second["off_ladder_exception_ids"]
+    assert second["off_ladder_pending_approval"] == ["GEN"]
+    blocked = load_pm_signal(tmp_path, sleeve_pct=1.0)
+    assert blocked.signal is None
+    assert "`/exceptions`" in blocked.reason
+    set_exception_status(tmp_path, second["off_ladder_exception_ids"][0], "rejected")
+    third = research(paperwork=False)
+    assert third["off_ladder_invalid_exception"] == ["GEN"]
+    assert load_pm_signal(tmp_path, sleeve_pct=1.0).signal is None
+
+
+@pytest.mark.parametrize(
+    "horizon, requested", [(float("inf"), 0.06), (14, float("nan")), (14, 0.0)]
+)
+def test_malformed_model_numbers_cannot_crash_or_create_a_zero_budget_review(
+    research, tmp_path, horizon, requested
+):
+    research()
+    raw = list_exceptions(tmp_path)[0]
+    raw["horizon_days"] = horizon
+    assert normalise_proposal(raw, symbol="GEN", origin="agent", requested_weight=requested) is None

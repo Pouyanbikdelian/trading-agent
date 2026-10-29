@@ -304,7 +304,11 @@ def load_pm_signal(
 
     from trading.agents.exceptions import approved_exception_limits, exception_block_reason
 
-    approved_limits = approved_exception_limits(state_dir, now=now)
+    # A ticker approval is not a blanket approval of every future thesis.
+    # Legacy decisions without a referenced review must be regenerated.
+    review_ids = raw.get("off_ladder_exception_ids")
+    proposal_ids = {str(value) for value in review_ids} if isinstance(review_ids, list) else set()
+    approved_limits = approved_exception_limits(state_dir, now=now, proposal_ids=proposal_ids)
     off_ladder_targets = {
         str(symbol).upper().strip() for symbol in raw.get("off_ladder_targets", [])
     }
@@ -342,7 +346,9 @@ def load_pm_signal(
         return PMSignalResult(
             None,
             (
-                exception_block_reason(state_dir, set(approval_blocked), now=now)
+                exception_block_reason(
+                    state_dir, set(approval_blocked), now=now, proposal_ids=proposal_ids
+                )
                 if approval_blocked
                 else "no PM target survived instrument mapping"
             ),

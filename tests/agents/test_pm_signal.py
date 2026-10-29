@@ -240,6 +240,16 @@ class TestStructuredExceptions:
         recorded = record_proposals(tmp_path, [proposal])
         assert set_exception_status(tmp_path, recorded[0]["id"], "approved", now=NOW) is not None
 
+        # Symbol ownership or an unrelated old approval is insufficient:
+        # the decision must identify the exact research record being used.
+        assert load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10).signal is None
+        write_decision(
+            tmp_path,
+            weights={"JPM": 0.10},
+            off_ladder_targets=["JPM"],
+            off_ladder_exception_ids=[recorded[0]["id"]],
+        )
+
         allowed = load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10)
         assert allowed.signal is not None
         assert allowed.signal.target_weights["equity:JPM"] == pytest.approx(0.005)

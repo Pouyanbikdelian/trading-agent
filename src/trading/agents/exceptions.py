@@ -16,6 +16,7 @@ import tempfile
 import uuid
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -95,7 +96,8 @@ def normalise_proposal(
     try:
         horizon_days = int(horizon_raw)
         max_weight = float(max_weight_raw)
-    except (TypeError, ValueError):
+        requested = float(requested_weight)
+    except (TypeError, ValueError, OverflowError):
         return None
     if (
         not sym
@@ -105,11 +107,13 @@ def normalise_proposal(
         or not sector_impact
         or not 1 <= horizon_days <= 365
         or not 0 < max_weight <= MAX_STOCK_WEIGHT
+        or not isfinite(requested)
+        or requested <= 0
     ):
         return None
     # A model may not use the exception paperwork to enlarge a position.
     # The lower of declared and requested risk is the only meaningful budget.
-    now = now or datetime.now(tz=timezone.utc)
+    now = now or UtcClock().now()
     return {
         "id": f"ex-{uuid.uuid4().hex[:10]}",
         "symbol": sym,
@@ -121,7 +125,7 @@ def normalise_proposal(
         "source_ids": source_ids,
         "horizon_days": horizon_days,
         "invalidation": invalidation[:800],
-        "max_weight": min(max_weight, max(0.0, float(requested_weight))),
+        "max_weight": min(max_weight, requested),
         "sector_impact": sector_impact[:500],
         "correlation_impact": str(raw.get("correlation_impact") or "not supplied")[:500],
         "correlation_review": correlation_review if isinstance(correlation_review, dict) else {},
@@ -197,12 +201,17 @@ def approved_symbols(state_dir: Path | str, *, now: datetime | None = None) -> s
 
 
 def approved_exception_limits(
-    state_dir: Path | str, *, now: datetime | None = None
+    state_dir: Path | str,
+    *,
+    now: datetime | None = None,
+    proposal_ids: set[str] | None = None,
 ) -> dict[str, float]:
     """Approved symbol -> the risk budget that was actually reviewed."""
     point = now or datetime.now(tz=timezone.utc)
     out: dict[str, float] = {}
     for row in _read(exception_path(state_dir)):
+        if proposal_ids is not None and row.get("id") not in proposal_ids:
+            continue
         if row.get("status") != "approved" or not _not_expired(row, point):
             continue
         try:
@@ -257,7 +266,11 @@ def list_exceptions(
 
 
 def exception_block_reason(
-    state_dir: Path | str, symbols: set[str], *, now: datetime | None = None
+    state_dir: Path | str,
+    symbols: set[str],
+    *,
+    now: datetime | None = None,
+    proposal_ids: set[str] | None = None,
 ) -> str:
     """Missing paperwork needs a new PM review, not an impossible approval.
 
@@ -265,11 +278,14 @@ def exception_block_reason(
     and expiry can all occur after the PM decided.
     """
     point = now or UtcClock().now()
-    blocked = symbols - set(approved_exception_limits(state_dir, now=point))
+    blocked = symbols - set(
+        approved_exception_limits(state_dir, now=point, proposal_ids=proposal_ids)
+    )
     pending = {
         str(row.get("symbol", "")).upper()
         for row in list_exceptions(state_dir, active_only=True, now=point)
         if row.get("status") == "proposed"
+        and (proposal_ids is None or row.get("id") in proposal_ids)
     } & blocked
     missing = blocked - pending
     parts = []

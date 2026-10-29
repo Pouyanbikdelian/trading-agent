@@ -3969,7 +3969,8 @@ def _cmd_exceptions(args: list[str]) -> str:
     try:
         decision = json.loads(pm_decision_path(settings.state_dir).read_text())
         symbols = {str(s).upper().strip() for s in decision.get("off_ladder_targets", [])}
-        reason = exception_block_reason(settings.state_dir, symbols)
+        proposal_ids = {str(value) for value in decision.get("off_ladder_exception_ids", [])}
+        reason = exception_block_reason(settings.state_dir, symbols, proposal_ids=proposal_ids)
         if reason:
             lines.extend(["Latest PM targets blocked: " + reason, ""])
     except (OSError, ValueError, TypeError, AttributeError):

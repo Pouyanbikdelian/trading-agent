@@ -1236,7 +1236,8 @@ def run_agent_pm(
     )
 
     point = datetime.fromisoformat(now_iso)
-    approved = approved_exception_limits(state_dir, now=point)
+    prior_reviews = list_exceptions(state_dir)
+    selected_ids: set[str] = set()
     for symbol in off_ladder_targets:
         raw = next(
             (
@@ -1247,6 +1248,13 @@ def run_agent_pm(
             ),
             None,
         )
+        if raw is None:
+            # Reuse the latest recorded review, never an older approval
+            # underneath a subsequently rejected or expired proposal.
+            previous = next((row for row in prior_reviews if row.get("symbol") == symbol), None)
+            if previous is not None:
+                selected_ids.add(str(previous["id"]))
+            continue
         proposal = normalise_proposal(
             raw,
             symbol=symbol,
@@ -1257,14 +1265,15 @@ def run_agent_pm(
         )
         if proposal is not None:
             exception_rows.append(proposal)
-    record_proposals(state_dir, exception_rows)
+    selected_ids.update(str(row["id"]) for row in record_proposals(state_dir, exception_rows))
     # Read retained reviews after writing new proposals. Never write cached
     # records back: the operator may have rejected one while the PM ran.
     exception_rows = [
         row
         for row in list_exceptions(state_dir, active_only=True, now=point)
-        if row.get("symbol") in off_ladder_targets
+        if row.get("symbol") in off_ladder_targets and row.get("id") in selected_ids
     ]
+    approved = approved_exception_limits(state_dir, now=point, proposal_ids=selected_ids)
     invalid_exceptions = sorted(set(off_ladder_targets) - {row["symbol"] for row in exception_rows})
 
     names_changed = set(new_holdings) != set(prior_holdings)

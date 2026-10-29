@@ -44,6 +44,14 @@ and the zero-order cycle message.
 **Lesson.** An approval gate must distinguish “proposal missing” from “ready
 for review.” Simulated ownership is neither live ownership nor authorization.
 
+**October 29 review follow-up.** A regression reproduced a second defect:
+an approved ticker could authorize a different, still-pending thesis for the
+same ticker. Decisions now reference the exact selected exception IDs and
+the bridge checks those IDs, status, expiry and size. Rejected newer reviews
+cannot fall back to older approvals. Legacy decisions without review IDs
+require regeneration. Invalid numeric proposal fields fail closed instead of
+raising or producing an untradeable zero-budget approval.
+
 ---
 
 ## 2026-10-14 — One stale constituent stopped every manual PM cycle
