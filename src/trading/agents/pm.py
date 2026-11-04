@@ -40,7 +40,24 @@ from math import fsum, isfinite
 from pathlib import Path
 from typing import Any
 
+from trading.agents.pm_audit import (
+    _archive_decision,
+    _audit_dir,
+    _model_metadata,
+    _source_hashes,
+    _start_audit,
+    _write_record,
+)
+from trading.agents.pm_contract import _check_contract, _evidence_catalog, _sentinel_scope
+from trading.agents.pm_reasoning import (
+    _allocation_facts,
+    _candidate_review_plan,
+    _date_evidence,
+    _format_reasoning_details,
+    _fresh_headlines,
+)
 from trading.copilot.mandates import STRENGTH_GUIDANCE
+from trading.core.clock import UtcClock
 from trading.core.logging import logger
 from trading.core.text import clip
 from trading.memory.store import MemoryStore
@@ -171,9 +188,10 @@ PM_CHARTER = (
     "WHOSE BOOK (read this before anything else): YOUR book is "
     "sim_portfolio.holdings and nothing else. Any key ending "
     "_NOT_YOUR_BOOK describes the operator's live brokerage account — a "
-    "different portfolio, managed by other machinery, which you neither "
-    "trade nor get credit for de-risking. It is context for reading the "
-    "market, never a position of yours. Exiting a cluster you do not hold "
+    "different portfolio. Your target weights can become proposed LIVE "
+    "orders through the risk manager and operator approval. A simulated "
+    "hold can therefore be a NEW live buy. Describe both honestly; never "
+    "claim a live execution. Exiting a cluster you do not hold "
     "is not a decision; if you describe cutting something, it must appear "
     "in sim_portfolio.holdings.\n"
     "\n"
@@ -201,6 +219,30 @@ PM_CHARTER = (
     "that reward-to-risk is good — rank is not a buy signal by itself. If "
     "the ladder is absent this cycle, say so in your rationale and prefer "
     "cash over re-picking the existing book by default.\n"
+    "\n"
+    "REPLACEMENT REVIEW: candidate_review_plan lists eligible names after "
+    "operator holds, exclusions and universe checks. An excluded mechanical "
+    "pick does not consume a slot: review the next eligible ranked alternatives. "
+    "Review EVERY required_symbols entry and every target in candidate_reviews. "
+    "For each give allocate/pass, a specific reason and dated evidence keys. "
+    "Compare replacements for rejected candidates before deciding on cash. "
+    "Do not buy merely to fill a slot, invent a new ticker, or redistribute "
+    "weight dropped by hard constraints. Existing Sentinel and risk rules win. "
+    "For allocated names explain the exact size and any change from "
+    "sim_portfolio.current_weights; do not call a reduction unchanged. "
+    "cash_reason must explain the uninvested allocation against the best "
+    "alternatives, distinguishing required safety cash from discretionary cash.\n"
+    "\n"
+    "EVIDENCE FRESHNESS: decision_at is the current time. Evidence with "
+    "requires_revalidation=true is historical, not a current vote or event. "
+    "It cannot activate the bearish-majority or creative/scout forcing rules. "
+    "Only the newest eligible_for_current_vote take per agent counts. "
+    "Revalidate an older thesis against today's dated prices and evidence; "
+    "an old unverified rumor is neither a confirmed event nor a permanent veto. "
+    "A changed 52-week percentile does not verify a crash. When verification "
+    "is missing, state the uncertainty and what would resolve it. Do not "
+    "treat missing coverage as bullish consensus, missing news as bearish, "
+    "or describe a dated event as upcoming without checking its date.\n"
     "\n"
     "CORRELATION REVIEW: candidate_ladder.correlation_review contains "
     "deterministic trailing correlation facts for the mechanical basket. "
@@ -253,6 +295,10 @@ PM_CHARTER = (
     "this cap is enforced after you answer; (b) do not open new sector positions to replace "
     "trimmed ones this cycle; "
     "freed weight stays in cash first.\n"
+    "Identify the actual alert triggers and whether they concern pinned "
+    "operator holdings or the managed book. A single-name alert is not "
+    "evidence of a market-wide crash. The cap still applies, but it does "
+    "not by itself justify 90%+ cash; explain any additional discretionary cash.\n"
     "\n"
     "CREATIVE SCOUT RULE: agent_takes carries each specialist's own take, "
     "keyed by agent, with its falsifiable prediction. If the creative or "
@@ -308,11 +354,33 @@ PM_CHARTER = (
     '"rationale": "<5-7 sentences: the trade, the anti-inertia check result, '
     'stock-vs-ETF decisions, and whether the sentinel rule applied>", '
     '"watch": "<what would change your mind this week>", '
+    '"cash_reason": "<required safety cash versus discretionary cash; why alternatives lose>", '
+    '"candidate_reviews": [{"symbol": "<required or targeted symbol>", '
+    '"decision": "<allocate|pass>", "reason": "<thesis, sizing/change or rejection; falsifier>", '
+    '"evidence": ["<dated evidence key and specific observation>"]}], '
+    '"claims": [{"id": "c1", "statement": "<decision-changing claim>", '
+    '"assessment": "<measured|uncertain|constraint>", "evidence_ids": ["<evidence_catalog ID>"], '
+    '"verification_needed": "<how to verify uncertain event claims>", '
+    '"numeric_check": {"evidence_id": "ladder:SYMBOL", "field": "score", "operator": "ge", "value": 0}}], '
+    '"sizing_reviews": [{"symbol": "<target>", "target_weight": 0.03, '
+    '"downside_fraction": 0.15, "portfolio_loss_fraction": 0.0045, '
+    '"invalidation": "<thesis failure>", "downside_basis": "<dated evidence or explicit estimate>", '
+    '"overlap": "<portfolio correlation/sector overlap>", "why_not_smaller": "<reason>", "why_not_larger": "<reason>"}], '
+    '"cash_plan": {"safety_floor": 0.30, "discretionary_weight": 0.64, '
+    '"review_at": "<aware ISO timestamp within seven days>", "trigger": "<earlier reassessment trigger>", '
+    '"best_alternative": "<competing eligible allocation or no eligible candidates>", "reason": "<why cash wins>"}, '
     '"structured_exceptions": [{"symbol": "<off-ladder stock>", '
     '"thesis": "<falsifiable thesis>", "source_ids": ["<evidence key>"], '
     '"horizon_days": 21, "invalidation": "<falsifier>", '
     '"max_weight": 0.05, "sector_impact": "<sector/concentration effect>", '
-    '"correlation_impact": "<correlation effect>"}]}'
+    '"correlation_impact": "<correlation effect>"}]}. '
+    "Every candidate_review must also include claim_ids linking its reason to claims. "
+    "Use evidence_catalog IDs only. Numeric checks verify the specified numeric predicate, "
+    "not its causal story. Headlines and committee opinions cannot establish a verified "
+    "event: use uncertain and name the verification still needed. Repeated opinions "
+    "are not independent confirmations. Sizing downside is an estimate, not a guarantee. "
+    "Cash amounts must reconcile to the final target; the example values are not defaults. "
+    "If asked to repair reasoning, preserve locked final weights and fill the review only."
 )
 
 
@@ -448,7 +516,7 @@ def _recent_takes(mem: MemoryStore) -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
             continue
         take: dict[str, Any] = {
-            "ts": str(row.get("ts"))[:16],
+            "ts": str(row.get("ts")),
             "agent": payload.get("agent") or row.get("actor"),
             "stance": payload.get("stance"),
             "take": clip(str(payload.get("take", "")), TAKE_TEXT_MAX_CHARS),
@@ -988,7 +1056,9 @@ def run_agent_pm(
     prices: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """One weekly PM cycle. ``prices`` injectable for hermetic tests."""
+    injected_llm = llm is not None
     llm = llm or _default_llm
+    decision_at = UtcClock().now()
     pm_dir = Path(state_dir) / "agent_pm"
     book = _load_portfolio(pm_dir)
 
@@ -1025,6 +1095,7 @@ def run_agent_pm(
     equity = float(book["cash"]) + sum(
         qty * px[s] for s, qty in book["holdings"].items() if s in px
     )
+    prior_weights = {s: qty * px[s] / equity for s, qty in book["holdings"].items() if equity > 0}
 
     # --- assemble the PM's evidence: recent rulings + the takes behind
     # them + calibration + context.
@@ -1036,8 +1107,17 @@ def run_agent_pm(
     # at ≥0.70 ⇒ allocate 5%" and the bearish-majority cluster exit — were
     # written against evidence that never reached the prompt, and the
     # calibration table had no takes to weigh. Both are now real inputs.
-    rulings = _recent_rows(mem, "committee", floor=RULINGS_SEEN, ceiling=RULINGS_MAX)
-    takes = _recent_takes(mem)
+    rulings = _date_evidence(
+        _recent_rows(mem, "committee", floor=RULINGS_SEEN, ceiling=RULINGS_MAX), decision_at
+    )
+    takes = _date_evidence(_recent_takes(mem), decision_at)
+    seen_agents: set[str] = set()
+    for take in takes:
+        agent = str(take.get("agent", ""))
+        take["eligible_for_current_vote"] = bool(
+            agent and agent not in seen_agents and not take["requires_revalidation"]
+        )
+        seen_agents.add(agent)
 
     # Sentinel state: the PM must know if a tripwire fired recently so the
     # sentinel rule in the charter can be applied explicitly.
@@ -1085,6 +1165,8 @@ def run_agent_pm(
     from trading.runner.exclusions import load_exclusions
 
     excluded = frozenset(load_exclusions(Path(state_dir)))
+    review_plan = _candidate_review_plan(context, stocks=stocks, held=held, excluded=excluded)
+    decision_context = _fresh_headlines(context, decision_at)
 
     # Standing instructions the operator left from Telegram. Passed as
     # context for the decision — the weights this produces still go
@@ -1093,6 +1175,8 @@ def run_agent_pm(
     from trading.copilot.mandates import for_context as _mandates_for_context
 
     payload: dict[str, Any] = {
+        "decision_at": decision_at.isoformat(),
+        "candidate_review_plan": review_plan,
         "off_ladder_exception_review": list_exceptions(state_dir, active_only=True),
         "operator_mandates": _mandates_for_context(Path(state_dir)),
         "operator_held_do_not_trade": sorted(held),
@@ -1101,6 +1185,8 @@ def run_agent_pm(
             "equity": round(equity, 2),
             "cash": round(float(book["cash"]), 2),
             "holdings": book["holdings"],
+            "current_weights": prior_weights,
+            "weights_use_stored_marks_for": stale_marks,
             # Its own track record — a PM that can't see its P&L vs
             # benchmark can't learn from it.
             "performance": performance(state_dir),
@@ -1123,16 +1209,46 @@ def run_agent_pm(
         "agent_takes": takes,
         "agent_calibration": mem.calibration(),
         "sentinel_alert": sentinel_state or None,
-        "today_context": _relabel_operator_account(context),
+        "today_context": _relabel_operator_account(decision_context),
         "recent_committee_rulings": rulings,
     }
+    payload["sentinel_scope_review"] = _sentinel_scope(sentinel_state, held)
+    payload["evidence_catalog"] = _evidence_catalog(payload, decision_at)
     prompt = _budgeted_prompt(payload)
+    audit_id, request_hash = _start_audit(
+        Path(state_dir),
+        {
+            "created_at": decision_at.isoformat(),
+            "system": PM_CHARTER,
+            "prompt": prompt,
+            "model": _model_metadata(injected_llm),
+            "source_hashes": _source_hashes(),
+            "observed_prices": px,
+            "prior_book": book,
+            "policy": {"sentinel_max_gross": SENTINEL_MAX_GROSS, "cost_bps": COST_BPS},
+        },
+    )
+    audit_directory = _audit_dir(Path(state_dir), audit_id)
 
     try:
         out = llm(PM_CHARTER, prompt)
+        if not isinstance(out, dict):
+            raise ValueError("PM response must be an object")
     except Exception as e:
+        _write_record(audit_directory, "attempt-1.json", {"error_type": type(e).__name__})
         logger.bind(component="agent_pm").warning(f"PM call failed: {e}")
-        return {"ok": False, "reason": f"PM call failed: {e}"}
+        failure = {
+            "ok": False,
+            "reason": f"PM call failed: {e}",
+            "ts": UtcClock().now().isoformat(),
+            "audit_id": audit_id,
+            "audit_request_sha256": request_hash,
+            "reasoning_contract_version": 1,
+        }
+        failure["audit_sha256"] = _archive_decision(Path(state_dir), failure)
+        _save(pm_dir, "last_run.json", failure)
+        return failure
+    _write_record(audit_directory, "attempt-1.json", {"response": out})
 
     weights, clamp_adjustments = _clamp_weights_with_audit(
         out.get("target_weights"), stocks, blocked=held | excluded
@@ -1164,6 +1280,51 @@ def run_agent_pm(
     if sentinel_cap is not None:
         weights, sentinel_cap_scaled = _cap_gross(weights, sentinel_cap)
     gross_weight = _gross_weight(weights)
+    reasoning_review = _check_contract(
+        out, review_plan, weights, payload["evidence_catalog"], decision_at, sentinel_cap
+    )
+    if reasoning_review["issues"]:
+        repair_payload = json.loads(prompt)
+        repair_payload["reasoning_repair"] = {
+            "original_response": out,
+            "issues": reasoning_review["issues"],
+            "locked_final_weights": weights,
+            "instruction": "Repair reasoning fields only, using these exact final targets. Do not change target_weights or structured_exceptions. No new facts or sources may be invented.",
+        }
+        repair_prompt = json.dumps(repair_payload, default=str)
+        try:
+            repaired = llm(PM_CHARTER, repair_prompt)
+            _write_record(
+                audit_directory, "attempt-2.json", {"prompt": repair_prompt, "response": repaired}
+            )
+            if not isinstance(repaired, dict):
+                raise ValueError("repair is not an object")
+            for field in (
+                "candidate_reviews",
+                "cash_reason",
+                "claims",
+                "sizing_reviews",
+                "cash_plan",
+            ):
+                if field in repaired:
+                    out[field] = repaired[field]
+            reasoning_review = _check_contract(
+                out, review_plan, weights, payload["evidence_catalog"], decision_at, sentinel_cap
+            )
+        except Exception as e:
+            if not (audit_directory / "attempt-2.json").exists():
+                _write_record(
+                    audit_directory,
+                    "attempt-2.json",
+                    {"prompt": repair_prompt, "error_type": type(e).__name__},
+                )
+            reasoning_review["issues"].append(f"reasoning repair failed: {type(e).__name__}")
+            reasoning_review["complete"] = False
+    allocation_facts = _allocation_facts(prior_weights, weights, context)
+    if reasoning_review["issues"]:
+        logger.bind(component="agent_pm").warning(
+            f"PM reasoning review incomplete: {reasoning_review['issues']}"
+        )
 
     # --- rebalance at last close, costs on turnover
     new_holdings: dict[str, float] = {}
@@ -1330,6 +1491,10 @@ def run_agent_pm(
 
     result = {
         "ok": True,
+        "reasoning_contract_version": 1,
+        "audit_id": audit_id,
+        "audit_request_sha256": request_hash,
+        "requires_operator_review": not reasoning_review["complete"],
         "ts": now_iso,
         "equity": round(equity, 2),
         "weights": weights,
@@ -1352,6 +1517,18 @@ def run_agent_pm(
         "model_rationale": model_rationale,
         "rationale_source": "executed_target_facts" if constraints_changed_target else "model",
         "execution_summary": execution_summary,
+        "candidate_review_plan": review_plan,
+        "reasoning_review": reasoning_review,
+        "allocation_facts": allocation_facts,
+        "sentinel_scope_review": payload["sentinel_scope_review"],
+        "decision_prices": px,
+        "evidence_freshness": {
+            "decision_at": decision_at.isoformat(),
+            "current_agent_votes": sum(t["eligible_for_current_vote"] for t in takes),
+            "historical_takes": sum(t["requires_revalidation"] for t in takes),
+            "latest_take_at": takes[0]["ts"] if takes else None,
+            "headlines": decision_context.get("headline_freshness"),
+        },
         # Exact, structured facts behind a non-model rationale.  This is
         # persisted with the raw model rationale so an operator can audit
         # both the original intent and the hard-constrained target.
@@ -1398,6 +1575,10 @@ def run_agent_pm(
             ((context or {}).get("candidate_ladder") or {}).get("staleness_warning")
         ),
     }
+    from trading.reporting.pm_shadow import _shadow_plan
+
+    result["shadow_plan"] = _shadow_plan(payload, result, COST_BPS)
+    result["audit_sha256"] = _archive_decision(Path(state_dir), result)
     _save(pm_dir, "last_run.json", result)
     mem.journal(
         "agent_pm",
@@ -1405,11 +1586,18 @@ def run_agent_pm(
             k: result[k]
             for k in (
                 "equity",
+                "audit_id",
+                "audit_sha256",
+                "requires_operator_review",
                 "weights",
                 "rationale",
                 "model_rationale",
                 "rationale_source",
                 "execution_summary",
+                "candidate_review_plan",
+                "reasoning_review",
+                "allocation_facts",
+                "evidence_freshness",
                 "hard_clamp_adjustments",
                 "opened_off_ladder",
                 "off_ladder_exception_ids",
@@ -1419,6 +1607,25 @@ def run_agent_pm(
         },
         actor="pm",
     )
+    # Grade only already-observed forward prices. The grader never fetches
+    # data, submits orders, or backfills invented historical PM decisions.
+    try:
+        from trading.core.config import settings
+        from trading.reporting.pm_shadow import _grade_saved_shadows
+
+        report = _grade_saved_shadows(Path(state_dir), Path(settings.data_dir), UtcClock().now())
+        _save(pm_dir, "shadow_status.json", report)
+    except Exception as exc:
+        logger.bind(component="agent_pm").warning(f"shadow grading failed: {type(exc).__name__}")
+        _save(
+            pm_dir,
+            "shadow_status.json",
+            {
+                "status": "failed",
+                "checked_at": UtcClock().now().isoformat(),
+                "reason": type(exc).__name__,
+            },
+        )
     return result
 
 
@@ -1593,7 +1800,7 @@ def format_pm_digest(
             change.append("exited " + ", ".join(f"`{s}`" for s in closed))
         if opened:
             change.append("opened " + ", ".join(f"`{s}`" for s in opened))
-        lines.append("*Changed:* " + " · ".join(change))
+        lines.append("*Changed:* simulation " + " · ".join(change))
     elif result.get("turnover"):
         lines.append("*Changed:* weights only, no names added or dropped")
     else:
@@ -1654,6 +1861,7 @@ def format_pm_digest(
     else:
         lines.append(f"*Why:* {clip(result.get('rationale', ''), 700)}")
     lines.append(f"_Watching: {clip(result.get('watch', ''), 300)}_")
+    lines.extend(_format_reasoning_details(result))
     if result.get("dropped"):
         lines.append(f"_(excluded from executable target: {', '.join(result['dropped'])})_")
     # Turnover as a FRACTION of the book, not in the sim's dollars. The

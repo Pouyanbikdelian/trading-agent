@@ -171,6 +171,7 @@ def build_runner_candidate_snapshot(
     selected: set[str],
     config: Any,
     generated_at: datetime | None = None,
+    mechanical_weights: dict[str, float] | None = None,
 ) -> dict[str, Any] | None:
     """Build the runner's authoritative candidate snapshot from its own inputs.
 
@@ -188,6 +189,12 @@ def build_runner_candidate_snapshot(
         symbol = str(raw_symbol).split(":")[-1].upper()
         row: dict[str, Any] = {"rank": rank, "symbol": symbol, "score": round(float(score), 4)}
         if symbol in prices.columns:
+            series = prices[symbol].dropna()
+            if len(series) >= 2 and float(series.iloc[-2]) > 0:
+                row["one_day_return_pct"] = round(
+                    (float(series.iloc[-1]) / float(series.iloc[-2]) - 1) * 100, 6
+                )
+                row["last_close"] = float(series.iloc[-1])
             percentile = _pctile_52w(prices[symbol])
             if percentile is not None:
                 row["pctile_52w"] = percentile
@@ -212,6 +219,7 @@ def build_runner_candidate_snapshot(
         ),
         "ranked": rows,
         "selected_mechanical": sorted(selected),
+        "mechanical_weights": mechanical_weights,
     }
     review = _correlation_review(prices, selected=selected, ranked=rows)
     if review:

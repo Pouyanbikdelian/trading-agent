@@ -289,6 +289,11 @@ Items 1-2 are built; the rest are specced and independently abandonable.
 - [ ] **Matched strategy/PM shadow comparison.** Same decision dates,
       universe, CHF FX, costs and risk controls; compare slow momentum, PM,
       and momentum plus advisory vetoes before changing live allocations.
+      Prospective matched-cohort implementation is complete locally (2026-10-30):
+      immutable inputs, exact mechanical targets, dated FX/cost/risk grading,
+      cash/sizing attribution and an experimental Sentinel arm. Forward paper
+      evidence and a continuous portfolio comparison remain outstanding.
+      See [PM decision audit](docs/pm_decision_audit_2026-10-30.md).
 - [ ] **Lesson application attribution.** Record considered/applied/overridden
       lesson IDs and resulting weight changes; prompt inclusion is not impact.
 - [ ] **Regime fingerprint, promoted out of `cycle.py`.** A first cut

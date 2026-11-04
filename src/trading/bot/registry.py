@@ -193,7 +193,10 @@ REGISTRY: tuple[Spec, ...] = (
     Spec("/unexclude", "lift a standing ban", usage="/unexclude SYMBOL", example="/unexclude PM"),
     Spec("/exclusions", "list the standing never-buy names"),
     Spec(
-        "/pm", "the PM's current targets; `run` decides again", usage="/pm [run]", example="/pm run"
+        "/pm",
+        "targets, reasoning review and matched shadow outcomes",
+        usage="/pm [run|review|shadow|accept ID reason]",
+        example="/pm review",
     ),
     # --- mode
     Spec(

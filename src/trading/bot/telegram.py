@@ -986,6 +986,33 @@ def _cmd_pm(args: list[str]) -> str:
     """``/pm`` — the PM's current targets; ``/pm run`` decides again (no order)."""
     import json as _json
 
+    if args and args[0].lower() == "shadow":
+        from trading.reporting.pm_shadow import _format_shadow_status
+
+        try:
+            report = _json.loads(
+                (settings.state_dir / "agent_pm" / "shadow_status.json").read_text()
+            )
+        except (OSError, ValueError):
+            return "No PM shadow grading status yet. It is recorded by the next PM run or the offline grader."
+        return _format_shadow_status(report)
+
+    if args and args[0].lower() == "accept":
+        from trading.agents.pm_audit import _accept_review
+
+        if len(args) < 3:
+            return "Use /pm accept <exact decision ID from /pm review> <review reason>. This acknowledges reasoning, not orders."
+        return _accept_review(settings.state_dir, args[1], " ".join(args[2:]))
+
+    if args and args[0].lower() == "review":
+        from trading.agents.pm_reasoning import _format_candidate_review
+
+        try:
+            last = _json.loads((settings.state_dir / "agent_pm" / "last_run.json").read_text())
+        except (OSError, ValueError):
+            return "No saved PM decision to review."
+        return _format_candidate_review(last)
+
     if args and args[0].lower() == "run":
         flag = settings.state_dir / "agent_pm_now.flag"
         try:
@@ -1074,9 +1101,12 @@ def _cmd_pm(args: list[str]) -> str:
 
     try:
         last = _json.loads((pm_dir / "last_run.json").read_text())
+        from trading.agents.pm_reasoning import _format_reasoning_details
+
         lines.append("")
         if last.get("rationale"):
             lines.append(f"_Last rationale: {_clip(last['rationale'], 400)}_")
+        lines.extend(_format_reasoning_details(last))
     except Exception:
         pass
     lines += [

@@ -296,6 +296,24 @@ def load_pm_signal(
             age_hours=age_h,
         )
 
+    from trading.agents.pm_audit import _review_block_reason
+
+    review_block = _review_block_reason(Path(state_dir), raw)
+    if review_block:
+        return PMSignalResult(None, review_block, decided_at=decided_at, age_hours=age_h)
+    cash_plan = (raw.get("reasoning_review") or {}).get("cash_plan") or {}
+    if raw.get("reasoning_contract_version") and float(raw.get("cash_weight", 0)) > 0.5:
+        try:
+            due = datetime.fromisoformat(str(cash_plan.get("review_at")))
+            if due.tzinfo is None or now >= due:
+                return PMSignalResult(
+                    None, "PM cash thesis is due for reassessment; request /pm run"
+                )
+        except (ValueError, TypeError):
+            # Incomplete metadata already requires exact-decision review.
+            # Missing metadata cannot be misrepresented as a fresh deadline.
+            pass
+
     weights = raw.get("weights") or {}
     if not isinstance(weights, dict) or not weights:
         return PMSignalResult(

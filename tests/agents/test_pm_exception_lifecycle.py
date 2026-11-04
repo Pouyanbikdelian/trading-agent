@@ -38,7 +38,7 @@ def research(tmp_path, monkeypatch):
                     "correlation_impact": "Review overlap with the existing technology exposure.",
                 }
             ]
-        return run_agent_pm(
+        result = run_agent_pm(
             {
                 "positions": [],  # GEN exists in the simulation only, as in the incident.
                 "candidate_ladder": {"ranked": [{"symbol": "GEN" if on_ladder else "AAPL"}]},
@@ -48,6 +48,14 @@ def research(tmp_path, monkeypatch):
             llm=lambda *_: response,
             prices={"GEN": 25.0, "SPY": 500.0},
         )
+        # This suite isolates exception approvals from the separate reasoning
+        # acknowledgement. Both gates must still bind in production.
+        from trading.agents.pm_audit import _accept_review
+
+        _accept_review(
+            tmp_path, result["audit_id"], "Reviewed fixture reasoning for exception lifecycle test"
+        )
+        return result
 
     yield decide
     mem.conn.close()

@@ -246,6 +246,9 @@ class Cycle:
         self.source_factory = source_factory
         self.broker = broker
         self.risk_manager = risk_manager
+        # Candidate preparation must not inspect execution members. Snapshot
+        # this immutable risk configuration at construction for shadow research.
+        self._shadow_risk_limits = risk_manager.limits.model_dump(mode="json")
         self.order_store = order_store
         self.runner_store = runner_store
         self.alerts = alerts
@@ -2801,7 +2804,11 @@ class Cycle:
     }
 
     def _resolve_sector_map(
-        self, instruments_by_key: dict[str, Instrument], cfg: RunnerConfig
+        self,
+        instruments_by_key: dict[str, Instrument],
+        cfg: RunnerConfig,
+        *,
+        announce_missing: bool = True,
     ) -> dict[str, str] | None:
         """Sector tags for the risk manager's sector cap (``max_sector_exposure``).
 
@@ -2825,7 +2832,8 @@ class Cycle:
 
             path = Path(_settings.data_dir) / "fundamentals.parquet"
         if not path.exists():
-            self._warn_sector_cap_disabled(f"fundamentals cache missing at {path}")
+            if announce_missing:
+                self._warn_sector_cap_disabled(f"fundamentals cache missing at {path}")
             return None
         from trading.data.fundamentals_source import read_fundamentals_cache
 
@@ -2836,7 +2844,8 @@ class Cycle:
             if f is not None and f.sector:
                 out[key] = str(f.sector)
         if not out:
-            self._warn_sector_cap_disabled(f"no sector tags for this universe in {path}")
+            if announce_missing:
+                self._warn_sector_cap_disabled(f"no sector tags for this universe in {path}")
             return None
         untagged = len(instruments_by_key) - len(out)
         if untagged:
@@ -3813,13 +3822,26 @@ class Cycle:
         )
         if not ranked:
             return None, None
-        return ranked, build_runner_candidate_snapshot(
+        snapshot = build_runner_candidate_snapshot(
             prices,
             ranked=ranked,
             selected=bought_symbols(signal.target_weights),
             config=cfg,
             generated_at=self._clock(),
+            mechanical_weights={
+                k.split(":")[-1]: float(w) for k, w in signal.target_weights.items()
+            },
         )
+        if snapshot is not None:
+            # Immutable shadow inputs from this resolved configuration. Merely
+            # read metadata: no account access, risk evaluation or order path.
+            universe_instruments = load_universe(cfg.universe)
+            mapped = {i.key: i for i in universe_instruments}
+            snapshot["shadow_risk_limits"] = dict(self._shadow_risk_limits)
+            sectors = self._resolve_sector_map(mapped, cfg, announce_missing=False) or {}
+            snapshot["shadow_sector_map"] = {k.split(":")[-1]: v for k, v in sectors.items()}
+            snapshot["quote_currencies"] = {i.symbol: i.currency for i in universe_instruments}
+        return ranked, snapshot
 
     def _entry_percentiles(self, prices: pd.DataFrame, window: int = 252) -> dict[str, float]:
         """Where each name sits in its 52-week range today, 0=low, 1=high.
