@@ -296,6 +296,12 @@ Items 1-2 are built; the rest are specced and independently abandonable.
       See [PM decision audit](docs/pm_decision_audit_2026-10-30.md).
 - [ ] **Lesson application attribution.** Record considered/applied/overridden
       lesson IDs and resulting weight changes; prompt inclusion is not impact.
+- [ ] **Positioning data and measured trade influence.** Research completed
+      2026-11-05: public COT APIs verified; Goldman public evidence optional;
+      IBKR-based gamma estimates need entitlement/budget confirmation. Build
+      collectors, mandatory PM assessments and matched shadow comparisons before
+      activating new executable overlays. No subscription or live rule added.
+      See [source and integration research](docs/positioning_sources_2026-11-05.md).
 - [ ] **Regime fingerprint, promoted out of `cycle.py`.** A first cut
       lives in `Cycle._regime_fingerprint` (vol bucket, dispersion,
       breadth) purely so shadow rows are sliceable from day one. Move it
