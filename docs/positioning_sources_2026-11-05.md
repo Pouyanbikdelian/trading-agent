@@ -77,6 +77,43 @@ from phrases such as 'most sold', or forward-fill old commentary indefinitely.
 No fresh applicable report means unavailable. A 13F filing is not a replacement
 for client flows or a net-leverage series.
 
+## Proposed release-aware decision schedule
+
+Freshness should be enforced through completed data dependencies, not just cron
+offsets. The current PM defaults to 45 minutes before the cycle, and the deployed
+committee has an explicit Friday 13:00 override. Moving only the cycle to 15:45
+would still leave the PM deciding at 15:00, before the normal COT publication.
+
+For the existing swing/position horizon, the recommended design is:
+
+- On each actual COT publication, collect and validate the new report, preserve
+  the publication/ingestion timestamps and calculate positioning features.
+  Friday 15:35 New York is an initial polling slot, not a guarantee of release.
+- Refresh cheap market/positioning observations daily and ingest applicable
+  Goldman observations only when new material appears. Refresh options-derived
+  inputs immediately ahead of a decision when the feed is available.
+- On rebalance weeks, target Monday around 10:30 New York for a proposal, after
+  collecting post-open prices/options and weekend news and completing the
+  committee/PM sequence. Keep the two-week rebalance frequency initially.
+- Treat that time as a target, not a deadline to bypass incomplete inputs. Use
+  exchange and release calendars for holidays/early closes. Revalidate quotes,
+  account state and relevant short-lived evidence before approved execution.
+- Material changes between scheduled reviews can produce an alert or refreshed
+  proposal. A data update alone does not mandate a trade or a full LLM debate.
+
+Monday is a design recommendation, not a demonstrated return advantage. It gives
+the new report time to be processed and leaves room for owner review. Normal COT
+release at 15:30 precedes the normal stock-market close by only 30 minutes;
+same-Friday execution must never rush an unfinished review to meet the close.
+[CFTC calendar](https://www.cftc.gov/MarketReports/CommitmentsofTraders/ReleaseSchedule/index.htm),
+[NYSE session hours](https://www.nyse.com/trade/trading-information).
+
+Implementation must realign the committee override, PM trigger, broker readiness,
+cycle, cadence anchor, watchdog and displayed next-run time together. Moving a
+Friday cycle to the following Monday crosses the cadence's Monday-based week
+boundary; preserve the intended two-week spacing with an explicit new anchor.
+No live cron, anchor or trading frequency has been changed by this proposal.
+
 ## Gamma research
 
 Current `runtime/options_monitor.py` measures SPY IV/skew/term structure and
