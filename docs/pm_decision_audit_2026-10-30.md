@@ -1,8 +1,9 @@
 # PM decision audit and matched shadow cohorts — October 30, 2026
 
-Implemented locally on top of the October 29 candidate review. These changes
-have not been deployed to the live desk. No broker operation is required for
-the validation or the offline grader.
+Implemented on top of the October 29 candidate review. Deployed on November 5
+with the owner's authorization to review every proposed basket personally;
+see [deployment and rollback record](pm_deployment_2026-11-05.md). No broker
+operation is required for validation or the offline grader.
 
 ## Decision behavior
 

@@ -2,7 +2,8 @@
 
 Follow-up: [October 30 decision audit and shadow implementation](pm_decision_audit_2026-10-30.md)
 adds a bounded reasoning repair and an exact-decision execution gate. It
-supersedes the warning-only behavior described below. Both changes remain local.
+supersedes the warning-only behavior described below. Both changes were
+[deployed on November 5](pm_deployment_2026-11-05.md) after owner authorization.
 
 ## Observed failure
 
@@ -52,8 +53,8 @@ rumor evidence, missing account state, malformed/duplicate/inconsistent review
 records, explicit cash decisions, persistence and read-only Telegram review.
 No live cycle, approval, or broker operation is part of this validation.
 
-This changes model inputs and decision instructions. It is prepared locally
-for paper/shadow evaluation; it has not been deployed to the live server.
+This changes model inputs and decision instructions. It was initially prepared
+locally for paper/shadow evaluation; see the deployment update above.
 Passing unit tests establishes these mechanics, not improved returns or that
 the model will always use sound evidence. Evaluate fresh paper decisions and
 their review completeness before adopting the changed reasoning in live use.
