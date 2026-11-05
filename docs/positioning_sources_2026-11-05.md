@@ -1,7 +1,8 @@
 # Positioning sources and integration research — November 5, 2026
 
-Research/design only. No subscriptions purchased, collectors deployed, signal
-weights changed, or trading schedule changed. The owner has no Goldman Prime
+Source integration remains research/design only. The owner subsequently selected
+the Friday schedule below for deployment. No subscriptions were purchased,
+collectors deployed or signal weights changed. The owner has no Goldman Prime
 Services or dealer-gamma subscription. Existing budget: approximately $20/month.
 
 ## Source selection
@@ -56,9 +57,9 @@ when mapped to USD/CHF. Treasury shorts may reflect hedged relative-value trades
 directional interpretation remains an assumption.
 
 Normal COT publication is Friday 15:30 New York for Tuesday's positions. The
-deployed cycle is Friday 15:00 every two weeks; committee runs at 13:00. Initially
-use the latest already-published release explicitly. Moving the cycle later is
-a separate choice. Respect actual release dates, delays and revisions in tests.
+previous cycle was Friday 15:00 every two weeks, with committee at 13:00. The
+owner selected the post-release Friday schedule below. Use the latest actually
+published report and respect delayed releases and revisions in tests.
 [CFTC timing](https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm).
 
 ## Goldman evidence
@@ -77,14 +78,30 @@ from phrases such as 'most sold', or forward-fill old commentary indefinitely.
 No fresh applicable report means unavailable. A 13F filing is not a replacement
 for client flows or a net-leverage series.
 
-## Proposed release-aware decision schedule
+## Selected Friday schedule
 
-Freshness should be enforced through completed data dependencies, not just cron
-offsets. The current PM defaults to 45 minutes before the cycle, and the deployed
-committee has an explicit Friday 13:00 override. Moving only the cycle to 15:45
-would still leave the PM deciding at 15:00, before the normal COT publication.
+The owner chose Friday and may execute manually after hours. The earlier Monday
+recommendation is superseded. Keep the existing two-week cadence and October 9
+anchor. All times below use America/New_York and follow its daylight saving time:
 
-For the existing swing/position horizon, the recommended design is:
+| Job | Selected time on cycle Fridays |
+| --- | --- |
+| Committee | 15:35 |
+| Broker readiness | 16:00 (derived from cycle) |
+| PM | 16:15 (45-minute lead) |
+| Cycle/proposal | 17:00 |
+
+The settings are in `config/friday_positioning_schedule.env.example`. On
+November 6 and November 20, 2026, the cycle is 23:00 Europe/Warsaw. The runner's
+cadence/trigger functions were checked for both dates, and 19 schedule/cadence
+tests passed. This change does not enable automatic outside-hours order routing,
+clear the existing halt, or remove basket approval. No cycle was manually fired.
+
+Freshness still needs completed data dependencies, not just cron offsets. Moving
+only the cycle to 15:45 would leave a 45-minute-lead PM deciding before COT.
+The explicit committee override must also move, as it does in this profile.
+
+The remaining data-aware scheduling work is:
 
 - On each actual COT publication, collect and validate the new report, preserve
   the publication/ingestion timestamps and calculate positioning features.
@@ -92,27 +109,30 @@ For the existing swing/position horizon, the recommended design is:
 - Refresh cheap market/positioning observations daily and ingest applicable
   Goldman observations only when new material appears. Refresh options-derived
   inputs immediately ahead of a decision when the feed is available.
-- On rebalance weeks, target Monday around 10:30 New York for a proposal, after
-  collecting post-open prices/options and weekend news and completing the
-  committee/PM sequence. Keep the two-week rebalance frequency initially.
+- On rebalance Fridays, feed validated post-release observations through the
+  committee/PM sequence and refresh relevant prices/options ahead of planning.
 - Treat that time as a target, not a deadline to bypass incomplete inputs. Use
   exchange and release calendars for holidays/early closes. Revalidate quotes,
   account state and relevant short-lived evidence before approved execution.
 - Material changes between scheduled reviews can produce an alert or refreshed
   proposal. A data update alone does not mandate a trade or a full LLM debate.
 
-Monday is a design recommendation, not a demonstrated return advantage. It gives
-the new report time to be processed and leaves room for owner review. Normal COT
-release at 15:30 precedes the normal stock-market close by only 30 minutes;
-same-Friday execution must never rush an unfinished review to meet the close.
+The normal COT release leaves 30 minutes before the core-session close, but
+after-hours equity trading already exists. A 17:00 proposal gives time for
+research and review without a deadline to execute before 16:00.
 [CFTC calendar](https://www.cftc.gov/MarketReports/CommitmentsofTraders/ReleaseSchedule/index.htm),
 [NYSE session hours](https://www.nyse.com/trade/trading-information).
 
-Implementation must realign the committee override, PM trigger, broker readiness,
-cycle, cadence anchor, watchdog and displayed next-run time together. Moving a
-Friday cycle to the following Monday crosses the cadence's Monday-based week
-boundary; preserve the intended two-week spacing with an explicit new anchor.
-No live cron, anchor or trading frequency has been changed by this proposal.
+The committee override, PM, broker readiness and cycle move together; the anchor
+and frequency stay unchanged. Source collectors and verified-release dependencies
+are not implemented merely by shifting the cron.
+
+NYSE Arca's filing states an intended December 6, 2026 launch for 23/5 trading;
+Nasdaq also announces that date. Core-session hours remain distinct. Venue hours
+alone do not change our broker routing, data entitlements, baseline handling or
+order policy. References:
+[NYSE Arca SEC filing](https://www.sec.gov/files/rules/sro/nysearca/2026/34-106378.pdf),
+[Nasdaq announcement](https://www.nasdaq.com/newsroom/nasdaq-explains-what-is-23-5-trading).
 
 ## Gamma research
 
