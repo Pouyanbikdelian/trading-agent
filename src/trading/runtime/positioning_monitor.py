@@ -122,8 +122,12 @@ def read_positioning(state_dir: Path, now: datetime | None = None) -> dict[str, 
 
 
 def refresh_positioning(state_dir: Path, now: datetime | None = None) -> dict[str, Any]:
-    now = now or UtcClock().now()
-    with _LOCK:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with _LOCK, (state_dir / ".positioning.lock").open("a") as lock_file:
+        # CLI and runner are separate processes sharing the state volume.
+        # Serialize their read/fetch/write transaction, not only Python threads.
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        now = now or UtcClock().now()
         prior = _read_state(state_dir / "positioning.json")
         observations = []
         errors = {}
