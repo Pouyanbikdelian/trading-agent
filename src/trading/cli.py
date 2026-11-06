@@ -1289,5 +1289,35 @@ def _resume(
     logger.info("operator resumed runner")
 
 
+positioning_app = typer.Typer(
+    help="Read-only positioning research and checked public-report imports."
+)
+app.add_typer(positioning_app, name="positioning")
+
+
+@positioning_app.command("refresh")
+def positioning_refresh() -> None:
+    from trading.runtime.positioning_monitor import refresh_positioning
+
+    console.print_json(data=refresh_positioning(settings.state_dir))
+
+
+@positioning_app.command("status")
+def positioning_status() -> None:
+    from trading.runtime.positioning_monitor import read_positioning
+
+    console.print_json(data=read_positioning(settings.state_dir))
+
+
+@positioning_app.command("import-goldman")
+def positioning_import_goldman(path: str) -> None:
+    import json
+    from pathlib import Path
+
+    from trading.runtime.positioning_monitor import import_goldman
+
+    console.print(import_goldman(settings.state_dir, json.loads(Path(path).read_text())))
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()

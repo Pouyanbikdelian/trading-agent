@@ -73,6 +73,17 @@ def _evidence_catalog(payload: dict[str, Any], now: datetime) -> dict[str, Any]:
             "excluded": payload.get("operator_excluded_never_buy"),
         },
     }
+    for observation in (context.get("positioning") or {}).get("observations", []):
+        catalog[observation["id"]] = {
+            **observation,
+            "positioning_source": observation["source"],
+            "requires_revalidation": not (
+                datetime.fromisoformat(observation["available_at"])
+                <= now
+                < datetime.fromisoformat(observation["expires_at"])
+            ),
+            "independence_key": observation["source"],
+        }
     return catalog
 
 
@@ -227,8 +238,16 @@ def _check_contract(
         for field in ("trigger", "best_alternative", "reason"):
             if not isinstance(cash_plan.get(field), str) or not cash_plan[field].strip():
                 issues.append(f"cash plan missing {field}")
+    from trading.agents.positioning import check_positioning
+
+    issues.extend(
+        check_positioning(
+            response, {r["symbol"] for r in review["candidate_reviews"]} | set(weights), catalog
+        )
+    )
     return {
         **review,
+        "positioning_assessments": response.get("positioning_assessments", []),
         "complete": not issues,
         "issues": issues,
         "claims": checked,

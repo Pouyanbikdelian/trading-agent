@@ -224,6 +224,17 @@ PM_CHARTER = (
     "operator holds, exclusions and universe checks. An excluded mechanical "
     "pick does not consume a slot: review the next eligible ranked alternatives. "
     "Review EVERY required_symbols entry and every target in candidate_reviews. "
+    "For EACH reviewed symbol include positioning_assessments for all three sources: cot, "
+    "goldman_public, gamma_estimate. Each row has symbol, source, assessment "
+    "(support/conflict/neutral/unavailable/not_applicable), evidence_ids, effect "
+    "(none/rank/size/timing), and reason explaining scope and uncertainty. Use exact evidence "
+    "IDs and symbol mappings; missing feeds mean unknown, never bearish. Broad index futures "
+    "and SPY gamma can inform market timing only, not prove individual-stock accumulation. "
+    "Available SPY macro evidence must be reviewed for stocks with scope=market_context and "
+    "effect=none or timing; do not label this available market context unavailable. "
+    "Goldman is a reported client sample. Gamma is modelled with unknown OI age and dealer signs, "
+    "not measured dealer inventory. No applicable evidence requires effect=none and an explanation. "
+    "Deterministic positioning adjustments are shadow experiments only; do not copy their targets. "
     "For each give allocate/pass, a specific reason and dated evidence keys. "
     "Compare replacements for rejected candidates before deciding on cash. "
     "Do not buy merely to fill a slot, invent a new ticker, or redistribute "
@@ -1305,6 +1316,7 @@ def run_agent_pm(
                 "claims",
                 "sizing_reviews",
                 "cash_plan",
+                "positioning_assessments",
             ):
                 if field in repaired:
                     out[field] = repaired[field]
@@ -1575,8 +1587,12 @@ def run_agent_pm(
             ((context or {}).get("candidate_ladder") or {}).get("staleness_warning")
         ),
     }
+    from trading.agents.positioning import shadow_positioning
     from trading.reporting.pm_shadow import _shadow_plan
 
+    result["positioning_shadow"] = shadow_positioning(
+        weights, (payload.get("today_context") or {}).get("positioning") or {}
+    )
     result["shadow_plan"] = _shadow_plan(payload, result, COST_BPS)
     result["audit_sha256"] = _archive_decision(Path(state_dir), result)
     _save(pm_dir, "last_run.json", result)

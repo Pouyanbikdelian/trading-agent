@@ -69,6 +69,8 @@ def _shadow_plan(
             mechanical, scope["experimental_market_only_cap"]
         ),
     }
+    for name, targets in (result.get("positioning_shadow") or {}).get("arms", {}).items():
+        arms[name] = _limit_gross({s: w for s, w in targets.items() if s not in forbidden}, cap)
     symbols = sorted({s for w in arms.values() for s in w})
     currencies = ladder.get("quote_currencies") or {}
     sectors = ladder.get("shadow_sector_map") or {}
@@ -89,6 +91,7 @@ def _shadow_plan(
         "base_currency": (context.get("operator_live_account_equity_NOT_YOUR_BOOK") or {}).get(
             "base_currency", "USD"
         ),
+        "positioning": result.get("positioning_shadow", {}),
         "cost_bps_per_side": cost_bps,
         "initial_equity": 100000.0,
         "matched_requested_gross_available": gross_mech > 0 or gross_pm == 0,

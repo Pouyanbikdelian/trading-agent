@@ -248,6 +248,9 @@ def build_context(
     gaps: list[str] = []
     _mon = partial(_read_fresh_json, gaps=gaps, max_age_h=_monitor_max_age_h())
     ctx["macro_dial"] = _mon(state_dir / "macro_monitor.json", "macro_dial").get("readings", {})
+    from trading.runtime.positioning_monitor import read_positioning
+
+    ctx["positioning"] = read_positioning(state_dir)
     ctx["vol_surface"] = _mon(state_dir / "options_monitor.json", "vol_surface").get("metrics", {})
     ctx["spy_vix_triggers"] = _mon(state_dir / "advisor.json", "spy_vix_triggers").get("active", [])
     style = _read_fresh_json(

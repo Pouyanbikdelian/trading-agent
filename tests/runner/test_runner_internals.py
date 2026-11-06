@@ -24,6 +24,14 @@ from trading.runner.runner import _historian_trigger
 from trading.runtime.broker_liveness import FILENAME
 
 
+@pytest.fixture(autouse=True)
+def fake_positioning_network(monkeypatch):
+    monkeypatch.setattr(
+        "trading.runtime.positioning_monitor.refresh_positioning",
+        lambda *args: {"errors": {}, "coverage": {"cot": 1}},
+    )
+
+
 class _SilentAlerts(TelegramAlerts):
     def __init__(self) -> None:
         super().__init__(token=None, chat_id=None, enabled=False)
@@ -97,15 +105,23 @@ def test_pm_refreshes_candidates_before_context_and_decision(
         assert not load_pm_signal(tmp_path, sleeve_pct=0.1).ok
         return CandidateSnapshotPreparation(True, "ok", "2026-09-11", prepared)
 
+    def refresh_positioning(*args):
+        calls.append("positioning")
+        return {"errors": {}, "coverage": {"cot": 1}}
+
+    monkeypatch.setattr(
+        "trading.runtime.positioning_monitor.refresh_positioning", refresh_positioning
+    )
+
     def build_context(state_dir, data_dir, *, include_candidate_ladder):
-        assert calls == ["refresh"]
+        assert calls == ["refresh", "positioning"]
         assert state_dir == tmp_path
         assert include_candidate_ladder is False
         calls.append("context")
         return {"positions": [], "candidate_ladder": {"source": "unrelated disk replacement"}}
 
     def decide(ctx, mem, state_dir):
-        assert calls == ["refresh", "context"]
+        assert calls == ["refresh", "positioning", "context"]
         assert ctx["candidate_ladder"] is prepared
         assert mem is memory and state_dir == tmp_path
         calls.append("decision")
@@ -131,7 +147,7 @@ def test_pm_refreshes_candidates_before_context_and_decision(
     else:
         asyncio.run(runner._run_agent_pm_async())
 
-    assert calls == ["refresh", "context", "decision", "closed"]
+    assert calls == ["refresh", "positioning", "context", "decision", "closed"]
     assert load_pm_signal(tmp_path, sleeve_pct=0.1).ok
 
 

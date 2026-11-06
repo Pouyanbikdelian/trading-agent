@@ -201,6 +201,18 @@ def _format_reasoning_details(result: dict[str, Any]) -> list[str]:
         lines.append("⚠️ *Reasoning incomplete:* " + clip("; ".join(review["issues"]), 220))
     if result.get("requires_operator_review"):
         lines.append("⚠️ *Operator review required before execution eligibility.* Use `/pm review`.")
+    positioning = result.get("positioning_shadow") or {}
+    if positioning:
+        coverage = positioning.get("coverage", {})
+        lines.append(
+            "*Positioning evidence:* "
+            + ", ".join(f"{k}: {v}" for k, v in coverage.items())
+            + "; experimental sizing only."
+        )
+        for change in positioning.get("adjustments", [])[:3]:
+            lines.append(
+                f"`{change['symbol']}` {change['source']} experiment {change['base']:.1%} → {change['shadow']:.1%}; live target unchanged."
+            )
     freshness = result.get("evidence_freshness") or {}
     if freshness.get("historical_takes") and not freshness.get("current_agent_votes"):
         lines.append("⚠️ Committee views need revalidation; no current specialist votes.")
@@ -281,6 +293,12 @@ def _format_candidate_review(result: dict[str, Any]) -> str:
             "why_not_larger",
         ):
             lines.append(field.replace("_", " ") + ": " + clip(str(row.get(field, "missing")), 100))
+    for row in review.get("positioning_assessments", [])[:18]:
+        if isinstance(row, dict):
+            lines.append(
+                f"`{row.get('symbol')}` {row.get('source')}: {row.get('assessment')} / {row.get('effect')}; "
+                + clip(str(row.get("reason", "")), 120)
+            )
     cash = review.get("cash_plan") or {}
     if cash:
         lines.append(

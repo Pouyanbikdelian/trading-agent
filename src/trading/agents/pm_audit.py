@@ -92,7 +92,17 @@ def _source_hashes() -> dict[str, str]:
         )
     ]
     paths.append(root.parent / "reporting" / "pm_shadow.py")
-    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.exists()}
+    hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.exists()}
+    for relative in (
+        "agents/positioning.py",
+        "data/positioning.py",
+        "runtime/positioning_monitor.py",
+        "agents/context.py",
+        "core/types.py",
+    ):
+        path = root.parent / relative
+        hashes[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashes
 
 
 def _archive_decision(state_dir: Path, result: dict[str, Any]) -> str:

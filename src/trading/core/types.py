@@ -328,3 +328,27 @@ class RiskDecision(BaseModel):
     action: RiskAction
     reason: str
     scale_factor: float = 1.0  # used when action == "scale"
+
+
+class PositioningObservation(BaseModel):
+    """Point-in-time evidence; collection time never substitutes for observation time."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+    id: str
+    source: Literal["cot", "goldman_public", "gamma_estimate"]
+    kind: Literal["measured", "reported", "estimated"]
+    scope: str
+    symbols: tuple[str, ...] = ()
+    observed_at: datetime
+    available_at: datetime
+    expires_at: datetime
+    source_url: str
+    facts: dict[str, float | None] = Field(default_factory=dict)
+    note: str
+
+    @field_validator("observed_at", "available_at", "expires_at")
+    @classmethod
+    def aware_positioning_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("positioning timestamps must be timezone-aware")
+        return value

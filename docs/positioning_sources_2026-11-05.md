@@ -1,9 +1,11 @@
 # Positioning sources and integration research — November 5, 2026
 
-Source integration remains research/design only. The owner subsequently selected
-the Friday schedule below for deployment. No subscriptions were purchased,
-collectors deployed or signal weights changed. The owner has no Goldman Prime
-Services or dealer-gamma subscription. Existing budget: approximately $20/month.
+This document records the November 5 research and selected Friday schedule.
+The free-source implementation followed on November 6; current behavior and
+remaining limitations are documented in [the pipeline runbook](positioning_pipeline.md).
+No subscriptions were purchased and no executable positioning overlay was added.
+The owner has no Goldman Prime Services or dealer-gamma subscription; budget
+remains approximately $20/month.
 
 ## Source selection
 

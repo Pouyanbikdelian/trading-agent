@@ -22,6 +22,17 @@ from trading.memory import MemoryStore
 
 def valid_response(now, weight=0.05):
     return {
+        "positioning_assessments": [
+            {
+                "symbol": "AAA",
+                "source": source,
+                "assessment": "unavailable",
+                "evidence_ids": [],
+                "effect": "none",
+                "reason": "No applicable positioning data supplied.",
+            }
+            for source in ("cot", "goldman_public", "gamma_estimate")
+        ],
         "target_weights": {"AAA": weight},
         "rationale": "Small research allocation.",
         "candidate_reviews": [

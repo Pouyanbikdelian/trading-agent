@@ -973,6 +973,17 @@ class Runner:
             coalesce=True,
         )
 
+        # Free positioning polling is independent of Telegram configuration.
+        self._scheduler.add_job(
+            self._run_positioning_async,
+            CronTrigger(
+                day_of_week="mon-fri", hour=15, minute="31,46", timezone="America/New_York"
+            ),
+            id="positioning_monitor",
+            replace_existing=True,
+            max_instances=1,
+        )
+
         # Advisory risk monitor: hourly poll of SPY+VIX, push a Telegram
         # alert on new triggers. NEVER auto-applies a mode change — only
         # informs the operator. Disabled if Telegram isn't configured.
@@ -2110,6 +2121,18 @@ class Runner:
         logger.bind(component="agent_pm").info("on-demand agent PM triggered")
         await self._run_agent_pm_async()
 
+    async def _run_positioning_async(self) -> None:
+        from trading.runtime.positioning_monitor import refresh_positioning
+
+        try:
+            report = await asyncio.to_thread(refresh_positioning, settings.state_dir)
+            if report["errors"] or not report["coverage"]["cot"]:
+                logger.bind(component="positioning").warning(
+                    "positioning coverage={} errors={}", report["coverage"], report["errors"]
+                )
+        except Exception:
+            logger.bind(component="positioning").exception("positioning refresh failed")
+
     async def _run_committee_async(self) -> None:
         """Daily agent committee: gather context, run the debate, send
         the digest. Advisory only — writes to memory and Telegram, never
@@ -2119,6 +2142,7 @@ class Runner:
             from trading.agents.context import build_context
             from trading.memory.store import default_store
 
+            await self._run_positioning_async()
             mem = default_store()
             ctx = await asyncio.to_thread(build_context, settings.state_dir, settings.data_dir)
             digest = await asyncio.to_thread(run_committee, ctx, mem, calibration=mem.calibration())
@@ -2194,6 +2218,7 @@ class Runner:
                 )
                 return
 
+            await self._run_positioning_async()
             mem = default_store()
             ctx = await asyncio.to_thread(
                 build_context,
