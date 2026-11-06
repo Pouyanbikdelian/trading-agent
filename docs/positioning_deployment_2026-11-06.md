@@ -22,6 +22,10 @@ Application health checks were healthy following restart, but **broker readiness
 was false**. IB Gateway had already exited at 23:31 UTC November 5, before this
 work's rollout. It was not restarted, and no successful trading cycle is claimed.
 Broker-dependent operation remains blocked until that service reconnects.
+Follow-up inspection found the saved halt reason **"gateway stopped for manual
+trading"**. This is evidence of an operator session choice, not permission to
+restart Gateway automatically. Gateway can take over the operator's manual IBKR
+session, so its stopped state was preserved. Reconnection is an operator decision.
 
 The existing halt remained active with identical file contents, `.env` remained
 byte-for-byte unchanged, basket approval remains required, and the selected
