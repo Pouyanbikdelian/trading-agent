@@ -263,3 +263,19 @@ def test_watchdog_does_not_expect_weekend_poll(tmp_path, monkeypatch):
     mock_sources(monkeypatch)
     refresh_positioning(tmp_path, NOW)
     assert read_positioning(tmp_path, NOW + timedelta(days=2))["watchdog"] == "ok"
+
+
+def test_refresh_holds_shared_process_lock_and_releases_it(tmp_path, monkeypatch):
+    import fcntl
+
+    mock_sources(monkeypatch)
+
+    def checked_fetch(now):
+        with (tmp_path / ".positioning.lock").open("a") as competing, pytest.raises(BlockingIOError):
+            fcntl.flock(competing.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return cot_features(cot_rows(), "13874A", now)
+
+    monkeypatch.setattr("trading.runtime.positioning_monitor.fetch_cot", checked_fetch)
+    assert refresh_positioning(tmp_path, NOW)["coverage"]["cot"] == 2
+    with (tmp_path / ".positioning.lock").open("a") as competing:
+        fcntl.flock(competing.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
