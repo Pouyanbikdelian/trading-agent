@@ -215,13 +215,30 @@ def fetch_gamma(symbol: str, now: datetime) -> PositioningObservation:
     spot = _finite(history["Close"].iloc[-1])
     expiries = [
         e
-        for e in ticker.options
+        for e in (ticker.options or ())
         if 0 < (datetime.fromisoformat(e).date() - now.astimezone(NY).date()).days <= 45
     ][:3]
+    if not expiries:
+        raise ValueError("options provider returned no usable expirations")
     rows: list[dict[str, Any]] = []
     for expiry in expiries:
         chain = ticker.option_chain(expiry)
+        if chain is None:
+            raise ValueError("options provider returned no chain")
         for side, frame in (("call", chain.calls), ("put", chain.puts)):
+            if (
+                frame is None
+                or frame.empty
+                or not {
+                    "strike",
+                    "impliedVolatility",
+                    "openInterest",
+                    "lastTradeDate",
+                    "contractSize",
+                }
+                <= set(frame.columns)
+            ):
+                raise ValueError(f"options provider returned incomplete {side} chain")
             selected = frame[(frame["strike"] >= 0.8 * spot) & (frame["strike"] <= 1.2 * spot)]
             rows.extend({**r, "expiry": expiry, "side": side} for r in selected.to_dict("records"))
     return gamma_features(symbol, spot, rows, now)

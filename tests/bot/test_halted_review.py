@@ -205,3 +205,19 @@ def test_a_review_built_after_the_pm_decision_is_repeated(tmp_path: Path, monkey
 
     assert "0 orders submitted" in reply
     assert not (tmp_path / "trigger_now.flag").exists()
+
+
+def test_unowned_gold_pin_is_not_reported_as_a_holding():
+    text = telegram_module._format_cycle_review(
+        {
+            "account": {"equity": 68000, "base_currency": "CHF", "position_count": 1},
+            "held_symbols": ["GLD", "NVDA"],
+            "pm": {"refusal_reason": "reasoning unavailable"},
+            "plan": {"orders": []},
+            "halt_reason": "baseline mismatch",
+        }
+    )
+    assert "No-trade rules preserved (not a holdings list)" in text
+    assert "Holds preserved" not in text
+    assert "Managed snapshot (protected holdings excluded)" in text
+    assert "PM targets were withheld: reasoning unavailable" in text

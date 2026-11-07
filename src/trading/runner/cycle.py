@@ -1729,6 +1729,7 @@ class Cycle:
                 "sleeve_pct": metadata.get("pm_sleeve_pct", ""),
                 "strategy_sleeve_pct": metadata.get("strategy_sleeve_pct", ""),
                 "dropped": metadata.get("pm_dropped", ""),
+                "refusal_reason": metadata.get(self._PM_BRIDGE_REFUSAL_REASON_METADATA, ""),
             },
             "will_never_auto_execute": True,
         }
@@ -1746,7 +1747,7 @@ class Cycle:
             title,
             f"Reason: `{intraday.reason}`",
             (
-                f"Live account snapshot: {base_currency} {equity:,.0f} equity · "
+                f"Managed account snapshot (protected holdings excluded): {base_currency} {equity:,.0f} equity · "
                 f"{len(getattr(account, 'positions', {}) or {})} current position(s)."
             ),
         ]
@@ -1760,13 +1761,23 @@ class Cycle:
                     *(
                         [f"Risk result: {rejections[0]}"]
                         if rejections
-                        else ["The current account already matches the computed target."]
+                        else [
+                            "No executable PM target was available; current holdings were not compared with the research proposal."
+                        ]
+                        if metadata.get(self._PM_BRIDGE_REFUSAL_REASON_METADATA)
+                        else [
+                            "No actionable changes were generated; this does not establish that the account matches the PM proposal."
+                        ]
                     ),
                 ]
             )
         notes: list[str] = []
         if held_symbols:
-            notes.append("Holds preserved: `" + ", ".join(sorted(held_symbols)) + "`.")
+            notes.append(
+                "No-trade rules preserved (not a holdings list): `"
+                + ", ".join(sorted(held_symbols))
+                + "`."
+            )
         pm_decided_at = str(metadata.get("pm_decided_at") or "")
         if pm_decided_at:
             notes.append(
@@ -1786,8 +1797,8 @@ class Cycle:
             + (
                 "After `/resume`, run a brand-new `/cycle` for a fresh executable approval.*"
                 if actual_halt
-                else "Run `/cycle` again while the US market is open (Mon–Fri 09:30–16:00 "
-                "New York) for a basket you can approve.*"
+                else "Resolve the safety gate stated above, then request a fresh `/cycle`. "
+                "Waiting for market open alone does not repair a baseline mismatch.*"
             )
         )
         self.alerts.warning(
@@ -1913,7 +1924,11 @@ class Cycle:
             more = f" (+{len(dropped) - 6} more)" if len(dropped) > 6 else ""
             detail.append(f"Excluded as exposure-increasing: {shown}{more}.")
         if held_symbols:
-            detail.append("Holds preserved: `" + ", ".join(sorted(held_symbols)) + "`.")
+            detail.append(
+                "No-trade rules preserved (not a holdings list): `"
+                + ", ".join(sorted(held_symbols))
+                + "`."
+            )
 
         # Do NOT say "halted" here unless the account actually is. On
         # 2026-08-19 the operator had already /resume'd; the gate refused
@@ -2357,7 +2372,10 @@ class Cycle:
             # to reach the market this cycle and did not.
             if "disabled" not in result.reason:
                 logger.bind(component="cycle").warning(f"PM bridge: {result.reason}")
-                self.alerts.error(format_bridge_note(result))
+                if isinstance(getattr(self, "_card_notes", None), list):
+                    _cycle_note(self, format_bridge_note(result))
+                else:
+                    self.alerts.error(format_bridge_note(result))
             # Stamp the refusal on the signal for the same reason the alert
             # above fires: the PM was meant to reach the market and did not,
             # so a later "no orders" message must say that rather than blame

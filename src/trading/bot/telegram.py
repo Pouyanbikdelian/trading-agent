@@ -521,7 +521,7 @@ def _cmd_holds() -> str:
     holds = load_holds(settings.state_dir)
     if not holds:
         return "_no pinned positions — `/hold <sym>` to pin one._"
-    return "\U0001f4cc *Pinned positions* (cycle won't touch):\n" + "\n".join(
+    return "\U0001f4cc *Pinned positions / no-trade rules* (not proof of ownership):\n" + "\n".join(
         f"  • `{s}`" for s in sorted(holds)
     )
 
@@ -3157,7 +3157,7 @@ def _format_cycle_review(review: dict[str, Any]) -> str:
         title,
         f"Review `{str(review.get('id') or '')[:8]}` · reason: `{reason}`",
         f"Built: `{review.get('built_at') or 'unknown'!s}`",
-        f"Live snapshot: {ccy} {equity:,.0f} equity · {positions} current position(s).",
+        f"Managed snapshot (protected holdings excluded): {ccy} {equity:,.0f} equity · {positions} current position(s).",
     ]
     plan = review.get("plan") if isinstance(review.get("plan"), dict) else {}
     rows = plan.get("orders") if isinstance(plan.get("orders"), list) else []
@@ -3178,9 +3178,14 @@ def _format_cycle_review(review: dict[str, Any]) -> str:
         lines += ["", "*No hypothetical position changes passed the current sizing gates.*"]
         if detail:
             lines.append(f"Risk result: {detail}")
+        refusal = (review.get("pm") or {}).get("refusal_reason")
+        if refusal:
+            lines.append("PM targets were withheld: " + str(refusal))
     held = review.get("held_symbols")
     if isinstance(held, list) and held:
-        lines.append("Holds preserved: `" + ", ".join(map(str, held)) + "`.")
+        lines.append(
+            "No-trade rules preserved (not a holdings list): `" + ", ".join(map(str, held)) + "`."
+        )
     lines += ["", "*0 orders submitted. This review cannot be approved, queued or executed.*"]
     if review.get("halted", False):
         lines.append(

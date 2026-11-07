@@ -271,7 +271,10 @@ def test_refresh_holds_shared_process_lock_and_releases_it(tmp_path, monkeypatch
     mock_sources(monkeypatch)
 
     def checked_fetch(now):
-        with (tmp_path / ".positioning.lock").open("a") as competing, pytest.raises(BlockingIOError):
+        with (
+            (tmp_path / ".positioning.lock").open("a") as competing,
+            pytest.raises(BlockingIOError),
+        ):
             fcntl.flock(competing.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         return cot_features(cot_rows(), "13874A", now)
 
@@ -279,3 +282,54 @@ def test_refresh_holds_shared_process_lock_and_releases_it(tmp_path, monkeypatch
     assert refresh_positioning(tmp_path, NOW)["coverage"]["cot"] == 2
     with (tmp_path / ".positioning.lock").open("a") as competing:
         fcntl.flock(competing.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_nasdaq_context_and_explicitly_neutral_crude_are_not_stock_flows():
+    rows = [
+        {
+            "symbol": "MPC",
+            "source": s,
+            "assessment": "unavailable",
+            "effect": "none",
+            "reason": "No data",
+            "evidence_ids": [],
+        }
+        for s in ("cot", "goldman_public", "gamma_estimate")
+    ]
+    catalog = {
+        "cot:nq": {"positioning_source": "cot", "symbols": ["QQQ"], "requires_revalidation": False},
+        "cot:oil": {
+            "positioning_source": "cot",
+            "symbols": ["USO"],
+            "requires_revalidation": False,
+        },
+    }
+    rows[0].update(
+        assessment="neutral",
+        scope="market_context",
+        evidence_ids=["cot:nq", "cot:oil"],
+        reason="Context only; oil is not refiner stock buying and does not change the target",
+    )
+    assert not check_positioning({"positioning_assessments": rows}, {"MPC"}, catalog)
+    rows[0]["effect"] = "size"
+    assert check_positioning({"positioning_assessments": rows}, {"MPC"}, catalog)
+    rows[0]["effect"] = "none"
+    catalog["cot:oil"]["requires_revalidation"] = True
+    assert check_positioning({"positioning_assessments": rows}, {"MPC"}, catalog)
+
+
+def test_gamma_incomplete_provider_chain_is_explicitly_unavailable(monkeypatch):
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from trading.data.positioning import fetch_gamma
+
+    ticker = SimpleNamespace(
+        options=("2026-11-13",),
+        history=lambda **kwargs: pd.DataFrame({"Close": [100]}, index=pd.DatetimeIndex([NOW])),
+        option_chain=lambda expiry: SimpleNamespace(calls=None, puts=None),
+    )
+    monkeypatch.setattr("yfinance.Ticker", lambda symbol: ticker)
+    with pytest.raises(ValueError, match="incomplete call chain"):
+        fetch_gamma("SPY", NOW)

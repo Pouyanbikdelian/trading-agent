@@ -737,7 +737,8 @@ def test_digest_quotes_no_paper_money(mem: MemoryStore, tmp_path: Path) -> None:
     assert "$" not in text
     assert " sh" not in text
     assert "1,000,000" not in text and "1.0M" not in text
-    assert "they become orders only at a cycle, after your /approve" in text
+    assert "BLOCKED pending reasoning review" in text
+    assert "not transactions in your broker account" in text
     assert "`/cycle`" in text  # names the authority for real sizes
 
 

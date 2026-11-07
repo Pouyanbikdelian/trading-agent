@@ -813,3 +813,12 @@ class TestTheNoOrderMessageNamesTheRealCause:
         (msg,) = cycle.alerts.warning_msgs
         assert "GEN" in msg and "`/exceptions`" in msg
         assert "fresh PM decision is required" not in msg
+
+
+def test_pm_refusal_is_bundled_into_active_cycle_card(cycle, monkeypatch):
+    cycle._card_notes = []
+    patch_bridge(monkeypatch, make_result(None, reason="PM reasoning requires review"))
+    cycle._merge_pm_signal(strategy_signal(**{"equity:AAPL": 1.0}), instruments_by_key={}, ts=NOW)
+    assert not cycle.alerts.error_msgs
+    assert len(cycle._card_notes) == 1
+    assert "PM reasoning requires review" in cycle._card_notes[0]

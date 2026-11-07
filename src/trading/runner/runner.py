@@ -2119,7 +2119,7 @@ class Runner:
         with contextlib.suppress(Exception):
             flag.unlink()
         logger.bind(component="agent_pm").info("on-demand agent PM triggered")
-        await self._run_agent_pm_async()
+        await self._run_agent_pm_async(notify_busy=True)
 
     async def _run_positioning_async(self) -> None:
         from trading.runtime.positioning_monitor import refresh_positioning
@@ -2156,7 +2156,7 @@ class Runner:
         except Exception:
             logger.bind(component="agents").exception("committee run failed")
 
-    async def _run_agent_pm_async(self) -> None:
+    async def _run_agent_pm_async(self, *, notify_busy: bool = False) -> None:
         """Serialize scheduled and on-demand PM decisions over one fresh ladder."""
         lock = getattr(self, "_agent_pm_lock", None)
         if lock is None:
@@ -2164,10 +2164,11 @@ class Runner:
             self._agent_pm_lock = lock
         if lock.locked():
             logger.bind(component="agent_pm").info("PM already running; duplicate request skipped")
-            self.alerts.info(
-                "🧠 A PM decision or cycle is already in progress. "
-                "This PM request was not started; retry after it finishes."
-            )
+            if notify_busy:
+                self.alerts.info(
+                    "🧠 A PM decision or cycle is already in progress. "
+                    "This PM request was not started; retry after it finishes."
+                )
             return
         async with lock:
             await self._run_agent_pm_with_candidates()
@@ -3070,11 +3071,7 @@ class Runner:
             )
             return
         stale = "none on file" if age is None else f"the last one is {age:.0f}h old"
-        with contextlib.suppress(Exception):
-            self.alerts.info(
-                f"🧠 Manual cycle — the PM decides first ({stale}). "
-                "The basket follows in about 5–10 min."
-            )
+        logger.bind(component="agent_pm").info(f"manual cycle refreshes PM first ({stale})")
         try:
             await self._run_agent_pm_async()
         except Exception:

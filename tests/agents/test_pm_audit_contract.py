@@ -308,3 +308,35 @@ def test_sentinel_scope_is_experimental_and_does_not_lift_live_cap():
         {"fired_within_24h": True, "triggers": ["SPY -3%", "QNT -7%"]}, frozenset({"QNT"})
     )
     assert market["scope"] == "market" and market["experimental_market_only_cap"] == 0.7
+
+
+@pytest.mark.parametrize(
+    "gross_cap,sentinel_cap,expected_floor", [(0.71, None, 0.29), (0.71, 0.7, 0.3), (0.5, 0.7, 0.5)]
+)
+def test_cash_review_uses_resolved_gross_limit(gross_cap, sentinel_cap, expected_floor):
+    now = UtcClock().now()
+    payload = {
+        "today_context": {
+            "candidate_ladder": {
+                "as_of": now.date().isoformat(),
+                "ranked": [{"symbol": "AAA", "score": 0.5}],
+                "shadow_risk_limits": {"max_gross_exposure": gross_cap},
+            }
+        }
+    }
+    catalog = _evidence_catalog(payload, now)
+    response = valid_response(now, 0.14)
+    response["cash_plan"].update(
+        safety_floor=expected_floor, discretionary_weight=0.86 - expected_floor
+    )
+    review = _check_contract(
+        response, {"required_symbols": ["AAA"]}, {"AAA": 0.14}, catalog, now, sentinel_cap
+    )
+    assert not any("cash plan" in issue for issue in review["issues"])
+    response["cash_plan"]["safety_floor"] = 0
+    assert any(
+        "cash plan does not reconcile" in issue
+        for issue in _check_contract(
+            response, {"required_symbols": ["AAA"]}, {"AAA": 0.14}, catalog, now, sentinel_cap
+        )["issues"]
+    )

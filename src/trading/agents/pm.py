@@ -229,9 +229,11 @@ PM_CHARTER = (
     "(support/conflict/neutral/unavailable/not_applicable), evidence_ids, effect "
     "(none/rank/size/timing), and reason explaining scope and uncertainty. Use exact evidence "
     "IDs and symbol mappings; missing feeds mean unknown, never bearish. Broad index futures "
-    "and SPY gamma can inform market timing only, not prove individual-stock accumulation. "
+    "and SPY/QQQ gamma can inform market timing only, not prove individual-stock accumulation. "
     "Available SPY macro evidence must be reviewed for stocks with scope=market_context and "
     "effect=none or timing; do not label this available market context unavailable. "
+    "Other COT markets may be cited as neutral market_context with effect=none when explaining "
+    "why they do not establish a stock thesis. "
     "Goldman is a reported client sample. Gamma is modelled with unknown OI age and dealer signs, "
     "not measured dealer inventory. No applicable evidence requires effect=none and an explanation. "
     "Deterministic positioning adjustments are shadow experiments only; do not copy their targets. "
@@ -242,7 +244,10 @@ PM_CHARTER = (
     "For allocated names explain the exact size and any change from "
     "sim_portfolio.current_weights; do not call a reduction unchanged. "
     "cash_reason must explain the uninvested allocation against the best "
-    "alternatives, distinguishing required safety cash from discretionary cash.\n"
+    "alternatives, distinguishing required safety cash from discretionary cash. "
+    "The required cash floor is 1 minus the minimum of 1, allocation_policy.max_gross_exposure "
+    "in evidence_catalog, and the active Sentinel cap. Discretionary cash is total cash minus "
+    "that floor. Do not ignore a configured gross limit just because Sentinel expired.\n"
     "\n"
     "EVIDENCE FRESHNESS: decision_at is the current time. Evidence with "
     "requires_revalidation=true is historical, not a current vote or event. "
@@ -322,7 +327,7 @@ PM_CHARTER = (
     "OPERATOR MANDATES: " + STRENGTH_GUIDANCE + "\n"
     "\n"
     "OPERATOR HOLDS (mandatory): symbols listed in operator_held_do_not_trade "
-    "are the operator's long-term positions, pinned outside your mandate. "
+    "are protected no-trade symbols, which may or may not be owned in the broker account. "
     "NEVER allocate to them — any weight you place there is cut to cash by "
     "code. Do not count them as portfolio exposure either; they are not "
     "your book.\n"
@@ -1766,7 +1771,7 @@ def format_account_translation(
         else f"{ccy} {equity:,.0f}, before caps and holds"
     )
     lines = [
-        f"*In your account* (~{sleeve_pct:.0%} sleeve of {basis}):",
+        f"*In your account — sizing illustration, not holdings* (~{sleeve_pct:.0%} sleeve of {basis}):",
         f"  deployed ≈ {ccy} {equity * sleeve_pct * gross:,.0f}",
     ]
     top = sorted(weights.items(), key=lambda kv: -kv[1])[:3]
@@ -1805,8 +1810,14 @@ def format_pm_digest(
     # next to the latter made every figure on the card unreadable, and
     # none of them were sizes anyone could act on. What the PM decides
     # is a set of weights — so that is what this shows.
+    state = (
+        "research proposal — BLOCKED pending reasoning review"
+        if result.get("requires_operator_review")
+        else "proposed targets — not executed; risk checks and your order approval still apply"
+    )
     lines = [
-        "🧠 *Agent PM — target allocation* (the desk's live targets; they become orders only at a cycle, after your /approve)",
+        f"🧠 *Agent PM — target allocation* ({state})",
+        "Changes below describe the PM simulation, not transactions in your broker account.",
     ]
 
     opened, closed = result.get("opened") or [], result.get("closed") or []

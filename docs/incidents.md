@@ -14,6 +14,47 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-11-06 — False PM validation failures and misleading no-order messages
+
+**Symptoms.** A manual cycle and the scheduled Friday cycle produced a long
+sequence of warnings. A saved GLD protection rule appeared under “Holds
+preserved” even though the broker and PM simulation held no gold. A blocked
+review said the account already matched its target, despite no executable PM
+target being available.
+
+**Causes.** The positioning validator allowed only SPY macro context and rejected
+neutral Nasdaq/WTI citations that explicitly made no stock-flow claim. The cash
+checker used only Sentinel's cap, ignoring the resolved 71% gross limit supplied
+to the PM: 14% invested + 29% required cash + 57% discretionary cash was correct.
+Separate bridge alerts, duplicate scheduled-PM busy replies and repeated manual
+progress notices added noise. The risk-baseline mismatch was independent: the
+set of actually owned protected positions had changed (NVDA was newly included).
+That safeguard correctly refused to compare different books.
+
+**Correction (November 7).** Include the configured gross cap in cash arithmetic;
+allow SPY/QQQ timing context and other fresh COT observations only as explicitly
+neutral, no-effect background. Direct stock sizing/ranking still requires mapped
+evidence. Label protection rules independently from ownership and PM simulation
+changes independently from broker trades. An absent target is never described
+as an account match. Bundle PM refusal into the cycle card and keep scheduled
+busy skips quiet; explicit manual PM requests still receive a reply. Baseline
+errors no longer advise merely waiting for regular market hours. Missing option
+chains produce explicit coverage failures instead of subscripting None.
+
+**Evidence.** Replaying the exact archived PM response locally removed all five
+reported validation failures without changing any target weight. Hermetic
+regressions cover gross/Sentinel cap interactions, neutral macro references,
+wrong-scope and stale evidence rejection, unowned protection labels, incomplete
+option responses and notification routing. Both affected recorded cycles
+submitted zero orders. The old audited decision and its review status were not
+rewritten or auto-approved; no pins or risk reference points were changed.
+
+**Lesson.** Validate the decision against the policy actually supplied to the
+model. Protection lists are instructions, not inventories. Empty executable
+targets mean unavailable, not portfolio agreement.
+
+---
+
 ## 2026-10-27 — Retained simulated holdings had no live exception to approve
 
 **Symptoms.** After the operator reset a mismatched pinned-position baseline,

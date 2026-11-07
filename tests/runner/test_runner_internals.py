@@ -829,3 +829,18 @@ def test_the_desk_card_says_whose_targets_trade_and_when(monkeypatch, tmp_path: 
     assert "*Broker* · 7 position(s) match" in card
     assert "Halted" in card
     assert card.count("Oct") == 1  # the next cycle once, not twice
+
+
+def test_scheduled_duplicate_pm_is_quiet_but_manual_request_gets_reply(tmp_path):
+    runner = _bare_runner(tmp_path)
+    runner.alerts = TelegramAlerts(enabled=False)
+
+    async def exercise():
+        runner._agent_pm_lock = asyncio.Lock()
+        async with runner._agent_pm_lock:
+            await runner._run_agent_pm_async()
+            assert not runner.alerts.sent
+            await runner._run_agent_pm_async(notify_busy=True)
+            assert len(runner.alerts.sent) == 1
+
+    asyncio.run(exercise())

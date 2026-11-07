@@ -43,10 +43,22 @@ def check_positioning(
                 for k, v in catalog.items()
                 if source in {"cot", "gamma_estimate"}
                 and v.get("positioning_source") == source
-                and "SPY" in v.get("symbols", [])
+                and bool({"SPY", "QQQ"} & set(v.get("symbols", [])))
                 and not v.get("requires_revalidation")
             }
-            relevant = applicable | macro
+            # A dated commodity observation can be explicitly discussed as
+            # irrelevant/ambiguous without pretending it is stock accumulation.
+            contextual = {
+                k
+                for k, v in catalog.items()
+                if source == "cot"
+                and v.get("positioning_source") == source
+                and not v.get("requires_revalidation")
+                and status == "neutral"
+                and row.get("effect") == "none"
+                and row.get("scope") == "market_context"
+            }
+            relevant = applicable | macro | contextual
             if status not in {"support", "conflict", "neutral", "unavailable", "not_applicable"}:
                 issues.append(f"{label}: missing positioning assessment")
             elif status in {"support", "conflict", "neutral"}:

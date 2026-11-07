@@ -204,9 +204,14 @@ def _format_reasoning_details(result: dict[str, Any]) -> list[str]:
     positioning = result.get("positioning_shadow") or {}
     if positioning:
         coverage = positioning.get("coverage", {})
+        labels = {
+            "cot": "COT",
+            "goldman_public": "Goldman reports",
+            "gamma_estimate": "Gamma estimates",
+        }
         lines.append(
             "*Positioning evidence:* "
-            + ", ".join(f"{k}: {v}" for k, v in coverage.items())
+            + ", ".join(f"{labels.get(k, k)}: {v}" for k, v in coverage.items())
             + "; experimental sizing only."
         )
         for change in positioning.get("adjustments", [])[:3]:

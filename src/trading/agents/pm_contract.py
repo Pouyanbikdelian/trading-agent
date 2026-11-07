@@ -73,6 +73,16 @@ def _evidence_catalog(payload: dict[str, Any], now: datetime) -> dict[str, Any]:
             "excluded": payload.get("operator_excluded_never_buy"),
         },
     }
+    # The PM budget and cash review must use the same resolved gross limit
+    # supplied by candidate preparation, not Sentinel alone.
+    gross_cap = _number((ladder.get("shadow_risk_limits") or {}).get("max_gross_exposure"))
+    catalog["allocation_policy"] = {
+        "kind": "constraint",
+        "requires_revalidation": False,
+        "facts": {
+            "max_gross_exposure": gross_cap if gross_cap is not None and gross_cap >= 0 else 1.0
+        },
+    }
     for observation in (context.get("positioning") or {}).get("observations", []):
         catalog[observation["id"]] = {
             **observation,
@@ -218,11 +228,20 @@ def _check_contract(
     cash_plan = response.get("cash_plan")
     cash_plan = cash_plan if isinstance(cash_plan, dict) else {}
     if cash > 0.0001:
-        required_floor = 1 - sentinel_cap if sentinel_cap is not None else 0.0
+        policy_cap = _number(
+            (catalog.get("allocation_policy", {}).get("facts") or {}).get("max_gross_exposure")
+        )
+        effective_cap = min(
+            1.0,
+            sentinel_cap if sentinel_cap is not None else 1.0,
+            policy_cap if policy_cap is not None and policy_cap >= 0 else 1.0,
+        )
+        required_floor = 1 - effective_cap
         floor = _number(cash_plan.get("safety_floor"))
         discretionary = _number(cash_plan.get("discretionary_weight"))
         if (
             floor is None
+            or cash + 1e-6 < required_floor
             or abs(floor - required_floor) > 1e-6
             or discretionary is None
             or abs(discretionary - max(0, cash - required_floor)) > 1e-6
