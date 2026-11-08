@@ -1553,10 +1553,14 @@ class Cycle:
         cycle, whose orders have been independently proven to lower exposure
         against a fresh broker snapshot. Every other caller leaves it False,
         so a halt landing mid-batch still stops the remaining orders."""
+        from trading.execution.base import BrokerError
+
         orders_submitted = 0
         halted_during_submit = False
         submission_failed = False
         for order in orders:
+            unknown_outcome = ""
+            uncertainty_notice = ""
             # ``submission_gate`` shares the halt-state transaction with
             # Telegram/CLI /halt. A hard stop therefore takes effect between
             # orders in this batch, rather than only after all submissions.
@@ -1579,7 +1583,6 @@ class Cycle:
                     logger.bind(component="cycle").exception(
                         f"submit failed for {order.client_order_id}"
                     )
-                    self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
                     # A CONNECTIVITY failure is a different event from a
                     # rejected order and needs a different reaction. "Order
                     # rejected: insufficient margin" is information; "cannot
@@ -1587,20 +1590,32 @@ class Cycle:
                     # human has to do something — usually approve a 2FA
                     # prompt. Escalate it so it does not scroll past looking
                     # like one more per-name rejection.
-                    if _looks_like_disconnect(e):
-                        self.alerts.critical(
-                            "🔴 *Broker unreachable while submitting orders*\n"
+                    if _looks_like_disconnect(e) or not isinstance(e, BrokerError):
+                        # A lost acknowledgement may conceal an accepted order.
+                        # Keep its pending row open for late-fill reconciliation;
+                        # marking it rejected would close that lookup window.
+                        unknown_outcome = f"submission outcome unknown for {order.client_order_id}"
+                        uncertainty_notice = (
+                            "🔴 *Broker submission outcome unknown*\n"
                             f"`{err_str}`\n"
-                            f"Failed on {order.instrument.symbol}; the rest of this "
-                            "batch will fail too.\n"
-                            "_Most likely an IBKR Mobile 2FA prompt after a gateway "
-                            "restart. Approve it, then `/cycle` to retry._"
+                            f"IBKR may have received the {order.instrument.symbol} order. "
+                            "Stopping this batch and halting further trading.\n"
+                            "_Check broker orders and fills and reconcile this order before "
+                            "resuming. Do not blindly retry it._"
                         )
                     else:
+                        self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
                         self.alerts.error(
                             f"❌ order rejected: {order.side.value} {order.quantity:g} "
                             f"{order.instrument.symbol} — {err_str}"
                         )
+            if unknown_outcome:
+                # submission_gate owns the halt-file lock. Release it before
+                # persisting the halt, while still holding the execution lock.
+                self.risk_manager.halt(unknown_outcome)
+                halted_during_submit = True
+                self.alerts.critical(uncertainty_notice)
+                break
 
         # 9b. Drive the broker's internal clock so paper-trade fills
         # materialize in the same cycle they were submitted in. No-op for
@@ -2353,16 +2368,18 @@ class Cycle:
         report, from a PM that chose to hold everything — so every refusal
         is announced.
         """
-        from trading.agents.pm_signal import format_bridge_note, load_pm_signal
+        from trading.agents.pm_signal import PMSignalResult, format_bridge_note, load_pm_signal
         from trading.core.config import settings as _s
 
         try:
             result = load_pm_signal(_s.state_dir, now=ts, tradeable_keys=set(instruments_by_key))
-        except Exception:
+        except Exception as exc:
             logger.bind(component="cycle").exception(
-                "PM bridge raised; continuing on the mechanical strategy alone"
+                "PM bridge raised; refusing the PM sleeve and preserving the strategy allocation"
             )
-            return signal
+            # A broken PM source must not promote a benchmark-only strategy
+            # to the whole account. Reuse the ordinary refusal/scaling path.
+            result = PMSignalResult(None, f"PM decision could not be loaded: {type(exc).__name__}")
 
         strat = float(getattr(_s, "strategy_sleeve_pct", 1.0) or 0.0)
 
@@ -3309,7 +3326,7 @@ class Cycle:
 
         def _matches_current_cycle(decision: dict[str, Any], cycle_id: str) -> bool:
             decided_id = str(decision.get("id") or "")
-            if not decided_id or decided_id == cycle_id:
+            if decided_id == cycle_id:
                 return True
             self.alerts.warning(
                 f"⚠️ ignoring an approval for cycle `{decided_id[:8]}` — "
@@ -3630,8 +3647,16 @@ class Cycle:
                 working_orders=self._working_orders(),
             )
         if action == "scale":
-            factor = float(decision.get("scale_factor", 1.0))
-            factor = max(0.0, min(factor, 1.0))
+            import math
+
+            raw_factor = decision.get("scale_factor")
+            try:
+                factor = float(raw_factor)
+            except (TypeError, ValueError, OverflowError):
+                factor = float("nan")
+            if isinstance(raw_factor, bool) or not math.isfinite(factor) or not 0 <= factor <= 1:
+                self.alerts.warning("⚠️ invalid approval scale — no orders submitted.")
+                return []
             if factor < 0.001:
                 self.alerts.info(f"❌ cycle `{cycle_id[:8]}` scaled to ~0% — equivalent to reject.")
                 return []
@@ -3667,6 +3692,9 @@ class Cycle:
                     )
                 )
             return picked_orders
+        if action != "approve":
+            self.alerts.warning("⚠️ invalid approval action — no orders submitted.")
+            return []
         # action == "approve". No echo (2026-09-26): the bot has already
         # confirmed the tap, and the fills message follows within seconds.
         logger.bind(component="cycle").info(f"cycle {cycle_id[:8]} approved as-is")

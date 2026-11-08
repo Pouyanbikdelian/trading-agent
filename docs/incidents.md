@@ -14,6 +14,38 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-11-08 — Execution audit: failure paths could change allocation or consent
+
+**Trigger.** Follow-up audit after the noisy November 6 cycle. These were
+reproduced offline; they were not observed placing trades in that incident.
+The latest five recorded production cycles all submitted zero orders.
+
+**Findings.** A raising PM loader returned the full mechanical signal before
+applying the configured strategy sleeve (live uses zero). Unknown approval
+actions fell through to approval, missing basket IDs were accepted for old-bot
+compatibility, and invalid scale values could become full-size consent. The PM
+bridge also accepted non-finite numbers. Finally, a lost broker acknowledgement
+was recorded as a rejection and the batch continued, potentially hiding a late
+fill from the next reconciliation window. These paths predate the recent
+reasoning/positioning release; its extra validation made the PM-error fallback
+particularly important to inspect.
+
+**Correction.** Apply ordinary refusal/scaling on PM loader exceptions; require
+a known approval action, current basket ID and finite scale in [0, 1]; refuse
+invalid PM numeric inputs. On connectivity or unexpected submission errors,
+retain the open ledger row, halt after releasing the submission-state lock,
+stop the remaining batch, and require broker reconciliation before resuming.
+Explicit broker rejections remain terminal. No automatic retry is added.
+
+**Evidence.** New regressions failed before the fixes. The full offline suite
+passed (2,442 tests), then all 499 targeted PM, risk, execution and runner
+tests passed with additional defensive-cycle and late-fill cases. The server's three app
+containers matched all 170 runtime files before deployment. No live test order,
+manual baseline reset, changed risk default or automatic approval was used.
+
+**Lesson.** An exception must preserve allocation policy, missing consent is
+not consent, and a missing broker acknowledgement is not a rejection.
+
 ## 2026-11-06 — False PM validation failures and misleading no-order messages
 
 **Symptoms.** A manual cycle and the scheduled Friday cycle produced a long

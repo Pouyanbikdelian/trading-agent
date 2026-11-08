@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -249,6 +250,14 @@ def load_pm_signal(
     max_age_h = default_max_age_h() if max_age_h is None else max_age_h
     sleeve_pct = default_sleeve_pct() if sleeve_pct is None else sleeve_pct
 
+    if (
+        not math.isfinite(sleeve_pct)
+        or sleeve_pct > 1
+        or not math.isfinite(max_age_h)
+        or max_age_h <= 0
+    ):
+        return PMSignalResult(None, "invalid PM bridge limits; refusing the PM sleeve")
+
     if sleeve_pct <= 0:
         return PMSignalResult(None, "PM bridge disabled (AGENT_PM_SLEEVE_PCT=0)")
 
@@ -260,6 +269,9 @@ def load_pm_signal(
     except Exception as e:
         logger.bind(component="pm_signal").warning(f"unreadable PM decision: {e!r}")
         return PMSignalResult(None, f"unreadable PM decision: {type(e).__name__}")
+
+    if not isinstance(raw, dict):
+        return PMSignalResult(None, "PM decision must be a JSON object")
 
     if not raw.get("ok"):
         return PMSignalResult(None, f"last PM run failed: {raw.get('reason', 'unknown')}")
@@ -340,10 +352,18 @@ def load_pm_signal(
             dropped.append(f"{normalized} (off-ladder approval required)")
             continue
         try:
+            if isinstance(w, bool):
+                return PMSignalResult(
+                    None, f"PM decision has invalid numeric weight for {normalized}"
+                )
             w = float(w)
         except (TypeError, ValueError):
             dropped.append(str(sym))
             continue
+        if not math.isfinite(w):
+            # Do not silently drop this name: doing so could manufacture
+            # an exit from corrupted state instead of the PM's decision.
+            return PMSignalResult(None, f"PM decision has invalid numeric weight for {normalized}")
         if w <= 0:
             continue
         if normalized in approved_limits:

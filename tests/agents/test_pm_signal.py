@@ -310,3 +310,32 @@ class TestOperatorNote:
             load_pm_signal(tmp_path, now=NOW, sleeve_pct=0.10, tradeable_keys={"equity:AAPL"})
         )
         assert "dropped XLK" in note
+
+
+@pytest.mark.parametrize("payload", [[], None, 1, "bad"])
+def test_non_object_decision_is_refused(tmp_path, payload):
+    path = write_decision(tmp_path)
+    path.write_text(json.dumps(payload))
+    result = load_pm_signal(tmp_path, now=NOW, sleeve_pct=1.0)
+    assert result.signal is None
+    assert "object" in result.reason
+
+
+@pytest.mark.parametrize("weight", [float("nan"), float("inf"), float("-inf"), True])
+def test_invalid_numeric_weight_refuses_entire_pm_book(tmp_path, weight):
+    write_decision(tmp_path, weights={"AAPL": 0.1, "MSFT": weight})
+    result = load_pm_signal(tmp_path, now=NOW, sleeve_pct=1.0)
+    assert result.signal is None
+    assert not result.exiting
+    assert "invalid numeric weight" in result.reason
+
+
+@pytest.mark.parametrize(
+    "sleeve,age",
+    [(float("nan"), 6), (float("inf"), 6), (1.1, 6), (1, float("nan")), (1, float("inf"))],
+)
+def test_invalid_bridge_limits_are_refused(tmp_path, sleeve, age):
+    write_decision(tmp_path)
+    result = load_pm_signal(tmp_path, now=NOW, sleeve_pct=sleeve, max_age_h=age)
+    assert result.signal is None
+    assert "invalid PM bridge limits" in result.reason

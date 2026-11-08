@@ -250,7 +250,8 @@ class TestDisabledAndRefusals:
         )
         assert any("96.0h" in m for m in cycle.alerts.error_msgs)
 
-    def test_the_bridge_raising_does_not_take_the_cycle_down(self, cycle, monkeypatch) -> None:
+    @pytest.mark.parametrize("sleeve", [0.0, 0.25, 1.0])
+    def test_the_bridge_raising_respects_strategy_sleeve(self, cycle, monkeypatch, sleeve) -> None:
         import trading.agents.pm_signal as mod
 
         def boom(*a, **k):
@@ -259,7 +260,11 @@ class TestDisabledAndRefusals:
         monkeypatch.setattr(mod, "load_pm_signal", boom)
         base = strategy_signal(**{"equity:AAPL": 1.0})
 
-        assert cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW) is base
+        patch_strategy_sleeve(monkeypatch, sleeve)
+        out = cycle._merge_pm_signal(base, instruments_by_key={}, ts=NOW)
+        assert out.target_weights == ({"equity:AAPL": sleeve} if sleeve else {})
+        assert "RuntimeError" in out.metadata[cycle._PM_BRIDGE_REFUSAL_REASON_METADATA]
+        assert cycle.alerts.error_msgs
 
 
 class TestPricingThePMsPicks:

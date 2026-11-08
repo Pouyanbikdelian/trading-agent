@@ -232,15 +232,14 @@ def test_the_coordination_files_are_always_cleaned_up(approval_settings, account
     assert not (approval_settings / cycle.APPROVAL_DECISION_FILE).exists()
 
 
-def test_a_decision_with_no_id_is_still_honoured(approval_settings, account) -> None:
-    """Backward compatibility: a decision file written by an older bot
-    carries no id, and refusing those would break approvals mid-upgrade."""
+def test_a_decision_with_no_id_is_refused(approval_settings, account) -> None:
+    """Every deployed bot stamps the basket ID; unbound consent is unsafe."""
     cycle = _Cycle()
     orders = [_order("NVDA")]
 
     out = _run(cycle, orders, account, approval_settings, {"action": "approve"})
 
-    assert out == orders
+    assert out == []
 
 
 def test_second_approval_window_cannot_overwrite_the_first(approval_settings, account) -> None:
@@ -389,3 +388,35 @@ def test_custom_approval_refuses_confirmation_for_a_different_preview(
 
     assert out == []
     assert "did not match the displayed preview" in cycle.alerts.text()
+
+
+@pytest.mark.parametrize("action", ["typo", "custom_confirm", "", None])
+def test_unknown_approval_actions_fail_closed(approval_settings, account, action) -> None:
+    cycle = _Cycle()
+    assert (
+        _run(
+            cycle,
+            [_order("NVDA")],
+            account,
+            approval_settings,
+            {"id": "__CURRENT__", "action": action},
+        )
+        == []
+    )
+    assert "invalid approval action" in cycle.alerts.text()
+
+
+@pytest.mark.parametrize("factor", [float("nan"), float("inf"), -0.1, 1.1, None, "bad", True])
+def test_invalid_approval_scale_fails_closed(approval_settings, account, factor) -> None:
+    cycle = _Cycle()
+    assert (
+        _run(
+            cycle,
+            [_order("NVDA")],
+            account,
+            approval_settings,
+            {"id": "__CURRENT__", "action": "scale", "scale_factor": factor},
+        )
+        == []
+    )
+    assert "invalid approval scale" in cycle.alerts.text()

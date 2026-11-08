@@ -727,9 +727,9 @@ class IbkrBroker(Broker):
         # 2026-07-15): a timeout does not mean the order failed to reach
         # IBKR, and _bounded's reconnect-and-retry would re-send it,
         # potentially duplicating a live order. Reads are safe to retry;
-        # writes are not. On timeout the cycle marks this order REJECTED
-        # locally and startup/next-cycle reconciliation surfaces any
-        # divergence from what IBKR actually did.
+        # writes are not. On timeout the cycle preserves the open ledger
+        # row for reconciliation and halts the batch: lack of an
+        # acknowledgement is not evidence of a rejected order.
         trade = self._call_with_timeout(
             "placeOrder", lambda: self._ib.placeOrder(contract, ib_order), None
         )
