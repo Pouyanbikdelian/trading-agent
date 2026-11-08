@@ -36,10 +36,13 @@ invalid PM numeric inputs. On connectivity or unexpected submission errors,
 retain the open ledger row, halt after releasing the submission-state lock,
 stop the remaining batch, and require broker reconciliation before resuming.
 Explicit broker rejections remain terminal. No automatic retry is added.
+A final audit also found the dormant automatic playbook-flatten shortcut did
+not ask for basket approval. It is now review-only on armed live desks that
+require cycle approval; explicit approved exit flows remain available.
 
 **Evidence.** New regressions failed before the fixes. The full offline suite
-passed (2,442 tests), then all 499 targeted PM, risk, execution and runner
-tests passed with additional defensive-cycle and late-fill cases. The server's three app
+passed on the final code (2,446 tests), including additional defensive-cycle,
+late-fill and live playbook-approval cases. The server's three app
 containers matched all 170 runtime files before deployment. No live test order,
 manual baseline reset, changed risk default or automatic approval was used.
 

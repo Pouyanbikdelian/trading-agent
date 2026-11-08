@@ -311,3 +311,51 @@ def test_no_playbook_returns_static_config(
     eff_cfg, force_flat = cycle._effective_config(datetime(2024, 1, 1, tzinfo=timezone.utc))
     assert eff_cfg is cfg
     assert force_flat is False
+
+
+def test_live_playbook_flatten_cannot_bypass_required_approval(
+    tiny_universe_yaml, primed_cache, tmp_path, monkeypatch
+):
+    from trading.core import config as config_module
+    from trading.core.types import Order, RiskDecision, Side
+
+    monkeypatch.setattr(
+        config_module,
+        "settings",
+        config_module.settings.model_copy(
+            update={
+                "state_dir": tmp_path,
+                "trading_env": "live",
+                "allow_live_trading": True,
+                "require_cycle_approval": True,
+            }
+        ),
+    )
+    cycle, broker, _ = _build_cycle(
+        RunnerConfig(universe=tiny_universe_yaml, strategies=["donchian"], auto_refresh=False),
+        primed_cache,
+        tmp_path,
+        playbook=Playbook(rules={"crisis": PlaybookRule(force_flatten=True)}),
+        regime_label_fn=lambda ts: "crisis",
+    )
+    # A healthy session must not conceal the missing approval gate.
+    monkeypatch.setattr(
+        cycle.risk_manager,
+        "evaluate_session_risk",
+        lambda *a, **kw: RiskDecision(action="allow", reason="test baseline"),
+    )
+    order = Order(
+        client_order_id="flatten-test",
+        instrument=Instrument(symbol="TEST_A", asset_class=AssetClass.EQUITY),
+        side=Side.SELL,
+        quantity=1,
+        created_at=broker.get_account().ts,
+    )
+    monkeypatch.setattr(cycle.risk_manager, "force_flatten_orders", lambda *a, **kw: [order])
+    submitted = []
+    monkeypatch.setattr(broker, "submit_order", lambda order: submitted.append(order))
+    report = cycle.run_cycle()
+    assert submitted == []
+    assert report.status == "halted_review"
+    assert report.orders_submitted == 0
+    assert cycle.order_store.oldest_open_created_at() is None

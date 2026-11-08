@@ -573,6 +573,15 @@ class Cycle:
                 ],
                 duration_ms=self._elapsed_ms(ts_start),
             )
+        if _settings.is_live_armed() and _settings.require_cycle_approval:
+            # A regime classification is not operator consent. This legacy
+            # shortcut has no basket-approval window, so keep it review-only
+            # on approval-gated live desks instead of silently liquidating.
+            return self._run_force_flatten_review(
+                ts_start,
+                account=account,
+                reason="playbook flatten requires operator approval; automatic submission disabled",
+            )
         positions = list(account.positions.values())
         orders = self.risk_manager.force_flatten_orders(
             positions,
