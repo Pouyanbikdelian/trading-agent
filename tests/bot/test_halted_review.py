@@ -41,6 +41,17 @@ def test_cycle_while_halted_asks_the_runner_and_opens_no_approval(
     assert not (tmp_path / "cycle_approval_pending.json").exists()
 
 
+def test_cycle_request_does_not_promise_a_basket_before_gates_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(telegram_module, "settings", _settings(tmp_path))
+    (tmp_path / "halt.json").write_text(json.dumps({"halted": False}))
+    reply = _cmd_cycle_now()
+    assert "Cycle requested" in reply
+    assert "If an executable basket passes the checks" in reply
+    assert "blocker or no-order result" in reply
+    assert json.loads((tmp_path / "trigger_now.flag").read_text())["mode"] == "execute"
+    assert not (tmp_path / "cycle_approval_pending.json").exists()
+
+
 def test_explicit_review_command_still_requests_a_review_only_run(
     tmp_path: Path, monkeypatch
 ) -> None:

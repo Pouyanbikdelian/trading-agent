@@ -2307,12 +2307,19 @@ class Cycle:
             self._PM_BRIDGE_REFUSAL_REASON_METADATA
         )
         if pm_refusal:
-            next_step = (
-                "_Resolve the exception review above before retrying the cycle._"
-                if "`/exceptions`" in pm_refusal or "`/pm run`" in pm_refusal
-                else "_A fresh PM decision is required before a later cycle can propose "
-                "discretionary entries._"
-            )
+            if "/pm review" in pm_refusal and "/pm accept" in pm_refusal:
+                next_step = (
+                    "_Review the exact PM decision above; acknowledge it only if acceptable, "
+                    "or request `/pm run` for a new proposal. Then request a new `/cycle`; "
+                    "freshness, risk and basket approval still apply._"
+                )
+            elif "`/exceptions`" in pm_refusal or "`/pm run`" in pm_refusal:
+                next_step = "_Resolve the exception review above before retrying the cycle._"
+            else:
+                next_step = (
+                    "_A fresh PM decision is required before a later cycle can propose "
+                    "discretionary entries._"
+                )
             self.alerts.warning(
                 "📊 *Cycle plan: no orders*\n"
                 f"Agent PM was withheld: {pm_refusal}.\n"

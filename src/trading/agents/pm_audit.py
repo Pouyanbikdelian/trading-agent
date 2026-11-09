@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from trading.core.clock import UtcClock
 from trading.core.file_lock import file_lock
+from trading.core.text import clip
 
 
 def _encoded(value: object) -> bytes:
@@ -152,7 +153,19 @@ def _review_block_reason(state_dir: Path, raw: dict[str, Any]) -> str | None:
             return None
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    return f"PM evidence/reasoning requires exact-decision review: /pm review then /pm accept {raw.get('audit_id', 'unknown')} <reason>. Risk and order approval still apply."
+    # Nov 9: a completed cycle looked stuck because its card hid the actual
+    # failed claim behind a generic request to acknowledge the decision.
+    review = raw.get("reasoning_review")
+    issues = review.get("issues") if isinstance(review, dict) else None
+    detail = (
+        " Validation issues: " + clip("; ".join(str(issue) for issue in issues), 240) + "."
+        if isinstance(issues, list) and issues
+        else ""
+    )
+    return (
+        f"PM evidence/reasoning requires exact-decision review: /pm review then /pm accept "
+        f"{raw.get('audit_id', 'unknown')} <reason>. Risk and order approval still apply.{detail}"
+    )
 
 
 def _accept_review(state_dir: Path, audit_id: str, reason: str) -> str:

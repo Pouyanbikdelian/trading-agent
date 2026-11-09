@@ -1324,7 +1324,8 @@ def _cmd_baseline(args: list[str]) -> str:
             "_The runner writes one every 60s; check `/health` and the gateway first._"
         )
 
-    reason = " ".join(args[1:]).strip() or "operator accepted the drawdown"
+    # A reset may repair changed book identity; it is not proof of a loss.
+    reason = " ".join(args[1:]).strip() or "operator requested baseline reset"
     try:
         before, after = reset_equity_baseline(
             settings.state_dir,
@@ -2802,8 +2803,9 @@ def _cmd_cycle_now() -> str:
             "it lands as a read-only review._"
         )
     return (
-        "🔄 Cycle started. If the PM has not decided in the last 6 h it decides first; "
-        "the basket then comes to you for approval — about 5–10 minutes."
+        "🔄 Cycle requested. The runner refreshes the PM if its decision is too old. "
+        "If an executable basket passes the checks, it comes to you for approval; "
+        "otherwise you receive the blocker or no-order result — usually within 5–10 minutes."
     )
 
 

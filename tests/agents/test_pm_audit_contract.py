@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 from datetime import timedelta
 
 import pytest
@@ -125,6 +126,48 @@ def test_complete_decision_archives_exact_inputs_and_does_not_retry(desk, tmp_pa
     assert load_pm_signal(tmp_path, sleeve_pct=1).ok
     with pytest.raises(FileExistsError):
         _write_record(directory, "request.json", {})
+
+
+def test_following_documented_response_fields_needs_no_repair(desk):
+    """Nov 9: the JSON example omitted mandatory positioning and claim links."""
+    run, now, _ = desk
+    calls = []
+
+    def llm(system, prompt):
+        calls.append(prompt)
+        example = system.split("Respond ONLY with JSON: ", 1)[1].split("}. ", 1)[0]
+        fields = set(re.findall(r'"([a-z_]+)":', example))
+        response = {k: v for k, v in valid_response(now).items() if k in fields}
+        response["candidate_reviews"] = [
+            {k: v for k, v in row.items() if k in fields} for row in response["candidate_reviews"]
+        ]
+        return response
+
+    result = run(llm)
+    assert not result["requires_operator_review"], result["reasoning_review"]["issues"]
+    assert len(calls) == 1
+
+
+def test_misclassified_market_evidence_stays_blocked_and_explains_why(desk, tmp_path):
+    """A coverage caveat is not an operator constraint, even after repair."""
+    run, now, _ = desk
+    response = valid_response(now)
+    response["claims"].append(
+        {
+            "id": "c10",
+            "statement": "Market observations cannot establish stock accumulation.",
+            "assessment": "constraint",
+            "evidence_ids": ["ladder:AAA"],
+            "verification_needed": "Obtain a stock-level source.",
+        }
+    )
+    result = run(lambda *_: copy.deepcopy(response))
+    issue = "c10: constraint claim cites non-constraint evidence"
+    assert result["reasoning_review"]["issues"] == [issue]
+    loaded = load_pm_signal(tmp_path, sleeve_pct=1)
+    assert not loaded.ok
+    assert issue in loaded.reason
+    assert "/pm review" in loaded.reason and result["audit_id"] in loaded.reason
 
 
 def test_failed_model_call_replaces_previously_eligible_decision(desk, tmp_path):

@@ -819,6 +819,24 @@ class TestTheNoOrderMessageNamesTheRealCause:
         assert "GEN" in msg and "`/exceptions`" in msg
         assert "fresh PM decision is required" not in msg
 
+    def test_reasoning_review_does_not_require_replacing_the_reviewable_decision(self, cycle):
+        signal = Signal(
+            ts=NOW,
+            strategy="top_k_momentum",
+            target_weights={},
+            metadata={
+                cycle._PM_BRIDGE_REFUSAL_REASON_METADATA: (
+                    "PM evidence/reasoning requires exact-decision review: /pm review "
+                    "then /pm accept pm-example <reason>. Risk and order approval still apply."
+                )
+            },
+        )
+        cycle._announce_no_orders(signal, self._account("equity:SHA"))
+        (msg,) = cycle.alerts.warning_msgs
+        assert "fresh PM decision is required" not in msg
+        assert "Review the exact PM decision above" in msg
+        assert "Current positions (1) are untouched" in msg
+
 
 def test_pm_refusal_is_bundled_into_active_cycle_card(cycle, monkeypatch):
     cycle._card_notes = []

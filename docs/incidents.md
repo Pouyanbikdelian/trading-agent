@@ -14,6 +14,62 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-11-09 — Completed cycles looked stuck behind a PM review
+
+**Symptoms.** Three manual cycles progressed from an existing `unprotected
+positions: SHA` halt, to a pinned-book baseline mismatch, to `no_orders`
+after the operator resumed and reset the baseline. The final cycle kept
+requesting exact-decision PM review while also saying a fresh PM decision
+was required. Its startup acknowledgement had promised an approval basket.
+
+**Evidence.** The production cycle ledger records all three attempts with
+zero submitted orders and no cycle error. All three app containers match
+the 170 runtime files at `ce9b991`; that latest commit only changed the
+automatic playbook-flatten approval path. The baseline-reset audit shows
+NVDA entering the excluded, owned pinned book, so the old and new equity
+references were not comparable. The default reset text nevertheless called
+this accepting a drawdown. SHA remains outside the saved holds and startup
+acknowledgements; resuming does not resolve that separate ownership check.
+
+**Cause of the remaining block.** Decision
+`pm-7948e65932df41049320458928581e24` first omitted every positioning
+assessment: seven reviewed names times three sources. The November 6
+positioning requirement was present in the prose but absent from the JSON
+response example. The repair supplied all 21 assessments, but introduced
+claim `c10`, a positioning-coverage caveat marked `constraint` while citing
+COT observations. Those observations are not policy constraints. The
+validator correctly retained one issue: `c10: constraint claim cites
+non-constraint evidence`. With the PM sleeve at 1.0 and the mechanical
+sleeve at 0.0, withholding this decision leaves no executable targets.
+
+**Local correction.** Add positioning assessments and candidate claim links
+to the JSON example; explain exactly which source kinds support constraint
+claims and where coverage caveats belong. Include validation issues in the
+bridge refusal and distinguish reviewing the existing decision from
+requesting a new one. The cycle acknowledgement now promises a result
+conditional on the checks, and the default baseline-reset reason records
+the requested reset without inferring a measured loss. Validation and
+approval rules are unchanged.
+
+**Validation.** Five new regressions failed before the correction; the
+targeted suite passes afterward. The full offline suite passes in research
+mode with live trading disabled (2,452 tests); lint and formatting pass.
+Strict type checking reports the same 311 existing diagnostics as an
+isolated copy of `ce9b991`, with no added diagnostics. An initial paper-mode
+test run hit seven existing fake-broker fixtures that omit account IDs and
+assume research mode; no broker test was changed or skipped to resolve it.
+Replaying the archived repaired response
+offline reproduces the single `c10` issue. Reclassifying that claim as
+`uncertain` in memory removes it without changing weights; this is a
+diagnostic experiment, not a rewrite or acceptance of the saved decision.
+Production state, baselines, acknowledgements and orders were not changed
+by this investigation. Deployment and a new production PM response remain
+unverified for this local correction.
+
+**Lesson.** The response example is part of the contract. A model repair
+can introduce a new defect, and an operator needs the concrete failed
+claim rather than a generic invitation to accept a blocked proposal.
+
 ## 2026-11-08 — Execution audit: failure paths could change allocation or consent
 
 **Trigger.** Follow-up audit after the noisy November 6 cycle. These were

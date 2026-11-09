@@ -373,7 +373,13 @@ PM_CHARTER = (
     '"cash_reason": "<required safety cash versus discretionary cash; why alternatives lose>", '
     '"candidate_reviews": [{"symbol": "<required or targeted symbol>", '
     '"decision": "<allocate|pass>", "reason": "<thesis, sizing/change or rejection; falsifier>", '
-    '"evidence": ["<dated evidence key and specific observation>"]}], '
+    '"evidence": ["<dated evidence key and specific observation>"], "claim_ids": ["c1"]}], '
+    '"positioning_assessments": [{"symbol": "<reviewed symbol>", '
+    '"source": "<cot|goldman_public|gamma_estimate>", '
+    '"assessment": "<support|conflict|neutral|unavailable|not_applicable>", '
+    '"evidence_ids": ["<applicable evidence_catalog ID, or empty list when unavailable>"], '
+    '"scope": "<stock_specific|market_context|not_observed>", '
+    '"effect": "<none|rank|size|timing>", "reason": "<scope and uncertainty>"}], '
     '"claims": [{"id": "c1", "statement": "<decision-changing claim>", '
     '"assessment": "<measured|uncertain|constraint>", "evidence_ids": ["<evidence_catalog ID>"], '
     '"verification_needed": "<how to verify uncertain event claims>", '
@@ -391,10 +397,17 @@ PM_CHARTER = (
     '"max_weight": 0.05, "sector_impact": "<sector/concentration effect>", '
     '"correlation_impact": "<correlation effect>"}]}. '
     "Every candidate_review must also include claim_ids linking its reason to claims. "
+    "positioning_assessments is mandatory: supply one row for EACH reviewed symbol and EACH "
+    "of cot, goldman_public and gamma_estimate, including unavailable sources. "
     "Use evidence_catalog IDs only. Numeric checks verify the specified numeric predicate, "
     "not its causal story. Headlines and committee opinions cannot establish a verified "
     "event: use uncertain and name the verification still needed. Repeated opinions "
     "are not independent confirmations. Sizing downside is an estimate, not a guarantee. "
+    "Use assessment=constraint only when EVERY cited evidence_catalog entry has kind=constraint "
+    "(for example operator_constraints, allocation_policy or sentinel). Market observations, "
+    "including COT, are not constraints. A limitation such as 'index positioning cannot verify "
+    "stock accumulation' belongs in positioning_assessments.reason; if also included in claims, "
+    "use uncertain with verification_needed, not constraint or an unsupported measurement. "
     "Cash amounts must reconcile to the final target; the example values are not defaults. "
     "If asked to repair reasoning, preserve locked final weights and fill the review only."
 )

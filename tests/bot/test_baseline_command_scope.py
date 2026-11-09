@@ -126,6 +126,17 @@ def test_unknown_managed_baseline_does_not_publish_false_returns(desk) -> None:
     assert "drawdown vs peak" not in out
 
 
+def test_default_reset_reason_does_not_invent_a_measured_drawdown(desk) -> None:
+    out = telegram_module._cmd_baseline(["reset"])
+    assert desk["reason"] == "operator requested baseline reset"
+    assert "accepted the drawdown" not in out
+
+
+def test_reset_preserves_the_operator_supplied_reason(desk) -> None:
+    telegram_module._cmd_baseline(["reset", "reviewed", "pinned", "book", "change"])
+    assert desk["reason"] == "reviewed pinned book change"
+
+
 def test_an_unpinned_account_still_resets_against_the_whole_account(
     monkeypatch, tmp_path: Path
 ) -> None:
