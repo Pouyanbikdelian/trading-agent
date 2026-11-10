@@ -207,16 +207,54 @@ class TestTheRowIsSettledOnTheBrokersAnswer:
         """A row that can never fill must not masquerade as working."""
         store = OrderStore(tmp_path / "orders.db")
 
+        from trading.execution.base import BrokerError
+
         class _Refuses:
             def submit_order(self, order):
-                raise RuntimeError("insufficient margin")
+                raise BrokerError("insufficient margin")
 
         rec = _RecordingBroker(_Refuses(), store)
 
-        with pytest.raises(RuntimeError, match="insufficient margin"):
+        with pytest.raises(BrokerError, match="insufficient margin"):
             rec.submit_order(_order())
 
         assert self._status(store) == "rejected"
+
+    def test_an_order_that_never_left_is_marked_rejected(self, tmp_path) -> None:
+        """Gateway down before the send: nothing to reconcile, so no open row."""
+        from trading.execution.base import OrderNotSentDisconnectedError
+
+        store = OrderStore(tmp_path / "orders.db")
+
+        class _Down:
+            def submit_order(self, order):
+                raise OrderNotSentDisconnectedError("not sent: IbkrBroker is not connected")
+
+        with pytest.raises(OrderNotSentDisconnectedError):
+            _RecordingBroker(_Down(), store).submit_order(_order())
+
+        assert self._status(store) == "rejected"
+
+    @pytest.mark.parametrize(
+        "error",
+        [TimeoutError("placeOrder timed out"), ConnectionError("socket lost"), RuntimeError("?")],
+    )
+    def test_a_lost_acknowledgement_leaves_the_row_open(self, tmp_path, error) -> None:
+        """2026-11-10. The cycle learned on 8 November that a missing
+        acknowledgement is not a rejection; the operator commands kept
+        writing REJECTED over orders IBKR might be working, which closes
+        the reconciliation window on a possible fill."""
+        store = OrderStore(tmp_path / "orders.db")
+
+        class _LosesTheAck:
+            def submit_order(self, order):
+                raise error
+
+        with pytest.raises(type(error)):
+            _RecordingBroker(_LosesTheAck(), store).submit_order(_order())
+
+        assert self._status(store) == "pending"
+        assert store.oldest_open_created_at() is not None
 
     def test_the_brokers_own_id_is_kept_when_it_returns_one(self, tmp_path) -> None:
         """Reconciliation matches executions by broker id; drop it and an

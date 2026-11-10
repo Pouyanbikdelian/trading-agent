@@ -1608,10 +1608,31 @@ def run_agent_pm(
     from trading.agents.positioning import shadow_positioning
     from trading.reporting.pm_shadow import _shadow_plan
 
-    result["positioning_shadow"] = shadow_positioning(
-        weights, (payload.get("today_context") or {}).get("positioning") or {}
-    )
-    result["shadow_plan"] = _shadow_plan(payload, result, COST_BPS)
+    # Research arms only — and by this point the simulated book has already
+    # been rebalanced and saved (2026-11-10 review). Unguarded, any surprise
+    # in an observation or a ladder row raised straight out of the run: the
+    # book had moved, no decision was written, and the runner recorded a
+    # refusal. A shadow experiment must never be able to cost the decision
+    # it is shadowing.
+    try:
+        result["positioning_shadow"] = shadow_positioning(
+            weights, (payload.get("today_context") or {}).get("positioning") or {}
+        )
+    except Exception as exc:
+        logger.bind(component="agent_pm").warning(
+            f"positioning shadow unavailable: {type(exc).__name__}: {exc}"
+        )
+        result["positioning_shadow"] = {}
+    try:
+        result["shadow_plan"] = _shadow_plan(payload, result, COST_BPS)
+    except Exception as exc:
+        logger.bind(component="agent_pm").warning(
+            f"shadow plan unavailable: {type(exc).__name__}: {exc}"
+        )
+        result["shadow_plan"] = {
+            "status": "unavailable",
+            "reason": f"shadow plan failed: {type(exc).__name__}",
+        }
     result["audit_sha256"] = _archive_decision(Path(state_dir), result)
     _save(pm_dir, "last_run.json", result)
     mem.journal(
@@ -1823,10 +1844,14 @@ def format_pm_digest(
     # next to the latter made every figure on the card unreadable, and
     # none of them were sizes anyone could act on. What the PM decides
     # is a set of weights — so that is what this shows.
+    from trading.agents.pm_audit import reasoning_review_blocks
+
     state = (
-        "research proposal — BLOCKED pending reasoning review"
-        if result.get("requires_operator_review")
-        else "proposed targets — not executed; risk checks and your order approval still apply"
+        "proposed targets — not executed; risk checks and your order approval still apply"
+        if not result.get("requires_operator_review")
+        else "research proposal — BLOCKED pending reasoning review"
+        if reasoning_review_blocks()
+        else "proposed targets — reasoning review INCOMPLETE; flagged on the approval card"
     )
     lines = [
         f"🧠 *Agent PM — target allocation* ({state})",

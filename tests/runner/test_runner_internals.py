@@ -844,3 +844,83 @@ def test_scheduled_duplicate_pm_is_quiet_but_manual_request_gets_reply(tmp_path)
             assert len(runner.alerts.sent) == 1
 
     asyncio.run(exercise())
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-10 review — optional research and a busy desk must not cost a decision
+# ---------------------------------------------------------------------------
+
+
+def test_a_hung_positioning_feed_cannot_park_the_pm(monkeypatch, tmp_path: Path) -> None:
+    """The refresh runs inline before every committee and PM decision,
+    under the lock the cycle also needs. It is advisory research on free
+    feeds; it gets a deadline."""
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def hung(_state_dir):
+        release.wait(30)
+        return {"errors": {}, "coverage": {"cot": 1}}
+
+    monkeypatch.setattr("trading.runtime.positioning_monitor.refresh_positioning", hung)
+    runner = _bare_runner(tmp_path)
+    runner.POSITIONING_REFRESH_TIMEOUT_S = 0.2
+
+    async def exercise() -> float:
+        started = time.monotonic()
+        try:
+            await runner._run_positioning_async()
+            return time.monotonic() - started
+        finally:
+            # Let the abandoned worker finish before the loop closes its pool.
+            release.set()
+
+    assert asyncio.run(exercise()) < 5
+
+
+def test_scheduled_pm_waits_for_a_busy_desk_instead_of_vanishing(tmp_path: Path) -> None:
+    """A manual /cycle on its approval card holds the PM lock. The
+    pre-cycle PM slot arriving then used to be skipped without a word."""
+    runner = _bare_runner(tmp_path)
+    events: list[str] = []
+
+    async def decide() -> None:
+        events.append("pm")
+
+    runner._run_agent_pm_with_candidates = decide
+    runner._pm_decision_age_h = lambda: None  # the cycle left no fresh decision
+
+    async def exercise() -> None:
+        runner._agent_pm_lock = asyncio.Lock()
+        await runner._agent_pm_lock.acquire()
+        scheduled = asyncio.create_task(runner._run_scheduled_agent_pm_async())
+        await asyncio.sleep(0.05)
+        assert events == []  # queued, not skipped and not racing the cycle
+        events.append("cycle done")
+        runner._agent_pm_lock.release()
+        await scheduled
+
+    asyncio.run(exercise())
+    assert events == ["cycle done", "pm"]
+
+
+def test_scheduled_pm_does_not_repeat_a_decision_made_while_it_waited(tmp_path: Path) -> None:
+    runner = _bare_runner(tmp_path)
+
+    async def forbidden() -> None:
+        pytest.fail("a decision made minutes ago must be reused")
+
+    runner._run_agent_pm_with_candidates = forbidden
+    runner._pm_decision_age_h = lambda: 0.1
+
+    async def exercise() -> None:
+        runner._agent_pm_lock = asyncio.Lock()
+        await runner._agent_pm_lock.acquire()
+        scheduled = asyncio.create_task(runner._run_scheduled_agent_pm_async())
+        await asyncio.sleep(0.05)
+        runner._agent_pm_lock.release()
+        await scheduled
+
+    asyncio.run(exercise())

@@ -14,6 +14,73 @@ they're what you'll think next time too.
 
 ---
 
+## 2026-11-10 — Review of the October–November changes: a gate that stopped the desk, and five failure paths
+
+**Trigger.** Code review of the 18 commits from `35eb1a9` to `a40202b`, not a
+new production event. Nothing below was observed placing or losing an order.
+Local working tree only; not deployed.
+
+**The design finding.** From 4 November an incomplete PM reasoning review
+withheld the PM's targets until `/pm accept <decision ID> <reason>`. The
+contract asks the model for sizing and cash arithmetic exact to 1e-6, three
+positioning assessments per reviewed stock (on evidence the code itself
+labels as not informative for single stocks) and typed claims. It failed in
+production on the 6th and the 9th; the PM sleeve is 1.0 and the mechanical
+sleeve 0.0; the 8 November entry records five consecutive zero-order
+cycles. Every withheld basket would still have needed the risk manager and
+the operator's /approve. The gate added a second, harder approval in front
+of the first and no safety the first did not already give.
+
+**Wrong theory (in the 6 and 9 November entries).** That each block was
+a validator bug to patch — a missing cap in the cash check, a missing field in
+the JSON example. Both patches were correct and the desk still did not trade,
+because the next decision failed a different clause. The defect was making
+paperwork completeness an execution gate at all.
+
+**Correction.** `agents/pm_audit.reasoning_review_blocks()`. Audit integrity
+(hash, version, archive) always withholds. An open reasoning review withholds
+only where it is the last human check: `REQUIRE_CYCLE_APPROVAL` off, or
+`AGENT_PM_REASONING_REVIEW_BLOCKS=true`. Otherwise the issue count and the
+first two issues are printed on the approval card, the signal metadata
+records `pm_reasoning_review_open`, and `/pm accept` clears the warning.
+The contract, the charter and the validator are unchanged.
+
+**Five failure paths fixed in the same review.**
+
+1. *A dead gateway was "outcome unknown".* The 8 November rule classified by
+   error text, and `_ensure_connected` failing before `placeOrder` reads "not
+   connected". The desk halted, said IBKR "may have received" an order that
+   never left the process, and kept a PENDING row that could not be retired
+   for seven days — the September ghost rows again, on the most common broker
+   failure. The adapter now raises `OrderNotSentError` for anything before
+   the send; the row is terminal, the batch stops, no halt.
+2. *Only the cycle learned the 8 November lesson.* Playbook flatten and the
+   operator commands still wrote REJECTED over a lost acknowledgement. All
+   three paths now share `execution.base.submission_outcome_unknown`.
+3. *The stale-tail guard inverted.* Requiring every series to end on the
+   single newest bar let one name AHEAD of the universe (a partial session
+   bar, a weekend-trading instrument) mark everything else stale and block
+   planning. The reference is now the newest bar 80% of the mature universe
+   reaches.
+4. *Research code could lose a decision.* The shadow arms ran unguarded after
+   the simulated book was saved and before the decision was written.
+5. *Optional feeds on the critical path.* The positioning refresh had no
+   deadline and runs before every decision under the lock the cycle needs;
+   a second caller queued on its lock. It now has 90 s and never queues. And
+   a scheduled PM that found the desk busy was skipped silently; it waits.
+
+**Evidence.** New regressions for each item; the full offline suite passes
+(2,479 tests, research mode, live trading disabled), ruff clean, and mypy
+strict reports the same 330 lines as `a40202b`. Paper and production are
+untested: the order-path change (1–2) should be drilled on the paper book —
+stop the gateway, run a cycle, confirm no halt and no open row — before it
+is deployed live.
+
+**Lesson.** A check that cannot tell "unsafe" from "untidy" will stop the desk
+for being untidy. Put a gate where it is the last line; put everything else
+on the card the operator already reads. And classify a failed submission by
+where it failed, not by what the error message says.
+
 ## 2026-11-09 — Completed cycles looked stuck behind a PM review
 
 **Symptoms.** Three manual cycles progressed from an existing `unprotected

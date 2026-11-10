@@ -185,6 +185,13 @@ class Settings(BaseSettings):
     # this limit means the two have drifted apart and the decision no longer
     # describes the tape it would trade against.
     agent_pm_signal_max_age_h: float = Field(default=6.0, alias="AGENT_PM_SIGNAL_MAX_AGE_H", gt=0.0)
+    # Whether an incomplete PM reasoning review withholds the PM's targets
+    # outright (true) or rides on the approval card as a warning (false).
+    # Only consulted when REQUIRE_CYCLE_APPROVAL is on: with no human basket
+    # approval the review always blocks. Audit integrity always blocks.
+    agent_pm_reasoning_review_blocks: bool = Field(
+        default=False, alias="AGENT_PM_REASONING_REVIEW_BLOCKS"
+    )
     # How long the cycle waits for an /approve or /reject before
     # auto-rejecting and submitting nothing. Default 10 minutes.
     cycle_approval_timeout_s: int = Field(default=600, alias="CYCLE_APPROVAL_TIMEOUT_S")

@@ -115,6 +115,10 @@ class PMSignalResult:
     #: but never sell. Empty whenever no signal was produced — a refused
     #: cycle means "we don't know what it wants", not "sell everything".
     exiting: set[str] = field(default_factory=set)
+    #: Set when these targets trade with an unacknowledged reasoning review.
+    #: It must reach the approval card: the operator's /approve is then the
+    #: only human check on that decision, and they need to know it.
+    review_warning: str = ""
 
     @property
     def ok(self) -> bool:
@@ -308,13 +312,30 @@ def load_pm_signal(
             age_hours=age_h,
         )
 
-    from trading.agents.pm_audit import _review_block_reason
+    from trading.agents.pm_audit import (
+        _integrity_block_reason,
+        _review_block_reason,
+        _review_warning,
+        reasoning_review_blocks,
+    )
 
-    review_block = _review_block_reason(Path(state_dir), raw)
+    # Integrity always withholds. An open reasoning review withholds only
+    # where it is the last human check — see ``reasoning_review_blocks``.
+    review_block = (
+        _review_block_reason(Path(state_dir), raw)
+        if reasoning_review_blocks()
+        else _integrity_block_reason(Path(state_dir), raw)
+    )
     if review_block:
         return PMSignalResult(None, review_block, decided_at=decided_at, age_hours=age_h)
+    review_warning = _review_warning(Path(state_dir), raw)
     cash_plan = (raw.get("reasoning_review") or {}).get("cash_plan") or {}
-    if raw.get("reasoning_contract_version") and float(raw.get("cash_weight", 0)) > 0.5:
+    try:
+        cash_weight = float(raw.get("cash_weight") or 0)
+    except (TypeError, ValueError):
+        # /pm reads this file too, outside the cycle's catch-all.
+        return PMSignalResult(None, "PM decision has an invalid cash weight; request /pm run")
+    if raw.get("reasoning_contract_version") and cash_weight > 0.5:
         try:
             due = datetime.fromisoformat(str(cash_plan.get("review_at")))
             if due.tzinfo is None or now >= due:
@@ -433,6 +454,7 @@ def load_pm_signal(
         gross=gross,
         sleeve_pct=sleeve_pct,
         exiting=exiting,
+        review_warning=review_warning,
     )
 
 
@@ -449,6 +471,8 @@ def format_bridge_note(result: PMSignalResult) -> str:
     )
     if result.dropped:
         note += f" · dropped {', '.join(result.dropped)}"
+    if result.review_warning:
+        note += "\n" + result.review_warning
     return note
 
 

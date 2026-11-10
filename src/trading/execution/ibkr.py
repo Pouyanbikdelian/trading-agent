@@ -41,7 +41,13 @@ from trading.core.types import (
     Side,
     TimeInForce,
 )
-from trading.execution.base import Broker, BrokerError, NotConnectedError
+from trading.execution.base import (
+    Broker,
+    BrokerError,
+    NotConnectedError,
+    OrderNotSentDisconnectedError,
+    OrderNotSentError,
+)
 
 
 class BrokerTimeoutError(BrokerError):
@@ -706,7 +712,8 @@ class IbkrBroker(Broker):
 
     # ------------------------------------------------------------- orders
 
-    def submit_order(self, order: Order) -> Order:
+    def _prepare_submission(self, order: Order) -> tuple[Any, Any]:
+        """The pre-send half of ``submit_order``. Writes nothing to the broker."""
         self._ensure_connected()
         # Defense-in-depth: even though the CLI checks ``is_live_armed`` once
         # at runner start, a long-running process can have its environment
@@ -720,8 +727,28 @@ class IbkrBroker(Broker):
                 "TRADING_ENV=live and ALLOW_LIVE_TRADING=true in .env to enable."
             )
         self._assert_account_matches_env()
-        contract = self._contract(order.instrument)
-        ib_order = self._build_ib_order(order)
+        return self._contract(order.instrument), self._build_ib_order(order)
+
+    def submit_order(self, order: Order) -> Order:
+        # Everything up to ``placeOrder`` is local or read-only: connecting,
+        # the live gate, the account check, building the contract. A failure
+        # here means the order never left this process, and the caller must
+        # be able to tell that apart from a lost acknowledgement — see
+        # ``OrderNotSentError``.
+        try:
+            contract, ib_order = self._prepare_submission(order)
+        except OrderNotSentError:
+            raise
+        except Exception as e:
+            kind = (
+                OrderNotSentDisconnectedError
+                if isinstance(e, NotConnectedError)
+                else OrderNotSentError
+            )
+            raise kind(
+                f"{order.side.value} {order.quantity:g} {order.instrument.symbol} was not sent "
+                f"to IBKR: {type(e).__name__}: {e}"
+            ) from e
         # placeOrder is fire-and-forget; the trade-status update arrives
         # async. Bound it — but NEVER auto-retry (external review,
         # 2026-07-15): a timeout does not mean the order failed to reach

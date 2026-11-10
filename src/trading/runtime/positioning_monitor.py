@@ -123,67 +123,86 @@ def read_positioning(state_dir: Path, now: datetime | None = None) -> dict[str, 
 
 
 def refresh_positioning(state_dir: Path, now: datetime | None = None) -> dict[str, Any]:
+    """Refresh the free feeds, or report the saved state if a refresh is running.
+
+    A second caller does not queue (2026-11-10 review). The runner calls
+    this from worker threads ahead of every decision; had one fetch hung,
+    each later caller would have parked a pool thread on the lock for good
+    — on a one-CPU box the default executor has five, and the trading cycle
+    runs on the same pool. A concurrent refresh is already doing the work,
+    so the right answer for everyone else is the last saved observations.
+    """
     state_dir.mkdir(parents=True, exist_ok=True)
-    with _LOCK, (state_dir / ".positioning.lock").open("a") as lock_file:
-        # CLI and runner are separate processes sharing the state volume.
-        # Serialize their read/fetch/write transaction, not only Python threads.
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        now = now or UtcClock().now()
-        prior = _read_state(state_dir / "positioning.json")
-        observations = []
-        errors = {}
-        success = dict(prior.get("last_success", {}))
-        jobs: dict[str, Callable[[], list[PositioningObservation]]] = {
-            "cot": lambda: fetch_cot(now),
-            "gamma_SPY": lambda: [fetch_gamma("SPY", now)],
-            "gamma_QQQ": lambda: [fetch_gamma("QQQ", now)],
-        }
-        for source, fetch in jobs.items():
-            old = [
-                r
-                for r in prior.get("observations", [])
-                if (
-                    r.get("source") == "cot"
-                    if source == "cot"
-                    else r.get("source") == "gamma_estimate" and source[6:] in r.get("symbols", [])
-                )
-            ]
-            try:
-                age = (now - datetime.fromisoformat(str(success.get(source)))).total_seconds()
-            except (ValueError, TypeError):
-                age = float("inf")
-            # COT rechecked at decision time when a new normal release is due.
-            cot_current = old and all(r["observed_at"][:10] >= expected_cot_date(now) for r in old)
-            cached = 0 <= age < (3600 if source == "cot" and cot_current else 600)
-            if cached:
-                observations.extend(old)
-                continue
-            try:
-                fresh = fetch()
-                if not fresh:
-                    raise ValueError("empty response")
-                observations.extend(
-                    _archive(state_dir / "positioning" / "archive", o).model_dump(mode="json")
-                    for o in fresh
-                )
-                success[source] = now.isoformat()
-            except Exception as exc:
-                errors[source] = type(exc).__name__ + ": " + str(exc)[:180]
-                observations.extend(old)
-        for path in sorted((state_dir / "positioning" / "reports").glob("*.json")):
-            try:
-                observations.append(
-                    PositioningObservation.model_validate_json(path.read_text()).model_dump(
-                        mode="json"
-                    )
-                )
-            except ValueError:
-                errors[path.name] = "invalid imported report"
-        state = {
-            "last_attempt_at": now.isoformat(),
-            "last_success": success,
-            "observations": observations,
-            "errors": errors,
-        }
-        _write_state(state_dir / "positioning.json", state)
+    if not _LOCK.acquire(blocking=False):
         return read_positioning(state_dir, now)
+    try:
+        with (state_dir / ".positioning.lock").open("a") as lock_file:
+            # CLI and runner are separate processes sharing the state volume.
+            # Serialize their read/fetch/write transaction, not only threads.
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return read_positioning(state_dir, now)
+            return _refresh_positioning_locked(state_dir, now)
+    finally:
+        _LOCK.release()
+
+
+def _refresh_positioning_locked(state_dir: Path, now: datetime | None) -> dict[str, Any]:
+    now = now or UtcClock().now()
+    prior = _read_state(state_dir / "positioning.json")
+    observations = []
+    errors = {}
+    success = dict(prior.get("last_success", {}))
+    jobs: dict[str, Callable[[], list[PositioningObservation]]] = {
+        "cot": lambda: fetch_cot(now),
+        "gamma_SPY": lambda: [fetch_gamma("SPY", now)],
+        "gamma_QQQ": lambda: [fetch_gamma("QQQ", now)],
+    }
+    for source, fetch in jobs.items():
+        old = [
+            r
+            for r in prior.get("observations", [])
+            if (
+                r.get("source") == "cot"
+                if source == "cot"
+                else r.get("source") == "gamma_estimate" and source[6:] in r.get("symbols", [])
+            )
+        ]
+        try:
+            age = (now - datetime.fromisoformat(str(success.get(source)))).total_seconds()
+        except (ValueError, TypeError):
+            age = float("inf")
+        # COT rechecked at decision time when a new normal release is due.
+        cot_current = old and all(r["observed_at"][:10] >= expected_cot_date(now) for r in old)
+        cached = 0 <= age < (3600 if source == "cot" and cot_current else 600)
+        if cached:
+            observations.extend(old)
+            continue
+        try:
+            fresh = fetch()
+            if not fresh:
+                raise ValueError("empty response")
+            observations.extend(
+                _archive(state_dir / "positioning" / "archive", o).model_dump(mode="json")
+                for o in fresh
+            )
+            success[source] = now.isoformat()
+        except Exception as exc:
+            errors[source] = type(exc).__name__ + ": " + str(exc)[:180]
+            observations.extend(old)
+    for path in sorted((state_dir / "positioning" / "reports").glob("*.json")):
+        try:
+            observations.append(
+                PositioningObservation.model_validate_json(path.read_text()).model_dump(mode="json")
+            )
+        except ValueError:
+            errors[path.name] = "invalid imported report"
+    state = {
+        "last_attempt_at": now.isoformat(),
+        "last_success": success,
+        "observations": observations,
+        "errors": errors,
+    }
+    _write_state(state_dir / "positioning.json", state)
+    return read_positioning(state_dir, now)

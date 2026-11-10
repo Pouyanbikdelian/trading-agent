@@ -490,11 +490,16 @@ class _RecordingBroker:
                 )
         try:
             result = self._inner.submit_order(order)
-        except Exception:
-            # The broker refused or could not be reached. Either way this
-            # row will never fill, so retire it rather than leaving a
-            # phantom open order behind. The original error still raises.
-            self._settle(order, OrderStatus.REJECTED, recorded=recorded)
+        except Exception as e:
+            # Retire the row only when the order provably is not working:
+            # the broker refused it, or it never left this process. A lost
+            # acknowledgement is neither (2026-11-10) — that row stays open
+            # so reconciliation can settle a late fill, and the operator
+            # sees the original error either way.
+            from trading.execution.base import submission_outcome_unknown
+
+            if not submission_outcome_unknown(e):
+                self._settle(order, OrderStatus.REJECTED, recorded=recorded)
             raise
         self._settle(order, OrderStatus.SUBMITTED, recorded=recorded, result=result)
         return result

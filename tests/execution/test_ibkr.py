@@ -601,3 +601,66 @@ def test_account_kind_must_match_trading_env(
         with pytest.raises(BrokerError, match="refusing to submit"):
             b.submit_order(_order_for(aapl))
         assert fake_ib.placed == []
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-10 — "never sent" is a different fact from "outcome unknown"
+# ---------------------------------------------------------------------------
+
+
+def test_a_dead_gateway_is_reported_as_never_sent(aapl: Instrument) -> None:
+    """The connect fails before placeOrder exists to be called. The cycle
+    must be able to see that, or it halts the desk and keeps a ledger row
+    open for an order IBKR cannot possibly have."""
+    from trading.execution.base import OrderNotSentError
+
+    placed: list[object] = []
+
+    class _BrokenIb:
+        def isConnected(self) -> bool:
+            return False
+
+        async def connectAsync(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("gateway dead")
+
+        def placeOrder(self, *args: object) -> None:
+            placed.append(args)
+
+    ib = _BrokenIb()
+    order = Order(
+        client_order_id=new_client_order_id(),
+        instrument=aapl,
+        side=Side.BUY,
+        quantity=1,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    with pytest.raises(OrderNotSentError) as caught:
+        IbkrBroker(ib=ib).submit_order(order)
+    assert isinstance(caught.value, NotConnectedError)  # existing handlers still match
+    assert placed == []
+
+
+def test_a_failure_inside_the_send_is_not_called_never_sent(aapl: Instrument) -> None:
+    """Once placeOrder has been invoked the order may be working. That
+    must stay distinguishable — it is the case the desk halts for."""
+    from trading.execution.base import OrderNotSentError, submission_outcome_unknown
+
+    fake_ib = _FakeIb()
+
+    def _lost(contract: object, order: object) -> object:
+        raise ConnectionError("socket closed mid-send")
+
+    fake_ib.placeOrder = _lost  # type: ignore[assignment]
+    b = IbkrBroker(ib=fake_ib)
+    b.connect()
+    order = Order(
+        client_order_id=new_client_order_id(),
+        instrument=aapl,
+        side=Side.BUY,
+        quantity=1,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    with pytest.raises(Exception) as caught:
+        b.submit_order(order)
+    assert not isinstance(caught.value, OrderNotSentError)
+    assert submission_outcome_unknown(caught.value)

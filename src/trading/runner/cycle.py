@@ -55,6 +55,7 @@ from trading.core.universes import load_universe
 from trading.data.base import DataSource, Frequency
 from trading.data.cache import ParquetCache
 from trading.execution.base import Broker
+from trading.execution.base import looks_like_disconnect as _looks_like_disconnect
 from trading.execution.store import OrderStore
 from trading.risk.manager import RiskManager
 from trading.runner.alerts import TelegramAlerts
@@ -73,29 +74,13 @@ CycleStatus = Literal[
     "skipped_locked",
 ]
 
-# Substrings that mean "we could not reach the broker" rather than "the
-# broker said no". Matched on the exception text because ib-async raises
-# several unrelated types for the same underlying condition — a plain
-# ConnectionError, an asyncio TimeoutError, and its own errors all mean
-# the same thing to an operator: the session is down, go tap your phone.
-_DISCONNECT_MARKERS = (
-    "not connected",
-    "connection",
-    "connect call failed",
-    "timeout",
-    "timed out",
-    "broken pipe",
-    "reset by peer",
-    "no route to host",
-    "econnrefused",
-    "refused",
-)
-
-
-def _looks_like_disconnect(exc: BaseException) -> bool:
-    """Distinguish a dead session from a refused order."""
-    text = f"{type(exc).__name__}: {exc}".lower()
-    return any(m in text for m in _DISCONNECT_MARKERS)
+# ``_looks_like_disconnect`` ("we could not reach the broker" rather than
+# "the broker said no") now lives in ``execution.base`` so the cycle, the
+# playbook flatten and the operator commands classify a failed submission
+# the same way. It matches on exception text because ib-async raises
+# several unrelated types for one condition — a plain ConnectionError, an
+# asyncio TimeoutError and its own errors all mean the same thing to an
+# operator: the session is down, go tap your phone.
 
 
 def _cycle_note(cycle: Any, text: str) -> None:
@@ -636,8 +621,22 @@ class Cycle:
                         logger.bind(component="cycle").exception(
                             f"force-flatten submit failed for {order.client_order_id}"
                         )
-                        self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
-                        self.alerts.error(f"force-flatten submit failed: {e!r}")
+                        from trading.execution.base import submission_outcome_unknown
+
+                        if submission_outcome_unknown(e):
+                            # Same rule as the cycle batch: a lost
+                            # acknowledgement may hide a working sell. Leave
+                            # the row open for reconciliation.
+                            self.alerts.critical(
+                                f"🔴 force-flatten: outcome unknown for {order.side.value} "
+                                f"{order.quantity:g} {order.instrument.symbol} — {e!r}. "
+                                "IBKR may have received it; check broker orders before retrying."
+                            )
+                        else:
+                            self.order_store.update_status(
+                                order.client_order_id, OrderStatus.REJECTED
+                            )
+                            self.alerts.error(f"force-flatten submit failed: {e!r}")
 
             fills = self.broker.get_fills(since=self._reconcile_from(ts_start))
             for fill in fills:
@@ -1562,7 +1561,7 @@ class Cycle:
         cycle, whose orders have been independently proven to lower exposure
         against a fresh broker snapshot. Every other caller leaves it False,
         so a halt landing mid-batch still stops the remaining orders."""
-        from trading.execution.base import BrokerError
+        from trading.execution.base import BrokerError, OrderNotSentError
 
         orders_submitted = 0
         halted_during_submit = False
@@ -1570,6 +1569,7 @@ class Cycle:
         for order in orders:
             unknown_outcome = ""
             uncertainty_notice = ""
+            broker_unreachable = False
             # ``submission_gate`` shares the halt-state transaction with
             # Telegram/CLI /halt. A hard stop therefore takes effect between
             # orders in this batch, rather than only after all submissions.
@@ -1599,7 +1599,30 @@ class Cycle:
                     # human has to do something — usually approve a 2FA
                     # prompt. Escalate it so it does not scroll past looking
                     # like one more per-name rejection.
-                    if _looks_like_disconnect(e) or not isinstance(e, BrokerError):
+                    if isinstance(e, OrderNotSentError):
+                        # Provably never left this process (2026-11-10): the
+                        # adapter failed before ``placeOrder``. There is no
+                        # outcome to reconcile, so the row is terminal and the
+                        # desk is not halted. An open row here could never be
+                        # settled — it would just alarm until retired.
+                        self.order_store.update_status(order.client_order_id, OrderStatus.REJECTED)
+                        if _looks_like_disconnect(e):
+                            # Every remaining order would fail the same way.
+                            broker_unreachable = True
+                            self.alerts.critical(
+                                "🔴 *Broker unreachable — order not sent*\n"
+                                f"`{err_str}`\n"
+                                f"Nothing was sent for {order.instrument.symbol}; the rest of "
+                                "this batch is skipped.\n"
+                                "_Most likely an IBKR Mobile 2FA prompt after a gateway "
+                                "restart. Approve it, then `/cycle` for a fresh basket._"
+                            )
+                        else:
+                            self.alerts.error(
+                                f"❌ order not sent: {order.side.value} {order.quantity:g} "
+                                f"{order.instrument.symbol} — {err_str}"
+                            )
+                    elif _looks_like_disconnect(e) or not isinstance(e, BrokerError):
                         # A lost acknowledgement may conceal an accepted order.
                         # Keep its pending row open for late-fill reconciliation;
                         # marking it rejected would close that lookup window.
@@ -1624,6 +1647,8 @@ class Cycle:
                 self.risk_manager.halt(unknown_outcome)
                 halted_during_submit = True
                 self.alerts.critical(uncertainty_notice)
+                break
+            if broker_unreachable:
                 break
 
         # 9b. Drive the broker's internal clock so paper-trade fills
@@ -2529,6 +2554,9 @@ class Cycle:
                     **(signal.metadata or {}),
                     "pm_sleeve_pct": f"{sleeve:.4f}",
                     "strategy_sleeve_pct": f"{strat:.4f}",
+                    # Durable trace that this basket was approved with the
+                    # PM's reasoning review still open (2026-11-10).
+                    "pm_reasoning_review_open": "true" if result.review_warning else "",
                     "pm_decided_at": result.signal.metadata.get("decided_at", ""),
                     "pm_dropped": ",".join(result.dropped),
                     # This is a candidate only. It is committed after a

@@ -94,3 +94,66 @@ class BrokerError(RuntimeError):
 
 class NotConnectedError(BrokerError):
     """Operation attempted on a broker that hasn't been connected."""
+
+
+class OrderNotSentError(BrokerError):
+    """Submission failed BEFORE anything was written to the broker.
+
+    Why (2026-11-10 review). The November 8 fix rightly stopped treating a
+    lost acknowledgement as a rejection: the order may be working, so its
+    ledger row stays open and the desk halts. But it classified by error
+    text, and the most common failure of all — the gateway is down or
+    waiting for 2FA, so ``_ensure_connected`` raises before ``placeOrder``
+    is ever called — reads "not connected". That order provably never left
+    this process, yet the desk halted, told the operator IBKR "may have
+    received" it, and left a PENDING row that nothing can settle and that
+    cannot be retired for seven days: the September ghost rows, rebuilt.
+
+    Raise this only where the adapter can prove no bytes reached the
+    broker. Everything raised at or after the send stays "outcome unknown".
+    """
+
+
+class OrderNotSentDisconnectedError(OrderNotSentError, NotConnectedError):
+    """Not sent because the session was down — still a ``NotConnectedError``
+    to every caller that already handles one."""
+
+
+#: Substrings that mark a dead session rather than a refused order.
+DISCONNECT_MARKERS = (
+    "not connected",
+    "connection",
+    "connect call failed",
+    "timeout",
+    "timed out",
+    "broken pipe",
+    "reset by peer",
+    "no route to host",
+    "econnrefused",
+    "refused",
+)
+
+
+def looks_like_disconnect(exc: BaseException) -> bool:
+    """Distinguish a dead session from a refused order."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(m in text for m in DISCONNECT_MARKERS)
+
+
+def submission_outcome_unknown(exc: BaseException) -> bool:
+    """Could the broker be working an order whose submission raised ``exc``?
+
+    One rule for every submit path (cycle, playbook flatten, operator
+    commands) — on 2026-11-08 only the cycle learned that a lost
+    acknowledgement is not a rejection, and the other two kept writing
+    REJECTED over orders that might be live.
+
+    * ``OrderNotSentError`` — failed before the send: definitely not working.
+    * an explicit ``BrokerError`` that does not read like a dead session —
+      the broker answered and refused: definitely not working.
+    * anything else (timeout, dropped socket, unexpected exception) —
+      unknown. Keep the ledger row open so a late fill can still settle it.
+    """
+    if isinstance(exc, OrderNotSentError):
+        return False
+    return looks_like_disconnect(exc) or not isinstance(exc, BrokerError)

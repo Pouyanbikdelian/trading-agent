@@ -8,7 +8,7 @@ Public surface::
 
 from __future__ import annotations
 
-from trading.execution.base import Broker, BrokerError, NotConnectedError
+from trading.execution.base import Broker, BrokerError, NotConnectedError, OrderNotSentError
 from trading.execution.ibkr import IbkrBroker, new_client_order_id
 from trading.execution.simulator import Simulator
 from trading.execution.store import OrderStore
@@ -18,6 +18,7 @@ __all__ = [
     "BrokerError",
     "IbkrBroker",
     "NotConnectedError",
+    "OrderNotSentError",
     "OrderStore",
     "Simulator",
     "new_client_order_id",

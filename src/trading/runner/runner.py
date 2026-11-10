@@ -1093,7 +1093,7 @@ class Runner:
                     or CronTrigger(day_of_week="mon", hour=14, minute=30, timezone="UTC")
                 )
                 self._scheduler.add_job(
-                    self._run_agent_pm_async,
+                    self._run_scheduled_agent_pm_async,
                     _pm_trigger,
                     id="agent_pm",
                     replace_existing=True,
@@ -2121,15 +2121,34 @@ class Runner:
         logger.bind(component="agent_pm").info("on-demand agent PM triggered")
         await self._run_agent_pm_async(notify_busy=True)
 
+    #: Ceiling on the optional positioning refresh that precedes a decision.
+    POSITIONING_REFRESH_TIMEOUT_S: float = 90.0
+
     async def _run_positioning_async(self) -> None:
         from trading.runtime.positioning_monitor import refresh_positioning
 
+        # Bounded (2026-11-10 review). This runs inline before every
+        # committee and PM decision, the PM holds the lock the cycle also
+        # needs, and the fetchers underneath (CFTC, Yahoo option chains) are
+        # free feeds with no SLA. Unbounded, one hung option-chain request
+        # would have parked the PM — and every cycle queued behind it — on
+        # research that is advisory by its own description. On timeout the
+        # worker thread is abandoned to finish on its own; the decision
+        # proceeds on whatever positioning.json already holds.
         try:
-            report = await asyncio.to_thread(refresh_positioning, settings.state_dir)
+            report = await asyncio.wait_for(
+                asyncio.to_thread(refresh_positioning, settings.state_dir),
+                timeout=self.POSITIONING_REFRESH_TIMEOUT_S,
+            )
             if report["errors"] or not report["coverage"]["cot"]:
                 logger.bind(component="positioning").warning(
                     "positioning coverage={} errors={}", report["coverage"], report["errors"]
                 )
+        except asyncio.TimeoutError:
+            logger.bind(component="positioning").warning(
+                f"positioning refresh exceeded {self.POSITIONING_REFRESH_TIMEOUT_S:.0f}s; "
+                "continuing with the last saved observations"
+            )
         except Exception:
             logger.bind(component="positioning").exception("positioning refresh failed")
 
@@ -2155,6 +2174,37 @@ class Runner:
             self.alerts.info(format_digest_compact(digest))
         except Exception:
             logger.bind(component="agents").exception("committee run failed")
+
+    #: A decision this recent makes a queued scheduled PM run redundant.
+    SCHEDULED_PM_REUSE_MINUTES: float = 30.0
+
+    async def _run_scheduled_agent_pm_async(self) -> None:
+        """The scheduled PM waits for a busy desk instead of vanishing.
+
+        Why (2026-11-10 review). Since October the cycle holds the PM lock
+        for its whole run, approval window included, and November made a
+        busy skip silent for scheduled callers. Together: a manual /cycle
+        sitting on its approval card when the pre-cycle PM slot came round
+        cancelled the fortnight's scheduled decision without a word, and
+        the scheduled cycle then found nothing fresh to trade. A scheduled
+        decision is not a duplicate request — queue it behind whatever
+        holds the lock, and skip only if that work already left a fresh
+        decision.
+        """
+        lock = getattr(self, "_agent_pm_lock", None)
+        if lock is not None and lock.locked():
+            logger.bind(component="agent_pm").info(
+                "scheduled PM waiting for the active PM run or cycle to finish"
+            )
+            async with lock:
+                pass
+            age = self._pm_decision_age_h()
+            if age is not None and age * 60.0 <= self.SCHEDULED_PM_REUSE_MINUTES:
+                logger.bind(component="agent_pm").info(
+                    f"scheduled PM reuses the decision made {age * 60.0:.0f} min ago"
+                )
+                return
+        await self._run_agent_pm_async()
 
     async def _run_agent_pm_async(self, *, notify_busy: bool = False) -> None:
         """Serialize scheduled and on-demand PM decisions over one fresh ladder."""

@@ -76,3 +76,36 @@ def test_interior_holes_do_not_cause_a_stale_terminal_bar():
     wide, _ = align_current_prices({"A": a, "B": prices()}, asof=ASOF, freq="1D")
     assert len(wide) == 251
     assert str(wide.index[-1].date()) == "2026-10-14"
+
+
+def test_a_minority_ahead_of_the_universe_cannot_make_everyone_else_stale():
+    """2026-11-10. A session-time cycle: the refresh landed today's partial
+    bar for a few symbols and timed out for the rest. Requiring every
+    series to end on the single newest bar called the other 80% "stale"
+    and blocked planning, though the universe agreed on yesterday's close."""
+    source = {f"OLD{i}": prices("2026-10-13") for i in range(8)}
+    source |= {"NEW0": prices(), "NEW1": prices()}
+    wide, excluded = align_current_prices(source, asof=ASOF, freq="1D")
+    assert str(wide.index[-1].date()) == "2026-10-13"
+    assert wide.shape[1] == 10 and not excluded
+    assert len(wide) == 251  # today's minority bar is ignored, never invented
+
+
+def test_a_weekend_trading_instrument_does_not_block_an_equity_universe():
+    saturday = prices("2026-10-16", count=253)
+    saturday.loc[pd.Timestamp("2026-10-17", tz="UTC")] = 101.0
+    source = {f"EQ{i}": prices("2026-10-16", count=253) for i in range(9)} | {"BTC": saturday}
+    wide, excluded = align_current_prices(
+        source, asof=datetime(2026, 10, 18, 12, tzinfo=timezone.utc), freq="1D"
+    )
+    assert str(wide.index[-1].date()) == "2026-10-16"
+    assert not excluded
+
+
+def test_a_fresh_minority_does_not_hide_a_stale_universe():
+    """The reference bar is the one most of the universe reaches. If that is
+    old, two current names do not make the tape current."""
+    source = {f"OLD{i}": prices("2026-10-05") for i in range(8)}
+    source |= {"NEW0": prices(), "NEW1": prices()}
+    with pytest.raises(ValueError, match="newest daily bar"):
+        align_current_prices(source, asof=ASOF, freq="1D")

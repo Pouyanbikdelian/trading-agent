@@ -383,3 +383,146 @@ def test_cash_review_uses_resolved_gross_limit(gross_cap, sentinel_cap, expected
             response, {"required_symbols": ["AAA"]}, {"AAA": 0.14}, catalog, now, sentinel_cap
         )["issues"]
     )
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["trading.agents.positioning.shadow_positioning", "trading.reporting.pm_shadow._shadow_plan"],
+)
+def test_a_failing_research_arm_cannot_cost_the_decision(desk, tmp_path, monkeypatch, target):
+    """2026-11-10. The shadow arms run after the simulated book has been
+    rebalanced and saved, and before the decision is written. Unguarded, a
+    surprise in a positioning observation raised out of the run: the book
+    had moved and there was no decision to trade or to audit."""
+    run, now, _ = desk
+
+    def boom(*_args, **_kwargs):
+        raise KeyError("facts")
+
+    monkeypatch.setattr(target, boom)
+    result = run(lambda system, prompt: valid_response(now))
+    assert result["ok"] and result["weights"] == {"AAA": 0.05}
+    saved = json.loads((tmp_path / "agent_pm" / "last_run.json").read_text())
+    assert saved["ok"] and saved["audit_id"] == result["audit_id"]
+    _verify_decision(tmp_path, saved)
+    assert load_pm_signal(tmp_path, sleeve_pct=1).ok
+
+
+def test_a_malformed_cash_weight_is_a_refusal_not_a_crash(desk, tmp_path):
+    """/pm calls load_pm_signal outside the cycle's catch-all."""
+    run, now, _ = desk
+    run(lambda system, prompt: valid_response(now))
+    path = tmp_path / "agent_pm" / "last_run.json"
+    raw = json.loads(path.read_text())
+    raw["cash_weight"] = "most of it"
+    path.write_text(json.dumps(raw))
+    result = load_pm_signal(tmp_path, sleeve_pct=1)
+    assert not result.ok and result.reason
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-10 — the reasoning review warns where a human approves the basket
+# ---------------------------------------------------------------------------
+
+
+def _desk_settings(monkeypatch, *, approval: bool, strict: bool = False) -> None:
+    from trading.core import config
+
+    monkeypatch.setattr(
+        config,
+        "settings",
+        config.settings.model_copy(
+            update={"require_cycle_approval": approval, "agent_pm_reasoning_review_blocks": strict}
+        ),
+    )
+
+
+def _incomplete(run):
+    result = run(lambda *_: {"target_weights": {"AAA": 0.05}})
+    assert result["requires_operator_review"]
+    return result
+
+
+def test_open_review_rides_on_the_approval_card_instead_of_stopping_the_desk(
+    desk, tmp_path, monkeypatch
+):
+    """Paperwork failed the contract twice in four days and, with the PM as
+    the whole desk, five cycles submitted nothing. The operator approves
+    every basket anyway: tell them there, with the basket in front of them."""
+    from trading.agents.pm_signal import format_bridge_note
+
+    run, _, _ = desk
+    first = _incomplete(run)
+    _desk_settings(monkeypatch, approval=True)
+
+    result = load_pm_signal(tmp_path, sleeve_pct=1)
+    assert result.ok
+    assert "reasoning review incomplete" in result.review_warning
+    assert "issue(s)" in result.review_warning
+    note = format_bridge_note(result)
+    assert "reasoning review incomplete" in note and "/pm review" in note
+
+    # Acknowledging the exact decision clears the warning; nothing else does.
+    _accept_review(tmp_path, first["audit_id"], "Reviewed sizing and evidence manually")
+    cleared = load_pm_signal(tmp_path, sleeve_pct=1)
+    assert cleared.ok and cleared.review_warning == ""
+    assert "reasoning review" not in format_bridge_note(cleared)
+
+
+def test_a_complete_review_carries_no_warning(desk, tmp_path, monkeypatch):
+    run, now, _ = desk
+    run(lambda *_: valid_response(now))
+    _desk_settings(monkeypatch, approval=True)
+    result = load_pm_signal(tmp_path, sleeve_pct=1)
+    assert result.ok and result.review_warning == ""
+
+
+def test_without_basket_approval_an_open_review_still_withholds(desk, tmp_path, monkeypatch):
+    """The warning is only safe because a human reads it before orders go.
+    With REQUIRE_CYCLE_APPROVAL off nobody does."""
+    run, _, _ = desk
+    _incomplete(run)
+    _desk_settings(monkeypatch, approval=False)
+    result = load_pm_signal(tmp_path, sleeve_pct=1)
+    assert not result.ok and "/pm accept" in result.reason
+
+
+def test_the_strict_gate_can_be_switched_back_on(desk, tmp_path, monkeypatch):
+    run, _, _ = desk
+    _incomplete(run)
+    _desk_settings(monkeypatch, approval=True, strict=True)
+    result = load_pm_signal(tmp_path, sleeve_pct=1)
+    assert not result.ok and "/pm accept" in result.reason
+
+
+@pytest.mark.parametrize("file", ["request.json", "attempt-1.json", "decision.json"])
+def test_warning_mode_never_relaxes_audit_integrity(desk, tmp_path, monkeypatch, file):
+    run, _, _ = desk
+    result = _incomplete(run)
+    _desk_settings(monkeypatch, approval=True)
+    path = _audit_dir(tmp_path, result["audit_id"]) / file
+    envelope = json.loads(path.read_text())
+    envelope["payload"]["tampered"] = True
+    path.write_text(json.dumps(envelope))
+    refused = load_pm_signal(tmp_path, sleeve_pct=1)
+    assert not refused.ok and "verification failed" in refused.reason
+
+
+def test_a_settings_failure_fails_closed(monkeypatch):
+    from trading.agents.pm_audit import reasoning_review_blocks
+    from trading.core import config
+
+    monkeypatch.setattr(config, "settings", object())
+    assert reasoning_review_blocks() is True
+
+
+def test_the_digest_says_which_of_the_two_it_is(desk, monkeypatch):
+    from trading.agents.pm import format_pm_digest
+
+    run, _, _ = desk
+    result = _incomplete(run)
+    _desk_settings(monkeypatch, approval=True)
+    card = format_pm_digest(result, None)
+    assert "BLOCKED" not in card and "flagged on the approval card" in card
+    _desk_settings(monkeypatch, approval=False)
+    assert "BLOCKED pending reasoning review" in format_pm_digest(result, None)

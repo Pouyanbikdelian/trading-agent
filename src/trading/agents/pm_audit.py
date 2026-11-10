@@ -134,7 +134,43 @@ def _verify_decision(state_dir: Path, raw: dict[str, Any]) -> tuple[Path, str]:
     return directory, digest
 
 
-def _review_block_reason(state_dir: Path, raw: dict[str, Any]) -> str | None:
+def reasoning_review_blocks() -> bool:
+    """Does an unacknowledged reasoning review withhold the PM's targets?
+
+    Why this is a setting and not a constant (2026-11-10 review). From
+    4 November every decision whose paperwork failed the contract — sizing
+    arithmetic to six decimals, three positioning rows per reviewed stock,
+    typed claims — was withheld until the operator typed ``/pm accept`` with
+    a 35-character ID. The contract failed on the 6th and again on the 9th,
+    the PM sleeve is the whole desk, and the incident log records five
+    consecutive cycles with zero orders. Nothing unsafe was being stopped:
+    every one of those baskets still had to pass the risk manager and the
+    operator's own /approve.
+
+    So the review blocks only where it is the last human check:
+
+    * ``REQUIRE_CYCLE_APPROVAL`` off — no basket approval exists, so an
+      unreviewed decision must not trade itself. Blocks.
+    * ``AGENT_PM_REASONING_REVIEW_BLOCKS=true`` — the operator asked for
+      the strict gate back. Blocks.
+    * otherwise — the issues are printed on the approval card and the
+      operator decides there, once, with the basket in front of them.
+
+    Audit integrity (hash, version, archive) is not part of this choice and
+    always blocks. A settings failure fails closed.
+    """
+    try:
+        from trading.core.config import settings
+
+        if not bool(settings.require_cycle_approval):
+            return True
+        return bool(settings.agent_pm_reasoning_review_blocks)
+    except Exception:
+        return True
+
+
+def _integrity_block_reason(state_dir: Path, raw: dict[str, Any]) -> str | None:
+    """A decision that cannot be tied to its archive never trades."""
     # Legacy decisions retain existing bridge semantics. New producers always
     # write the version; a malformed new audit never falls back to legacy.
     if not any(k in raw for k in ("reasoning_contract_version", "audit_id", "audit_sha256")):
@@ -142,29 +178,71 @@ def _review_block_reason(state_dir: Path, raw: dict[str, Any]) -> str | None:
     if raw.get("reasoning_contract_version") != 1:
         return "PM audit version is missing or unsupported; request /pm run to create a new verifiable decision."
     try:
-        directory, digest = _verify_decision(state_dir, raw)
+        _verify_decision(state_dir, raw)
     except (OSError, ValueError, KeyError, TypeError):
         return "PM audit verification failed; request /pm run to create a new verifiable decision."
-    if not raw.get("requires_operator_review"):
-        return None
-    try:
-        receipt, _ = _read_record(directory, "operator-review.json")
-        if receipt.get("decision_sha256") == digest and receipt.get("audit_id") == raw["audit_id"]:
-            return None
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    # Nov 9: a completed cycle looked stuck because its card hid the actual
-    # failed claim behind a generic request to acknowledge the decision.
+    return None
+
+
+def _review_issues(raw: dict[str, Any]) -> list[str]:
     review = raw.get("reasoning_review")
     issues = review.get("issues") if isinstance(review, dict) else None
-    detail = (
-        " Validation issues: " + clip("; ".join(str(issue) for issue in issues), 240) + "."
-        if isinstance(issues, list) and issues
-        else ""
-    )
+    return [str(issue) for issue in issues] if isinstance(issues, list) else []
+
+
+def _outstanding_review(state_dir: Path, raw: dict[str, Any]) -> bool:
+    """True while a verified decision's reasoning review is unacknowledged."""
+    if not raw.get("requires_operator_review"):
+        return False
+    try:
+        directory, digest = _verify_decision(state_dir, raw)
+        receipt, _ = _read_record(directory, "operator-review.json")
+        if receipt.get("decision_sha256") == digest and receipt.get("audit_id") == raw["audit_id"]:
+            return False
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return True
+
+
+def _review_block_reason(state_dir: Path, raw: dict[str, Any]) -> str | None:
+    """The strict gate: integrity failure or an unacknowledged review."""
+    integrity = _integrity_block_reason(state_dir, raw)
+    if integrity:
+        return integrity
+    if not any(k in raw for k in ("reasoning_contract_version", "audit_id", "audit_sha256")):
+        return None
+    if not _outstanding_review(state_dir, raw):
+        return None
+    # Nov 9: a completed cycle looked stuck because its card hid the actual
+    # failed claim behind a generic request to acknowledge the decision.
+    issues = _review_issues(raw)
+    detail = " Validation issues: " + clip("; ".join(issues), 240) + "." if issues else ""
     return (
         f"PM evidence/reasoning requires exact-decision review: /pm review then /pm accept "
         f"{raw.get('audit_id', 'unknown')} <reason>. Risk and order approval still apply.{detail}"
+    )
+
+
+def _review_warning(state_dir: Path, raw: dict[str, Any]) -> str:
+    """The approval-card line for a decision trading with an open review.
+
+    Names the count and the first failures, not the whole list: a card that
+    prints twenty paperwork lines every cycle teaches its reader to skip
+    the one that mattered. ``/pm review`` has the rest.
+    """
+    if not any(k in raw for k in ("reasoning_contract_version", "audit_id", "audit_sha256")):
+        return ""
+    if not _outstanding_review(state_dir, raw):
+        return ""
+    issues = _review_issues(raw)
+    count = f"{len(issues)} issue(s)" if issues else "issues not recorded"
+    shown = ": " + clip("; ".join(issues[:2]), 200) if issues else ""
+    more = f" (+{len(issues) - 2} more)" if len(issues) > 2 else ""
+    return (
+        f"⚠️ *PM reasoning review incomplete* — {count}{shown}{more}. "
+        "The targets below are the PM's; its paperwork did not pass the contract and "
+        "has not been acknowledged. `/pm review` shows all of it. "
+        "Approving this basket is your decision on it."
     )
 
 

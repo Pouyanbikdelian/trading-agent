@@ -200,7 +200,14 @@ def _format_reasoning_details(result: dict[str, Any]) -> list[str]:
     if review.get("issues"):
         lines.append("⚠️ *Reasoning incomplete:* " + clip("; ".join(review["issues"]), 220))
     if result.get("requires_operator_review"):
-        lines.append("⚠️ *Operator review required before execution eligibility.* Use `/pm review`.")
+        from trading.agents.pm_audit import reasoning_review_blocks
+
+        lines.append(
+            "⚠️ *Operator review required before execution eligibility.* Use `/pm review`."
+            if reasoning_review_blocks()
+            else "⚠️ *Reasoning review open.* It will be flagged on the approval card; "
+            "`/pm review` shows the detail."
+        )
     positioning = result.get("positioning_shadow") or {}
     if positioning:
         coverage = positioning.get("coverage", {})
@@ -254,8 +261,13 @@ def _format_candidate_review(result: dict[str, Any]) -> str:
     if result.get("audit_id"):
         lines.append(f"Decision ID: `{result['audit_id']}`")
     if result.get("requires_operator_review"):
+        from trading.agents.pm_audit import reasoning_review_blocks
+
         lines.append(
             "Reasoning needs acknowledgement: `/pm accept <decision ID> <review reason>`. This is separate from order approval."
+            if reasoning_review_blocks()
+            else "Reasoning review is open. It does not withhold these targets; the approval card "
+            "carries the warning. `/pm accept <decision ID> <review reason>` clears it."
         )
     for symbol, reason in plan.get("blocked_mechanical", {}).items():
         lines.append(f"`{symbol}` blocked: {reason}")

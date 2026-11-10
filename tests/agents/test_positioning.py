@@ -333,3 +333,32 @@ def test_gamma_incomplete_provider_chain_is_explicitly_unavailable(monkeypatch):
     monkeypatch.setattr("yfinance.Ticker", lambda symbol: ticker)
     with pytest.raises(ValueError, match="incomplete call chain"):
         fetch_gamma("SPY", NOW)
+
+
+def test_a_second_refresh_reads_saved_state_instead_of_queueing(tmp_path, monkeypatch):
+    """2026-11-10. The runner calls this from pool threads before every
+    decision. Had one fetch hung, each later caller would have parked a
+    thread on the lock for good; the cycle shares that pool."""
+    import threading
+
+    mock_sources(monkeypatch)
+    inside, release = threading.Event(), threading.Event()
+    calls = []
+
+    def slow_fetch(now):
+        calls.append("fetch")
+        inside.set()
+        assert release.wait(10)
+        return cot_features(cot_rows(), "13874A", now)
+
+    monkeypatch.setattr("trading.runtime.positioning_monitor.fetch_cot", slow_fetch)
+    first = threading.Thread(target=refresh_positioning, args=(tmp_path, NOW))
+    first.start()
+    try:
+        assert inside.wait(10)
+        second = refresh_positioning(tmp_path, NOW)  # must return, not block
+        assert second["coverage"]["cot"] == 0 and calls == ["fetch"]
+    finally:
+        release.set()
+        first.join(10)
+    assert refresh_positioning(tmp_path, NOW)["coverage"]["cot"] == 2
