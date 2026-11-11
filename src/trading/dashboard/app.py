@@ -129,6 +129,8 @@ def _add_cockpit_blocks(out: dict[str, Any], state_dir: Path, data_dir: Path) ->
         "lessons_v2": lambda: cockpit.lessons_block(state_dir / "memory" / "memory.db"),
         "edge": lambda: cockpit.edge_block(state_dir / "memory"),
         "llm": lambda: cockpit.llm_block(state_dir / "llm_usage.jsonl"),
+        "forecasts": lambda: _forecasts_block(state_dir),
+        "pm_shadow": lambda: _pm_shadow_block(state_dir),
         "market": lambda: cockpit.market_block(data_dir, out.get("market_watch")),
     }
     for key, build in blocks.items():
@@ -137,6 +139,59 @@ def _add_cockpit_blocks(out: dict[str, Any], state_dir: Path, data_dir: Path) ->
         except Exception as e:
             logger.bind(component="dashboard").warning(f"{key} block failed: {e}")
             out[key] = {} if key not in {"positions", "cycles", "schedule"} else []
+
+
+def _pm_shadow_block(state_dir: Path) -> dict[str, Any]:
+    """The PM against the mechanical picks it was choosing from.
+
+    SPY is the wrong yardstick for the PM: it selects from a momentum
+    ranking, so most of any lead over the index may be the ranking's, not
+    the PM's. The matched cohorts in ``reporting/pm_shadow`` already hold
+    the right comparison — same dates, same capital, same costs — and until
+    2026-11-11 it was only reachable through ``/pm shadow`` in Telegram.
+    """
+    import json
+
+    try:
+        report = json.loads((state_dir / "agent_pm" / "shadow_status.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(report, dict):
+        return {}
+    horizons = []
+    for horizon in (5, 21, 63):
+        deltas = []
+        for record in report.get("records") or []:
+            if not isinstance(record, dict) or record.get("status") != "graded":
+                continue
+            if record.get("horizon") != horizon:
+                continue
+            value = (record.get("attribution") or {}).get("pm_minus_mechanical")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                deltas.append(float(value))
+        if deltas:
+            horizons.append(
+                {
+                    "horizon": horizon,
+                    "cohorts": len(deltas),
+                    "mean_pm_minus_mechanical": sum(deltas) / len(deltas),
+                    "pm_ahead": sum(d > 0 for d in deltas),
+                }
+            )
+    return {
+        "checked_at": report.get("checked_at"),
+        "status": report.get("status"),
+        "counts": report.get("counts") or {},
+        "horizons": horizons,
+    }
+
+
+def _forecasts_block(state_dir: Path) -> dict[str, Any]:
+    """Shadow-forecast status as the daily job left it. A file read, not a
+    ledger scan: this endpoint is polled every minute."""
+    from trading.forecasts import store
+
+    return store.read_status(state_dir)
 
 
 def build_summary(state_dir: Path, data_dir: Path) -> dict[str, Any]:

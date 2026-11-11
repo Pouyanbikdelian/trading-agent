@@ -95,6 +95,19 @@ def _evidence_catalog(payload: dict[str, Any], now: datetime) -> dict[str, Any]:
             "max_gross_exposure": gross_cap if gross_cap is not None and gross_cap >= 0 else 1.0
         },
     }
+    # Shadow forecasts (operator's choice, 2026-11-11). Kind is
+    # "model_estimate", never "measured": a claim resting on one must be
+    # marked uncertain, which is what an unproven forecast is.
+    shadow = payload.get("shadow_forecasts") or {}
+    for symbol, facts in (shadow.get("forecasts") or {}).items():
+        catalog[f"forecast:{str(symbol).upper()}"] = {
+            "kind": "model_estimate",
+            "observed_at": shadow.get("as_of_close"),
+            "requires_revalidation": False,
+            "independence_key": "shadow_forecasts",
+            "facts": facts,
+            "note": "Unproven probability of beating SPY; see shadow_forecasts.track_record.",
+        }
     for observation in (context.get("positioning") or {}).get("observations", []):
         catalog[observation["id"]] = {
             **observation,

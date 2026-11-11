@@ -197,6 +197,22 @@ class Settings(BaseSettings):
     agent_pm_reasoning_review_blocks: bool = Field(
         default=False, alias="AGENT_PM_REASONING_REVIEW_BLOCKS"
     )
+    # Shadow forecasts (trading/forecasts): a daily probability, per stock,
+    # of beating SPY over 5 and 21 sessions, graded automatically. Research
+    # only — nothing here reaches the PM, the risk manager or an order.
+    # ENABLED runs the free mechanical baseline; LLM additionally asks a
+    # model about the top TOP_N momentum names, which costs tokens.
+    forecast_shadow_enabled: bool = Field(default=False, alias="FORECAST_SHADOW_ENABLED")
+    forecast_shadow_llm: bool = Field(default=False, alias="FORECAST_SHADOW_LLM")
+    forecast_shadow_model: str = Field(default="claude-sonnet-5-5", alias="FORECAST_SHADOW_MODEL")
+    forecast_shadow_top_n: int = Field(default=50, alias="FORECAST_SHADOW_TOP_N", ge=0, le=100)
+    # Route the LLM half through the Message Batches API: half price, answers
+    # usually within the hour. false asks directly at full price.
+    forecast_shadow_batch: bool = Field(default=True, alias="FORECAST_SHADOW_BATCH")
+    # Show the latest forecasts, with their track record, to the PM as
+    # evidence. This is the switch that lets them influence proposed trades.
+    # They may break ties and prompt a closer look; they never set a size.
+    forecast_pm_evidence: bool = Field(default=False, alias="FORECAST_PM_EVIDENCE")
     # How long the cycle waits for an /approve or /reject before
     # auto-rejecting and submitting nothing. Default 10 minutes.
     cycle_approval_timeout_s: int = Field(default=600, alias="CYCLE_APPROVAL_TIMEOUT_S")

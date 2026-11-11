@@ -392,7 +392,7 @@ class TestAntiFixation:
         assert w["JPM"] == 0.1 and w["LMT"] == 0.1
 
     def test_agent_takes_reach_the_prompt(self, mem: MemoryStore, tmp_path: Path) -> None:
-        """The CREATIVE SCOUT RULE keys on individual takes; the committee
+        """The PM's take-driven rules key on individual takes; the committee
         journal row carries only the manager's synthesis, so the takes have
         to be read from their own journal kind."""
         mem.journal(
@@ -962,3 +962,16 @@ class TestTheCardShowsOnlyThingsThatAreTrue:
         from trading.agents.pm import format_account_translation
 
         assert format_account_translation({"GLD": 0.2}, **kwargs) == []
+
+
+def test_no_confidence_number_can_force_an_allocation() -> None:
+    """2026-11-11. The charter told the PM to put at least 5% wherever the
+    creative or scout voice was 70%+ sure. Across 706 graded forecasts
+    those voices were right 40% of the time while claiming 66%: the rule
+    sized real positions on a number with no information in it."""
+    from trading.agents.pm import PM_CHARTER
+
+    assert "CREATIVE SCOUT RULE" not in PM_CHARTER
+    assert "allocate at least 5%" not in PM_CHARTER.replace("\n", " ")
+    assert "never a sizing instruction" in PM_CHARTER
+    assert "agent_calibration" in PM_CHARTER  # takes are still weighed, not ignored

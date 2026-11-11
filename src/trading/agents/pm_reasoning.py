@@ -225,6 +225,24 @@ def _format_reasoning_details(result: dict[str, Any]) -> list[str]:
             lines.append(
                 f"`{change['symbol']}` {change['source']} experiment {change['base']:.1%} → {change['shadow']:.1%}; live target unchanged."
             )
+    shown = (result.get("target_forecasts") or {}).get("targets") or {}
+    if shown:
+        lines.append(
+            f"*Forecasts, unproven* (P beats SPY, 5d/21d, close {result['target_forecasts'].get('as_of_close')}):"
+        )
+        for symbol, facts in list(shown.items())[:8]:
+            parts = []
+            for key, label in (
+                ("baseline", "model"),
+                ("llm_numbers", "LLM"),
+                ("llm_news", "LLM+news"),
+            ):
+                p5, p21 = facts.get(f"{key}_p5"), facts.get(f"{key}_p21")
+                if p5 is not None or p21 is not None:
+                    parts.append(
+                        f"{label} {'–' if p5 is None else f'{p5:.0%}'}/{'–' if p21 is None else f'{p21:.0%}'}"
+                    )
+            lines.append(f"`{symbol}` " + " · ".join(parts))
     freshness = result.get("evidence_freshness") or {}
     if freshness.get("historical_takes") and not freshness.get("current_agent_votes"):
         lines.append("⚠️ Committee views need revalidation; no current specialist votes.")

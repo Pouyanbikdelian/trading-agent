@@ -445,6 +445,11 @@ table.t tbody tr:hover td{background:rgba(37,99,235,.04)}
    <div id="lessonBox"></div>
    <div class="read" id="rdLes"></div>
   </div>
+  <div class="panel c12">
+   <h2>Shadow forecasts <span class="sub" id="fcSub">P(stock beats SPY) · research only, never traded</span></h2>
+   <div class="tscroll"><table class="t" id="fcT"></table></div>
+   <div class="read" id="rdFc"></div>
+  </div>
   <div class="panel c5">
    <h2>LLM usage <span class="sub">last 7 days</span></h2>
    <div class="statgrid" id="llmStats"></div>
@@ -1337,7 +1342,7 @@ function renderAgents(){
   (sk<0?`<b>No.</b> Across ${num(A.graded)} graded forecasts the committee would have scored better by <b>always saying 50%</b>. `:`<b>A little.</b> Across ${num(A.graded)} graded forecasts the committee beats a coin flip. `)+
   `The voices say they are about <b>${pctU(conf,0)}</b> sure; they are right <b>${pctU(hit,0)}</b> of the time. `+
   (best?`Closest to useful: ${esc(best.agent.replace('_',' '))}. Least: ${esc(worst.agent.replace('_',' '))}. `:'')+
-  `<b>What it means for you:</b> their confidence numbers should not size positions. Today the PM is told to allocate 5% whenever creative or scout is 70%+ sure — that rule leans on the signal this page shows is unreliable. ${num(A.open)} forecasts open, ${num(A.due_7d)} due this week.`;
+  `<b>What it means for you:</b> their confidence numbers should not size positions — and since 2026-11-11 they no longer do: the rule that made the PM allocate 5% whenever creative or scout was 70%+ sure has been removed. ${num(A.open)} forecasts open, ${num(A.due_7d)} due this week.`;
  const verdict=(a)=>a.n<20?['muted','too few']:a.skill>=.05?['pos','adds information']:a.skill>-.05?['muted','coin flip']:['neg','worse than a coin flip'];
  const mx=Math.max(.01,...ag.map(a=>Math.abs(a.skill)));
  $('skillT').innerHTML='<thead><tr><th>Voice</th><th>Forecasts</th><th>Right</th><th>Said sure</th><th>Overconfident by</th><th>Skill</th><th>Last 30 days</th><th>Verdict</th></tr></thead><tbody>'+
@@ -1363,7 +1368,7 @@ function renderAgents(){
   (shown.every(b=>b.hit_rate<b.mean_confidence)?'Every group sits <b>below</b> the line — overconfident at every level. ':'')+
   (shown.length>1&&Math.abs(shown[shown.length-1].hit_rate-shown[0].hit_rate)<.08?'Higher stated confidence does <b>not</b> mean more often right: the confidence number carries no information yet.':'')+
   (hidden.length?` <span class="faint">Hidden: ${hidden.map(b=>pctU(b.lo,0)+'+').join(', ')} (fewer than 15 forecasts — too few to read).</span>`:''):'Not enough graded forecasts yet.';
- renderCommittee();renderEdge();renderLessons();renderLLM();
+ renderCommittee();renderEdge();renderLessons();renderForecasts();renderLLM();
 }
 function renderCommittee(){
  const cm=D.committee||{};const r=cm.ruling||{};
@@ -1430,8 +1435,17 @@ function renderPmVsSpy(){
  const more=s.daysNeeded>0?` At this pace it needs roughly ${Math.max(1,Math.round(s.daysNeeded/21))} more month(s) of marks to clear the usual bar.`:'';
  $('rdPmVs').innerHTML=`Since ${esc(s.start)}: PM <b>${pct(s.pmR,1)}</b>, SPY <b>${pct(s.spyR,1)}</b>, lead <b>${pct(s.lead,1)}</b>. It beat SPY in ${s.won} of ${s.played} weeks. `+
   `It typically wanders ${pctU(s.te,0)} a year away from SPY, which is why a few points of lead over a few months is weak evidence. `+verdict+more+
-  ' <span class="faint">Frictionless simulation: fills at the decision price with a flat 0.10% cost; no spreads, FX or taxes.</span>';
+  ' <span class="faint">Frictionless simulation: fills at the decision price with a flat 0.10% cost; no spreads, FX or taxes.</span>'+pmVsMechanical();
 }
+// SPY is the easy yardstick. The PM picks from a momentum ranking, so the
+// fair one is that ranking's own picks on the same dates (2026-11-11).
+function pmVsMechanical(){
+ const M=D.pm_shadow||{},H=M.horizons||[];
+ if(!H.length){const c=M.counts||{};
+  return `<br><b>Against the mechanical momentum picks</b> (the fairer test): no matched cohort has been graded yet`+(c.pending?` — ${num(c.pending)} waiting for forward prices`:'')+'.';}
+ return '<br><b>Against the mechanical momentum picks</b> (same dates, capital and costs — the fairer test): '+
+  H.map(h=>`over ${h.horizon} sessions the PM was <b class="${cls(h.mean_pm_minus_mechanical)}">${(h.mean_pm_minus_mechanical>=0?'+':'')+(100*h.mean_pm_minus_mechanical).toFixed(2)} pts</b> on average, ahead in ${h.pm_ahead} of ${h.cohorts} cohorts`).join('; ')+
+  '. <span class="faint">Cohorts overlap, so this is a direction, not proof.</span>';}
 // What each shadow-ledger origin actually compares (2026-09-26). "ladder"
 // is the MECHANICAL momentum cut — its own top picks vs the ranks below —
 // recorded before the PM merge, so it tests the ranking, not the PM.
@@ -1471,6 +1485,27 @@ function renderLessons(){
   'Only established lessons reach the agents; a candidate earns promotion from outcomes it predicted in advance, never from votes.';
  const cur=((D.memory||{}).curator||{}).last_run||{};
  $('curatorNote').innerHTML=cur.ts?`Learning Curator last ran ${esc(ago(cur.ts))}: <b>${esc(cur.status||'')}</b> · reviewed ${cur.reviewed??'–'} · proposed ${cur.created??'–'}`:'';
+}
+// Shadow forecasts (2026-11-11): every row is a forecaster at one horizon.
+// The comparison that matters is the LLM against the free mechanical
+// baseline on the SAME stocks and days, and the honest sample size is
+// independent periods, not forecasts.
+function renderForecasts(){
+ const F=D.forecasts||{},S=F.summary||{},src=S.sources||[],pair=S.paired||[];
+ const name=(s)=>s==='baseline'?'Mechanical baseline':String(s).replace(/^llm:/,'LLM · ').replace(/:numbers$/,' · numbers only').replace(/:news$/,' · numbers + headlines');
+ const sk=(v)=>v==null?'<span class="faint">–</span>':`<span class="${cls(v)}">${(v>=0?'+':'')+(100*v).toFixed(2)}%</span>`;
+ const pk={};pair.forEach(p=>{pk[p.source+'|'+p.horizon]=p;});
+ $('fcSub').textContent=F.ran_at?`last run ${ago(F.ran_at)} · session ${F.asof||'–'} · ${num(S.total||0)} forecasts, ${num(S.open||0)} awaiting an outcome`:'P(stock beats SPY) · research only, never traded';
+ $('fcT').innerHTML='<thead><tr><th>Forecaster</th><th>Horizon</th><th>Graded</th><th>Right</th><th>Skill vs coin flip</th><th>Skill vs baseline</th><th>Independent periods</th><th>Verdict</th></tr></thead><tbody>'+
+  (src.length?src.map(r=>{const p=pk[r.source+'|'+r.horizon];
+   return `<tr><td><span class="sym">${esc(name(r.source))}</span></td><td>${r.horizon}d</td><td>${num(r.graded)} <span class="faint">/ ${num(r.forecasts)}</span></td><td>${r.hit_rate==null?'–':pctU(r.hit_rate,1)}</td><td>${sk(r.skill_vs_coin_flip)}</td><td>${p?sk(p.skill_vs_baseline):'<span class="faint">–</span>'}</td><td>${num((p||r).independent_periods||0)}</td><td style="font-family:var(--sans);text-align:left;white-space:normal">${esc((p||r).verdict||'no outcomes yet')}</td></tr>`;}).join('')
+   :'<tr><td colspan="8" class="empty">no forecasts recorded yet</td></tr>')+'</tbody>';
+ const errs=F.errors||[];
+ $('rdFc').innerHTML=!F.ran_at?'The shadow-forecast job has not run. It is off until <b>FORECAST_SHADOW_ENABLED=true</b>; the LLM half needs <b>FORECAST_SHADOW_LLM=true</b> as well.':
+  `Each session the mechanical model forecasts every stock in the universe for free`+(F.llm_enabled?`, and <b>${esc(F.model||'the LLM')}</b> forecasts the top ${num(F.llm_asked||0)} momentum names twice — once from the numbers alone, once with headlines, so the gap between the two rows is what the text was worth`+(F.llm_pending_batches?` (${num(F.llm_pending_batches)} batch still processing)`:'')+`. `:'; the LLM half is off. ')+
+  `Skill is 1 − Brier ÷ reference: <b>0% means no better</b>, negative means worse. An LLM is worth its tokens only if "skill vs baseline" turns reliably positive. `+
+  `<span class="faint">Fifty stocks on one day mostly move together, so the sample is counted in independent periods; under 8, no verdict is given.</span>`+
+  (errs.length?` <span class="warn">Last run reported: ${esc(errs.slice(0,2).join(' · '))}</span>`:'');
 }
 function renderLLM(){
  const L=D.llm||{};const t=L.totals||{};

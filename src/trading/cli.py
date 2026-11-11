@@ -1289,6 +1289,61 @@ def _resume(
     logger.info("operator resumed runner")
 
 
+forecasts_app = typer.Typer(
+    help="Shadow forecasts: P(stock beats SPY). Research only; never trades."
+)
+app.add_typer(forecasts_app, name="forecasts")
+
+
+def _forecast_symbols(universe: str) -> list[str]:
+    from trading.core.universes import load_universe
+
+    return [i.symbol for i in load_universe(universe)]
+
+
+@forecasts_app.command("backtest")
+def forecasts_backtest(universe: str = "sp500") -> None:
+    """Walk-forward test of the mechanical baseline on the price cache."""
+    from trading.forecasts.baseline import walk_forward
+    from trading.forecasts.features import load_close_panel
+
+    close, bench = load_close_panel(settings.data_dir, _forecast_symbols(universe))
+    console.print_json(data=walk_forward(close, bench))
+
+
+@forecasts_app.command("run")
+def forecasts_run(
+    universe: str = "sp500",
+    llm: bool = typer.Option(False, "--llm", help="Also ask the LLM (costs tokens)."),
+    wait: int = typer.Option(0, "--wait", help="Seconds to wait for a submitted batch."),
+) -> None:
+    """Collect finished batches, grade what is due, forecast the newest session."""
+    from trading.forecasts.job import run_daily
+
+    console.print_json(
+        data=run_daily(
+            settings.state_dir,
+            settings.data_dir,
+            _forecast_symbols(universe),
+            top_n=int(settings.forecast_shadow_top_n),
+            use_llm=llm,
+            use_batch=bool(settings.forecast_shadow_batch),
+            model=str(settings.forecast_shadow_model),
+            # Linger for tonight's batch so the answers usually land the
+            # same evening; whatever is still running is picked up next run.
+            wait_s=float(wait),
+        )
+    )
+
+
+@forecasts_app.command("status")
+def forecasts_status() -> None:
+    """Last run and the skill table."""
+    from trading.forecasts import store
+
+    console.print_json(data=store.read_status(settings.state_dir))
+
+
 positioning_app = typer.Typer(
     help="Read-only positioning research and checked public-report imports."
 )

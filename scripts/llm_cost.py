@@ -25,6 +25,9 @@ PRICE = {
     "claude-sonnet-5": (2.0, 10.0, 0.10),
     "claude-fable-5-1": (10.0, 50.0, 0.10),
     "claude-haiku-4-5": (1.0, 5.0, 0.10),
+    # Added 2026-11-11 from platform.claude.com/docs/en/about-claude/pricing.
+    "claude-sonnet-5-5": (2.0, 10.0, 0.05),
+    "claude-haiku-5-5": (0.10, 0.50, 0.10),
 }
 
 
@@ -44,7 +47,9 @@ def cost(r, model=None):
     o = r.get("output_tokens") or 0
     cw = r.get("cache_creation_input_tokens") or 0
     cr = r.get("cache_read_input_tokens") or 0
-    return (i * pin + cw * pin * 1.25 + cr * pin * cache_share + o * pout) / 1e6
+    total = (i * pin + cw * pin * 1.25 + cr * pin * cache_share + o * pout) / 1e6
+    # Message Batches API calls (the shadow forecasts) are billed at half.
+    return total * 0.5 if str(r.get("tier", "")).endswith("batch") else total
 
 
 path = Path(settings.state_dir) / "llm_usage.jsonl"

@@ -607,6 +607,18 @@ class Runner:
             coalesce=True,
         )
 
+        # Shadow forecasts: after the 17:40 cache refresh, so the newest bar
+        # is the session's close. Always registered; the job itself returns
+        # at once unless FORECAST_SHADOW_ENABLED is set.
+        self._scheduler.add_job(
+            self._run_forecast_shadow_async,
+            CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone="America/New_York"),
+            id="forecast_shadow",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Scorecard grading is local learning-state maintenance and should
         # not stop just because the interactive chat is unavailable.  It
         # starts 65 minutes after the cache refresh, after the two-hour
@@ -2494,6 +2506,70 @@ class Runner:
             self.alerts.info(format_historian_digest(digest))
         except Exception:
             logger.bind(component="historian").exception("historian run failed")
+
+    #: Ceiling on one shadow-forecast run (model fit, headlines, LLM batches).
+    FORECAST_SHADOW_TIMEOUT_S: float = 900.0
+    #: How long that run lingers for its own batch before leaving it to the
+    #: next run. Inside the deadline above, with room for the fit and news.
+    FORECAST_SHADOW_BATCH_WAIT_S: float = 480.0
+
+    async def _run_forecast_shadow_async(self) -> None:
+        """Daily shadow forecasts and their grading. Research only.
+
+        Off unless FORECAST_SHADOW_ENABLED. Runs as a SEPARATE PROCESS, not a
+        worker thread: fitting the model takes a few hundred MB on a box
+        with two GB, a thread would keep that inside the trading process,
+        and a thread that hangs cannot be killed — a child process can, and
+        is, at the deadline. Takes no trading lock. Every failure ends
+        here: this job must never be why a cycle, a guard or the PM did not
+        run.
+        """
+        if not bool(getattr(settings, "forecast_shadow_enabled", False)):
+            return
+        import sys
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "trading.cli",
+            "forecasts",
+            "run",
+            "--universe",
+            os.getenv("UNIVERSE", "sp500"),
+        ]
+        if bool(getattr(settings, "forecast_shadow_llm", False)):
+            cmd += ["--llm", "--wait", str(int(self.FORECAST_SHADOW_BATCH_WAIT_S))]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+            )
+            try:
+                _, err = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.FORECAST_SHADOW_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.bind(component="forecasts").warning(
+                    f"shadow forecast run exceeded {self.FORECAST_SHADOW_TIMEOUT_S:.0f}s; killed"
+                )
+                return
+            if proc.returncode != 0:
+                tail = (err or b"").decode(errors="replace").strip()[-300:]
+                logger.bind(component="forecasts").warning(
+                    f"shadow forecast run exited {proc.returncode}: {tail}"
+                )
+                return
+            from trading.forecasts import store
+
+            status = store.read_status(settings.state_dir)
+            logger.bind(component="forecasts").info(
+                f"shadow forecasts {status.get('asof')}: baseline {status.get('baseline_written')}, "
+                f"llm {status.get('llm_written')}/{status.get('llm_asked')}, "
+                f"grading {status.get('grading')}, errors {len(status.get('errors') or [])}"
+            )
+        except Exception:
+            logger.bind(component="forecasts").exception("shadow forecast job failed")
 
     async def _run_memory_grader_async(self) -> None:
         """Nightly: grade due predictions using cached closes, and journal

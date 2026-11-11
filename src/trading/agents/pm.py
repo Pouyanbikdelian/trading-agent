@@ -252,7 +252,7 @@ PM_CHARTER = (
     "\n"
     "EVIDENCE FRESHNESS: decision_at is the current time. Evidence with "
     "requires_revalidation=true is historical, not a current vote or event. "
-    "It cannot activate the bearish-majority or creative/scout forcing rules. "
+    "It cannot activate the bearish-majority rule. "
     "Only the newest eligible_for_current_vote take per agent counts. "
     "Revalidate an older thesis against today's dated prices and evidence; "
     "an old unverified rumor is neither a confirmed event nor a permanent veto. "
@@ -317,13 +317,27 @@ PM_CHARTER = (
     "evidence of a market-wide crash. The cap still applies, but it does "
     "not by itself justify 90%+ cash; explain any additional discretionary cash.\n"
     "\n"
-    "CREATIVE SCOUT RULE: agent_takes carries each specialist's own take, "
-    "keyed by agent, with its falsifiable prediction. If the creative or "
-    "scout agent shows a bullish take with confidence ≥ 0.70 on a stock or "
-    "sector NOT currently in the top three holdings by weight, allocate at "
-    "least 5% there — this is the forcing function for portfolio evolution "
-    "beyond existing themes. Weigh every take by that agent's row in "
-    "agent_calibration, not by how confidently it is phrased.\n"
+    "SHADOW FORECASTS: when shadow_forecasts is present, evidence_catalog "
+    "holds a forecast:SYMBOL entry per stock — each forecaster's probability "
+    "that the stock beats SPY over 5 and 21 sessions — and "
+    "shadow_forecasts.track_record says how each forecaster has actually "
+    "scored. Read the track record first: until a forecaster's verdict says "
+    "it beats the baseline or a coin flip, its numbers are unproven. Use them "
+    "to choose between candidates you would otherwise rate alike, or as a "
+    "reason to look harder at one; when forecasters disagree, say so. A "
+    "forecast never opens a position without other dated evidence and never "
+    "sets or raises a size. Differences of two or three points are noise. A "
+    "claim citing forecast:SYMBOL must use assessment=uncertain.\n"
+    "\n"
+    "SPECIALIST TAKES: agent_takes carries each specialist's own take, "
+    "keyed by agent, with its falsifiable prediction. A take is an idea to "
+    "examine, never a sizing instruction. The specialists' stated "
+    "confidence has been measured and is not informative — over seven "
+    "hundred graded forecasts they were right less often than a coin flip "
+    "while claiming about two-in-three — so no confidence number, however "
+    "high, opens or sizes a position by itself. Use a take when it points "
+    "you to dated evidence you can cite, weigh it by that agent's row in "
+    "agent_calibration, and size on the evidence.\n"
     "\n"
     "OPERATOR MANDATES: " + STRENGTH_GUIDANCE + "\n"
     "\n"
@@ -556,7 +570,7 @@ def _recent_takes(mem: MemoryStore) -> list[dict[str, Any]]:
         pred = payload.get("prediction")
         if isinstance(pred, dict):
             # The falsifiable part — subject/direction/confidence is what
-            # the CREATIVE SCOUT RULE actually keys on.
+            # the PM's take-driven rules actually key on.
             take["prediction"] = {
                 k: pred.get(k) for k in ("subject", "direction", "horizon_days", "confidence")
             }
@@ -1135,10 +1149,12 @@ def run_agent_pm(
     # Rulings alone were not enough. ``committee`` journal rows carry only
     # the manager's synthesis ({"ruling", "disagreement"}); the individual
     # specialist takes are journaled separately under kind ``take``. So the
-    # PM's two anti-inertia forcing functions — "creative or scout bullish
-    # at ≥0.70 ⇒ allocate 5%" and the bearish-majority cluster exit — were
-    # written against evidence that never reached the prompt, and the
-    # calibration table had no takes to weigh. Both are now real inputs.
+    # PM's rules that key on individual takes — the bearish-majority
+    # cluster exit, and until 2026-11-11 "creative or scout bullish at
+    # ≥0.70 ⇒ allocate 5%" — were written against evidence that never
+    # reached the prompt, and the calibration table had no takes to weigh.
+    # The takes are now real inputs. The 5% rule itself was removed once
+    # the scorecard showed that confidence carried no information.
     rulings = _date_evidence(
         _recent_rows(mem, "committee", floor=RULINGS_SEEN, ceiling=RULINGS_MAX), decision_at
     )
@@ -1245,7 +1261,31 @@ def run_agent_pm(
         "recent_committee_rulings": rulings,
     }
     payload["sentinel_scope_review"] = _sentinel_scope(sentinel_state, held)
+    # Forecasts as evidence, if the operator switched that on. Looked up for
+    # every name the PM is asked to review or already holds. A failure here
+    # costs the PM one input, never the decision.
+    shadow_forecasts: dict[str, Any] | None = None
+    try:
+        from trading.forecasts.evidence import pm_evidence
+
+        ladder_rows = (context.get("candidate_ladder") or {}).get("ranked") or []
+        interest = {str(r.get("symbol", "")).upper() for r in ladder_rows if isinstance(r, dict)}
+        interest |= {str(s).upper() for s in book["holdings"]}
+        interest |= {str(s).upper() for s in review_plan.get("required_symbols", [])}
+        shadow_forecasts = pm_evidence(state_dir, interest - {""}, now=decision_at)
+    except Exception as exc:
+        logger.bind(component="agent_pm").warning(
+            f"shadow forecasts unavailable to the PM: {type(exc).__name__}"
+        )
+    if shadow_forecasts:
+        payload["shadow_forecasts"] = shadow_forecasts
     payload["evidence_catalog"] = _evidence_catalog(payload, decision_at)
+    if shadow_forecasts:
+        # The per-stock numbers now live in evidence_catalog; keep only the
+        # reading guide and track record here rather than send them twice.
+        payload["shadow_forecasts"] = {
+            k: v for k, v in shadow_forecasts.items() if k != "forecasts"
+        }
     prompt = _budgeted_prompt(payload)
     audit_id, request_hash = _start_audit(
         Path(state_dir),
@@ -1553,6 +1593,18 @@ def run_agent_pm(
         "candidate_review_plan": review_plan,
         "reasoning_review": reasoning_review,
         "allocation_facts": allocation_facts,
+        # What the forecasters said about each name the PM chose, so the
+        # operator can see it on the card they judge the proposal by.
+        "target_forecasts": {
+            "as_of_close": (shadow_forecasts or {}).get("as_of_close"),
+            "targets": {
+                s: (shadow_forecasts or {}).get("forecasts", {}).get(s)
+                for s in weights
+                if (shadow_forecasts or {}).get("forecasts", {}).get(s)
+            },
+        }
+        if shadow_forecasts
+        else None,
         "sentinel_scope_review": payload["sentinel_scope_review"],
         "decision_prices": px,
         "evidence_freshness": {
