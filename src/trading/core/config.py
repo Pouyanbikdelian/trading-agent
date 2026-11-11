@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     # wallet. The trim is always announced and, when approval is on, is
     # still shown on the card before anything is sent.
     fit_orders_to_cash: bool = Field(default=True, alias="FIT_ORDERS_TO_CASH")
+    # No-trade band: skip an adjustment to an existing holding worth less
+    # than this fraction of equity. 0.0 = off (every one-share drift
+    # trades). Never applies to entries, exits or cap-driven sells — see
+    # RiskLimits.min_rebalance_pct.
+    min_rebalance_pct: float = Field(default=0.0, alias="MIN_REBALANCE_PCT", ge=0.0, le=0.05)
     # A stored daily-open baseline this far from actual equity is not a
     # loss — it is a baseline from another account, another currency, or
     # from before a deposit. The kill switch re-stamps and alerts instead

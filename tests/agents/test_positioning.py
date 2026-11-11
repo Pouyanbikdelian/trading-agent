@@ -188,7 +188,9 @@ def test_contract_missing_wrong_scope_and_available_evidence():
         for source in ("cot", "goldman_public", "gamma_estimate")
     ]
     assert not check_positioning({"positioning_assessments": rows}, {"MPC"}, {})
-    assert check_positioning({}, {"MPC"}, {})
+    # 2026-11-11: saying nothing about positioning claims nothing.
+    assert not check_positioning({}, {"MPC"}, {})
+    assert not check_positioning({"positioning_assessments": rows[:1]}, {"MPC"}, {})
     catalog = {
         "cot:x": {"positioning_source": "cot", "symbols": ["USO"], "requires_revalidation": False}
     }
@@ -215,7 +217,7 @@ def test_shadow_bounded_no_stock_proxy_or_forced_replacement():
     assert shadow_positioning(weights, {})["arms"]["experimental_positioning_cot"] == weights
 
 
-def test_market_context_must_be_reviewed_but_cannot_be_stock_flow():
+def test_market_context_is_optional_to_mention_but_cannot_be_stock_flow():
     rows = [
         {
             "symbol": "TMO",
@@ -234,7 +236,9 @@ def test_market_context_must_be_reviewed_but_cannot_be_stock_flow():
             "requires_revalidation": False,
         }
     }
-    assert check_positioning({"positioning_assessments": rows}, {"TMO"}, catalog)
+    # Broad index evidence does not make "unavailable" false for a stock.
+    assert not check_positioning({"positioning_assessments": rows}, {"TMO"}, catalog)
+    assert not check_positioning({}, {"TMO"}, catalog)
     rows[0].update(
         assessment="neutral", effect="timing", scope="market_context", evidence_ids=["cot:market"]
     )

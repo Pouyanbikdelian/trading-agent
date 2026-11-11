@@ -1,4 +1,4 @@
-"""Enforced evidence coverage and reduction-only research arms; no executable targets."""
+"""Checks on how positioning evidence is used, and reduction-only research arms; no executable targets."""
 
 from __future__ import annotations
 
@@ -25,7 +25,17 @@ def check_positioning(
     sources = ("cot", "goldman_public", "gamma_estimate")
     for symbol in sorted(symbols):
         for source in sources:
-            row = indexed.get((symbol, source), {})
+            row = indexed.get((symbol, source))
+            if row is None:
+                # No row is not a defect (2026-11-11). The first version
+                # demanded one for every reviewed stock and every source —
+                # 21 rows for seven names — on evidence this module's own
+                # notes call uninformative for single stocks. On 9 November
+                # the PM omitted them, then broke a different clause while
+                # repairing them, and the desk did not trade. Saying nothing
+                # about positioning claims nothing; only a row that IS
+                # supplied can misuse evidence, so only those are checked.
+                continue
             label = f"{symbol}/{source}"
             status = str(row.get("assessment"))
             refs = row.get("evidence_ids")
@@ -71,7 +81,9 @@ def check_positioning(
                     issues.append(
                         f"{label}: broad market evidence is timing context, not stock-specific sizing/ranking"
                     )
-            elif relevant:
+            elif applicable:
+                # Only evidence mapped to THIS symbol makes "unavailable"
+                # false. Broad index context is optional to mention.
                 issues.append(f"{label}: available applicable evidence was ignored")
             if str(row.get("effect")) not in {"none", "rank", "size", "timing"}:
                 issues.append(f"{label}: missing positioning effect")

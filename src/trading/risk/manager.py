@@ -976,6 +976,12 @@ class RiskManager:
         # Crypto and FX support fractional sizing. We truncate toward zero
         # so the resulting notional never exceeds the per-position cap.
         orders: list[Order] = []
+        # No-trade band (limits.min_rebalance_pct). A cap that scaled this
+        # basket means the book must actually come down, so sells are then
+        # exempt; see the limit's docstring.
+        band_value = self.limits.min_rebalance_pct * account.equity if account.equity > 0 else 0.0
+        caps_scaled = any(d.action == "scale" for d in decisions)
+        band_held: list[str] = []
         for key, target_w in weights.items():
             if key not in instruments:
                 decisions.append(
@@ -1048,6 +1054,14 @@ class RiskManager:
                         delta = float(int(delta))
             if abs(delta) < _EPS_QTY:
                 continue
+            if band_value > 0.0 and target_qty != 0.0 and current_qty != 0.0:
+                over_cap = (
+                    abs(current_qty) * price_base > self.limits.max_position_pct * account.equity
+                )
+                must_reduce = delta < 0 and (caps_scaled or over_cap)
+                if abs(delta) * price_base < band_value and not must_reduce:
+                    band_held.append(ins.symbol)
+                    continue
 
             orders.append(
                 Order(
@@ -1058,6 +1072,19 @@ class RiskManager:
                     order_type=OrderType.MARKET,
                     tif=TimeInForce.DAY,
                     created_at=signal.ts,
+                )
+            )
+        if band_held:
+            # One line, not one per name: the card shows the first few
+            # adjustments and a row of these would bury a cap or a trim.
+            decisions.append(
+                RiskDecision(
+                    action="scale",
+                    reason=(
+                        f"no-trade band: left {', '.join(sorted(band_held))} unchanged — "
+                        f"each adjustment was under {self.limits.min_rebalance_pct:.2%} of equity"
+                    ),
+                    scale_factor=1.0,
                 )
             )
 

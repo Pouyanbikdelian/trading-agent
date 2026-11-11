@@ -17,7 +17,13 @@ from trading.dashboard.app import _PAGE as PAGE
 class TestThePmVsSpyPanel:
     def test_the_panel_exists_on_the_portfolio_tab(self) -> None:
         assert 'id="pmVsChart"' in PAGE and 'id="rdPmVs"' in PAGE
-        assert "renderPM();renderPmVsSpy();" in PAGE
+        # 2026-11-11: it is the cockpit's first chart, not the last panel
+        # of the Portfolio tab.
+        assert "renderPmVsSpy();renderPerf();" in PAGE
+        assert "renderPM();renderPmVsSpy();" not in PAGE
+        cockpit = PAGE[PAGE.index('id="tab-cockpit"') : PAGE.index('id="tab-portfolio"')]
+        assert 'id="pmVsChart"' in cockpit
+        assert cockpit.index('id="pmVsChart"') < cockpit.index('id="perfT"')
 
     def test_it_measures_lead_weeks_tracking_error_and_luck(self) -> None:
         assert "function pmVsSpyStats(rows){" in PAGE
@@ -42,3 +48,40 @@ class TestTheEdgePanelSaysWhatItMeasures:
         assert "n_taken_symbols" in PAGE
         assert "the number of different stocks is the honest sample size" in PAGE
         assert "small sample" in PAGE
+
+
+class TestTheNovemberCleanUp:
+    """2026-11-11. The operator asked for three panels gone and a light page.
+    A panel removed from the markup but still rendered from script throws on
+    the missing element and takes the rest of its tab with it."""
+
+    def test_removed_panels_leave_no_markup_or_renderer_behind(self):
+        for gone in (
+            "Briefing",
+            "Kill switches",
+            "<h2>Compare",
+            'id="brief"',
+            'id="gDD"',
+            'id="cmpChart"',
+            "renderBrief",
+            "renderGauges",
+            "renderCompare",
+            "toggleCmp",
+        ):
+            assert gone not in PAGE, gone
+
+    def test_every_element_the_script_looks_up_exists(self):
+        import re
+
+        ids = set(re.findall(r'id="([A-Za-z0-9_]+)"', PAGE))
+        script = PAGE[PAGE.index('"use strict";') :]
+        looked_up = set(re.findall(r"\$\('([A-Za-z0-9_]+)'\)", script))
+        looked_up |= set(
+            re.findall(r"(?:chart|tween|rangeButtons|rebaseNote)\('([A-Za-z0-9_]+)'", script)
+        )
+        assert looked_up - ids == set()
+
+    def test_the_page_is_light_and_still_honours_reduced_motion(self):
+        assert "color-scheme:light" in PAGE and "color-scheme:dark" not in PAGE
+        assert "--panel:#ffffff" in PAGE
+        assert "prefers-reduced-motion:reduce" in PAGE

@@ -86,11 +86,11 @@ class TestThereIsExactlyOneRebase:
         assert "const rebase100=(series)=>" in APP
 
     def test_every_normalized_chart_goes_through_it(self) -> None:
-        """The Cockpit race and the compare chart — one call each (the
-        Live tab's sleeve race duplicated the race and was folded into it
-        on 2026-09-23)."""
+        """The Cockpit race is the one normalized chart left: the Live
+        tab's sleeve race was folded into it on 2026-09-23, and the compare
+        chart was removed at the operator's request on 2026-11-11."""
         uses = re.findall(r"rebase100\(", APP)
-        assert len(uses) == 2, uses
+        assert len(uses) == 1, uses
 
     def test_no_chart_still_rebases_on_its_own_first_point(self) -> None:
         """The literal defect, in each of its three spellings."""
@@ -120,7 +120,6 @@ class TestThereIsExactlyOneRebase:
         assert "const rebaseNote=" in APP
         assert "rebased to 100 at " in APP
         assert 'id="raceNote"' in APP
-        assert 'id="tickNote"' in APP
 
 
 class TestTheSeriesSayWhatTheyAre:

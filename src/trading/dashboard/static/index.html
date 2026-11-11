@@ -5,32 +5,34 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Trading Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
 <style>
-/* Single dark instrument-panel look, chosen on purpose: this page is read
-   at night next to a trading screen. Every colour is a token below. */
+/* Light, airy look (2026-11-11): white panels on a soft grey ground, one blue
+   accent, motion that says "live" without getting in the way. Every colour
+   is a token below; charts read these tokens, so the palette lives here. */
 :root{
-  color-scheme:dark;
-  --ground:#080d1a; --ground-2:#0b1224; --panel:#0f172b; --panel-2:#131d36;
-  --line:#1f2b48; --line-2:#2a3a60;
-  --text:#e4ebf7; --text-2:#b7c3db; --muted:#7e8cab; --faint:#4f5d7d;
-  --ice:#7cc4ff; --ice-dim:#3b6d99; --violet:#a78bfa; --teal:#5eead4;
-  --up:#3ddc97; --down:#ff6b81; --warn:#f6b94d; --crit:#ff4d6d; --info:#7cc4ff;
-  --display:"Chakra Petch","Rajdhani","Segoe UI",system-ui,sans-serif;
+  color-scheme:light;
+  --ground:#f5f7fb; --ground-2:#f3f5fa; --panel:#ffffff; --panel-2:#f8fafd;
+  --line:#e7eaf3; --line-2:#d3d9e8;
+  --text:#0f172a; --text-2:#334155; --muted:#64748b; --faint:#94a3b8;
+  --ice:#2563eb; --ice-dim:#93b4f5; --violet:#7c3aed; --teal:#0d9488;
+  --up:#059669; --down:#e11d48; --warn:#d97706; --crit:#dc2626; --info:#2563eb;
+  --display:"Space Grotesk","Segoe UI",system-ui,sans-serif;
   --sans:"IBM Plex Sans","Segoe UI",system-ui,-apple-system,sans-serif;
   --mono:"IBM Plex Mono","SFMono-Regular",Menlo,Consolas,monospace;
-  --r:10px;
+  --r:16px;
+  --shadow:0 1px 2px rgba(15,23,42,.04),0 8px 24px rgba(15,23,42,.06);
+  --shadow-up:0 2px 4px rgba(15,23,42,.05),0 18px 40px rgba(37,99,235,.13);
 }
 *{box-sizing:border-box}
 html,body{margin:0}
-body{background:var(--ground);color:var(--text);font:14px/1.45 var(--sans);
-  background-image:
-   radial-gradient(1200px 500px at 85% -10%,rgba(124,196,255,.10),transparent 60%),
-   radial-gradient(900px 400px at -10% 110%,rgba(167,139,250,.08),transparent 60%),
-   linear-gradient(rgba(124,196,255,.035) 1px,transparent 1px),
-   linear-gradient(90deg,rgba(124,196,255,.035) 1px,transparent 1px);
-  background-size:auto,auto,32px 32px,32px 32px;background-attachment:fixed;min-height:100vh}
+body{background:var(--ground);color:var(--text);font:14px/1.45 var(--sans);min-height:100vh}
+/* two slow colour washes behind everything */
+body::before,body::after{content:"";position:fixed;z-index:-1;border-radius:50%;filter:blur(90px);pointer-events:none}
+body::before{width:720px;height:720px;right:-180px;top:-260px;background:rgba(37,99,235,.16);animation:drift 26s ease-in-out infinite alternate}
+body::after{width:620px;height:620px;left:-220px;bottom:-240px;background:rgba(124,58,237,.12);animation:drift 32s ease-in-out infinite alternate-reverse}
+@keyframes drift{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(-70px,60px,0) scale(1.15)}}
 a{color:var(--ice)}
 .wrap{max-width:1480px;margin:0 auto;padding-inline:20px;padding-block:0 48px}
 .num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
@@ -38,7 +40,7 @@ a{color:var(--ice)}
 .pos{color:var(--up)} .neg{color:var(--down)} .warn{color:var(--warn)}
 /* ---------- top strip ---------- */
 header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;
-  background:rgba(8,13,26,.82);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  background:rgba(255,255,255,.78);backdrop-filter:saturate(1.4) blur(14px);border-bottom:1px solid var(--line)}
 .topin{max-width:1480px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .brand{font-family:var(--display);font-weight:600;letter-spacing:.08em;text-transform:uppercase;font-size:15px;display:flex;align-items:center;gap:10px}
 .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--up);box-shadow:0 0 12px var(--up)}
@@ -80,7 +82,7 @@ section.tab.on{display:block}
 .chart.tall{height:340px}.chart.short{height:180px}.chart.gauge{height:170px}
 .chipbtn{font:500 11px var(--mono);color:var(--muted);background:var(--ground-2);border:1px solid var(--line);border-radius:6px;padding:3px 8px;cursor:pointer}
 .chipbtn.on{color:var(--ground);background:var(--ice);border-color:var(--ice)}
-.chipbtn.sel{color:var(--text);border-color:var(--ice-dim);background:rgba(124,196,255,.12)}
+.chipbtn.sel{color:var(--text);border-color:var(--ice-dim);background:rgba(37,99,235,.12)}
 /* attention list */
 .alist{display:flex;flex-direction:column;gap:8px}
 .aitem{display:grid;grid-template-columns:4px 1fr;gap:10px;background:var(--ground-2);border:1px solid var(--line);border-radius:8px;padding:8px 10px 8px 0;overflow:hidden}
@@ -107,8 +109,8 @@ table.t th{font:600 10.5px var(--display);letter-spacing:.1em;text-transform:upp
 table.t th:first-child,table.t td:first-child{text-align:left}
 table.t td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
 table.t tr.clickable{cursor:pointer}
-table.t tr.clickable:hover td{background:rgba(124,196,255,.05)}
-table.t tr.focus td{background:rgba(124,196,255,.09)}
+table.t tr.clickable:hover td{background:rgba(37,99,235,.05)}
+table.t tr.focus td{background:rgba(37,99,235,.09)}
 .sym{font:600 13px var(--sans);color:var(--text)}
 .tag{display:inline-block;font:600 10px var(--display);letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--line-2);border-radius:4px;padding:1px 5px;color:var(--muted);margin-left:6px;vertical-align:1px}
 .lg{display:inline-block;width:10px;height:4px;border-radius:2px;margin-right:8px;vertical-align:3px}
@@ -134,11 +136,9 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 .ev i.s{background:var(--up)}.ev i.c{background:var(--down)}
 .statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px}
 .stat .v{font:500 20px var(--mono)}.stat .l{font:600 10.5px var(--display);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
-.read{margin-top:10px;padding:8px 10px;border-left:2px solid var(--ice);background:rgba(124,196,255,.05);border-radius:0 6px 6px 0;font-size:13px;color:var(--text-2);line-height:1.5}
+.read{margin-top:10px;padding:8px 10px;border-left:2px solid var(--ice);background:rgba(37,99,235,.05);border-radius:0 6px 6px 0;font-size:13px;color:var(--text-2);line-height:1.5}
 .read b{color:var(--text);font-weight:600}
 .read::before{content:"READ";font:600 10px var(--display);letter-spacing:.14em;color:var(--ice);margin-right:8px}
-.brief{font-size:14.5px;line-height:1.65;color:var(--text-2)}
-.brief b{color:var(--text)}
 .verdict{font:600 10.5px var(--display);letter-spacing:.08em;text-transform:uppercase}
 .banner{display:none;margin:12px auto 0;max-width:1480px;padding-inline:20px}
 .banner div{border:1px solid rgba(255,77,109,.45);background:rgba(255,77,109,.08);color:var(--text);border-radius:8px;padding:8px 12px;font-size:13px}
@@ -146,7 +146,7 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 .tempwrap{display:grid;grid-template-columns:minmax(200px,260px) 1fr;gap:16px;align-items:center}
 @media (max-width:640px){.tempwrap{grid-template-columns:1fr}}
 .comp{display:grid;grid-template-columns:minmax(120px,1fr) 2fr auto;gap:10px;align-items:center;font-size:12.5px;padding:5px 0}
-.comp .track{position:relative;height:8px;border-radius:4px;background:linear-gradient(90deg,rgba(61,220,151,.35),rgba(124,196,255,.15) 50%,rgba(255,107,129,.35))}
+.comp .track{position:relative;height:8px;border-radius:4px;background:linear-gradient(90deg,rgba(61,220,151,.35),rgba(37,99,235,.15) 50%,rgba(255,107,129,.35))}
 .comp .pin{position:absolute;top:-4px;width:4px;height:16px;border-radius:2px;background:var(--text)}
 /* macro + economy charts (restored 2026-09-27 from the v1 Macro / Economy tabs) */
 .chart.m{height:clamp(200px,calc(46vh - 150px),340px)}
@@ -161,12 +161,12 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 .playbtn{font:600 12px var(--display);letter-spacing:.08em;text-transform:uppercase;color:var(--up);background:rgba(61,220,151,.1);border:1px solid var(--up);border-radius:999px;padding:5px 14px;cursor:pointer}
 .playbtn:hover{background:rgba(61,220,151,.22)}
 #rrgScrub{flex:1;min-width:140px;accent-color:var(--up)}
-.rrgbox{position:relative;height:min(62vh,560px);min-height:380px;width:100%;border-radius:8px;overflow:hidden;background:radial-gradient(120% 120% at 50% 45%,#0c1428 0%,#070b16 100%)}
+.rrgbox{position:relative;height:min(62vh,560px);min-height:380px;width:100%;border-radius:8px;overflow:hidden;background:radial-gradient(120% 120% at 50% 45%,#ffffff 0%,#f1f4fb 100%);border:1px solid var(--line)}
 .rrgbox canvas{position:absolute;inset:0;width:100%;height:100%}
-.tip{position:absolute;pointer-events:none;display:none;background:rgba(11,18,36,.96);border:1px solid var(--line-2);border-radius:8px;padding:8px 11px;font-size:12px;line-height:1.5;z-index:5;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+.tip{position:absolute;pointer-events:none;display:none;background:rgba(255,255,255,.97);border:1px solid var(--line-2);border-radius:8px;padding:8px 11px;font-size:12px;line-height:1.5;z-index:5;box-shadow:0 10px 30px rgba(15,23,42,.14)}
 .tmap{position:relative;height:min(46vh,420px);min-height:300px;border-radius:8px;overflow:hidden}
-.tmap .tile2{position:absolute;overflow:hidden;border:1px solid rgba(8,13,26,.9);border-radius:5px;display:flex;flex-direction:column;justify-content:center;align-items:center;font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
-.tmap .tile2:hover{filter:brightness(1.25);z-index:2}
+.tmap .tile2{position:absolute;overflow:hidden;border:2px solid var(--panel);border-radius:5px;display:flex;flex-direction:column;justify-content:center;align-items:center;font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
+.tmap .tile2{transition:transform .2s ease,filter .2s ease}.tmap .tile2:hover{filter:saturate(1.3);transform:scale(1.02);z-index:2}
 .tmap .tile2 b{font-size:13px;letter-spacing:.03em}.tmap .tile2 span{font-size:11px;opacity:.85}.tmap .tile2 i{font:normal 10px var(--sans);opacity:.65}
 .regribbon{display:flex;height:26px;border-radius:6px;overflow:hidden;margin:10px 0 2px}
 .regribbon i{flex:1;min-width:1px}
@@ -181,7 +181,47 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 .qcell h3{margin:0 0 5px;font:600 10.5px var(--display);letter-spacing:.1em;text-transform:uppercase}
 .qcell .qs{display:flex;justify-content:space-between;margin:2px 0;font-family:var(--mono)}
 .qcell .qs .dq{color:var(--muted);font-size:10.5px}
-@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ---------- surfaces + motion (2026-11-11) ---------- */
+.panel{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);padding:18px 20px;
+  transition:transform .28s cubic-bezier(.2,.7,.2,1),box-shadow .28s ease,border-color .28s ease}
+.panel:hover{transform:translateY(-3px);box-shadow:var(--shadow-up);border-color:var(--line-2)}
+.panel.lead{background:linear-gradient(180deg,#ffffff 0%,#fbfaff 100%);border-color:rgba(124,58,237,.22)}
+.panel.lead h2{color:var(--violet)}
+.panel h2{color:var(--text);font-size:12.5px}
+section.tab.on .panel{animation:rise .6s cubic-bezier(.2,.7,.2,1) backwards}
+section.tab.on .panel:nth-child(1){animation-delay:.02s}section.tab.on .panel:nth-child(2){animation-delay:.06s}
+section.tab.on .panel:nth-child(3){animation-delay:.10s}section.tab.on .panel:nth-child(4){animation-delay:.14s}
+section.tab.on .panel:nth-child(5){animation-delay:.18s}section.tab.on .panel:nth-child(6){animation-delay:.22s}
+section.tab.on .panel:nth-child(7){animation-delay:.26s}section.tab.on .panel:nth-child(8){animation-delay:.30s}
+section.tab.on .panel:nth-child(n+9){animation-delay:.34s}
+@keyframes rise{from{opacity:0;transform:translateY(16px) scale(.985)}to{opacity:1;transform:none}}
+.kpi .value{font-size:30px;font-weight:500;background:linear-gradient(90deg,var(--text),#1d4ed8);-webkit-background-clip:text;background-clip:text;color:transparent}
+.kpi .value small,.kpi .value span{-webkit-text-fill-color:currentColor}
+.kpi .value .pos{color:var(--up)}.kpi .value .neg{color:var(--down)}.kpi .value small{color:var(--muted)}
+.stat .v{font-size:24px}
+.chip{background:var(--panel);box-shadow:0 1px 2px rgba(15,23,42,.05);transition:transform .2s ease,box-shadow .2s ease}
+.chip:hover{transform:translateY(-1px);box-shadow:0 6px 14px rgba(15,23,42,.08)}
+.brand .dot{position:relative;box-shadow:none}
+.brand .dot.halt,.brand .dot.err{box-shadow:none}
+.brand .dot::after{content:"";position:absolute;inset:0;border-radius:50%;background:inherit;animation:ping 2s cubic-bezier(0,0,.2,1) infinite}
+.lamp.ok{box-shadow:0 0 0 0 rgba(5,150,105,.5);animation:glow 2.4s ease-out infinite}
+@keyframes ping{0%{transform:scale(1);opacity:.7}80%,100%{transform:scale(2.8);opacity:0}}
+@keyframes glow{0%{box-shadow:0 0 0 0 rgba(5,150,105,.45)}70%,100%{box-shadow:0 0 0 6px rgba(5,150,105,0)}}
+nav.tabs button{border-radius:999px;transition:color .2s ease,background .25s ease,box-shadow .25s ease,transform .2s ease}
+nav.tabs button:hover{color:var(--text);transform:translateY(-1px)}
+nav.tabs button.on{color:#fff;background:linear-gradient(135deg,#2563eb,#7c3aed);border-color:transparent;box-shadow:0 8px 20px rgba(37,99,235,.28)}
+.chipbtn{background:var(--panel);transition:all .18s ease}.chipbtn:hover{border-color:var(--ice-dim);color:var(--text)}
+.chipbtn.on{color:#fff}
+.read{background:rgba(37,99,235,.045);border-left-width:3px;border-radius:0 10px 10px 0;padding:10px 12px}
+.aitem,.voice,.radrow{background:var(--panel-2);transition:transform .2s ease,box-shadow .2s ease}
+.aitem:hover,.voice:hover,.radrow:hover{transform:translateX(3px);box-shadow:0 6px 16px rgba(15,23,42,.07)}
+table.t tr{transition:background .15s ease}
+table.t tbody tr:hover td{background:rgba(37,99,235,.04)}
+.cyc .bar{transform-origin:bottom;animation:grow .7s cubic-bezier(.2,.7,.2,1) backwards}
+@keyframes grow{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+.wbar,.bar52 .now{transition:width .6s ease,left .6s ease}
+.banner div{background:rgba(220,38,38,.06);border-color:rgba(220,38,38,.35)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
@@ -204,31 +244,22 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 <!-- ================= COCKPIT ================= -->
 <section class="tab on" id="tab-cockpit">
  <div class="grid">
-  <div class="panel c12"><h2>Briefing <span class="sub">what the numbers below add up to</span></h2><div class="brief" id="brief"></div></div>
   <div class="panel kpi c3"><div class="label">Account NetLiq <span class="envlbl">paper</span></div><div class="value" id="kAcct">–</div><div class="delta" id="kAcctD"></div><div class="spark" id="kAcctSpark"></div></div>
   <div class="panel kpi c3"><div class="label">Desk book · managed</div><div class="value" id="kDesk">–</div><div class="delta" id="kDeskD"></div></div>
   <div class="panel kpi c3"><div class="label">Cash</div><div class="value" id="kCash">–</div><div class="delta" id="kCashD"></div></div>
   <div class="panel kpi c3"><div class="label">P&amp;L vs money put in</div><div class="value" id="kRet">–</div><div class="delta" id="kRetD"></div></div>
 
+  <div class="panel c12 lead">
+   <h2>Agent PM vs SPY <span class="sub">the simulation, every decision executed as made · USD</span></h2>
+   <div class="statgrid" id="pmVsStats"></div>
+   <div class="chart tall" id="pmVsChart"></div>
+   <div class="read" id="rdPmVs"></div>
+  </div>
   <div class="panel c12">
    <h2>Performance <span class="sub" id="perfSub">time-weighted: deposits, withdrawals and your own trades in pinned names removed</span><span class="right" id="perfCcy"></span></h2>
    <div class="tscroll"><table class="t" id="perfT"></table></div>
    <div class="note" id="perfNote"></div>
    <div class="read" id="rdPerf"></div>
-  </div>
-  <div class="panel c8">
-   <h2>Kill switches <span class="sub" id="ksSub"></span></h2>
-   <div class="grid" style="gap:8px">
-    <div class="c4"><div class="chart gauge" id="gDD"></div></div>
-    <div class="c4"><div class="chart gauge" id="gDay"></div></div>
-    <div class="c4"><div class="chart gauge" id="gGross"></div></div>
-   </div>
-   <div class="note" id="ksNote"></div>
-   <div class="read" id="rdKs"></div>
-  </div>
-  <div class="panel c4">
-   <h2>Needs attention</h2>
-   <div class="alist" id="attention"></div>
   </div>
   <div class="panel c8">
    <h2>Equity (<span class="envlbl">paper</span>) <span class="sub" id="eqret"></span>
@@ -237,8 +268,8 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <div class="read" id="rdEq"></div>
   </div>
   <div class="panel c4">
-   <h2>Coming up <span class="sub">server-computed, New York time</span></h2>
-   <div class="sched" id="sched"></div>
+   <h2>Needs attention</h2>
+   <div class="alist" id="attention"></div>
   </div>
   <div class="panel c8">
    <h2>Race · rebased to 100 <span class="sub" id="raceSub"></span><span class="right" id="raceRanges"></span></h2>
@@ -247,9 +278,8 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <div class="read" id="rdRace"></div>
   </div>
   <div class="panel c4">
-   <h2>Today's movers <span class="sub" id="movSub"></span></h2>
-   <div class="tscroll"><table class="t" id="movT"></table></div>
-   <div class="read" id="rdMov"></div>
+   <h2>Coming up <span class="sub">server-computed, New York time</span></h2>
+   <div class="sched" id="sched"></div>
   </div>
   <div class="panel c8">
    <h2>Daily P&amp;L <span class="sub" id="pnlSub"></span></h2>
@@ -257,14 +287,19 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
    <div class="read" id="rdPnl"></div>
   </div>
   <div class="panel c4">
-   <h2>Costs <span class="sub">broker-recorded net commissions</span></h2>
-   <div id="lvCosts"></div>
+   <h2>Today's movers <span class="sub" id="movSub"></span></h2>
+   <div class="tscroll"><table class="t" id="movT"></table></div>
+   <div class="read" id="rdMov"></div>
   </div>
-  <div class="panel c12">
+  <div class="panel c8">
    <h2>Cycle history <span class="sub">last 16 runs · bar height = orders sent</span></h2>
    <div class="ribbon" id="ribbon"></div>
    <div class="legend"><span><i style="background:var(--up)"></i>traded</span><span><i style="background:var(--ice-dim)"></i>no orders needed</span><span><i style="background:var(--warn)"></i>halted / review only</span><span><i style="background:var(--crit)"></i>error</span><span><i style="background:var(--violet)"></i>skipped (lock)</span></div>
    <div class="read" id="rdCyc"></div>
+  </div>
+  <div class="panel c4">
+   <h2>Costs <span class="sub">broker-recorded net commissions</span></h2>
+   <div id="lvCosts"></div>
   </div>
  </div>
 </section>
@@ -273,21 +308,13 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
 <section class="tab" id="tab-portfolio">
  <div class="grid">
   <div class="panel c7">
-   <h2>Holdings <span class="sub">click a row to chart it · pinned = yours, never traded by the desk</span></h2>
+   <h2>Holdings <span class="sub">pinned = yours, never traded by the desk</span></h2>
    <div class="tscroll"><table class="t" id="holdT"></table></div>
    <div class="read" id="rdHold"></div>
   </div>
   <div class="panel c5">
    <h2>Allocation <span class="sub" id="allocSub"></span></h2>
    <div class="chart" id="allocChart"></div>
-  </div>
-
-  <div class="panel c12">
-   <h2>Compare <span class="sub">pick symbols · every line rebased on the same day</span><span class="right" id="cmpRanges"></span></h2>
-   <div id="cmpPick" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
-   <div class="chart tall" id="cmpChart"></div>
-   <div class="note" id="tickNote"></div>
-   <div class="read" id="rdCmp"></div>
   </div>
 
   <div class="panel c6">
@@ -297,12 +324,6 @@ table.t tr.focus td{background:rgba(124,196,255,.09)}
   <div class="panel c6">
    <h2>Agent PM <span class="sub" id="pmSub"></span></h2>
    <div id="pmBox"></div>
-  </div>
-  <div class="panel c12">
-   <h2>Agent PM vs SPY <span class="sub">the simulation, every decision executed as made · USD</span></h2>
-   <div class="statgrid" id="pmVsStats"></div>
-   <div class="chart" id="pmVsChart"></div>
-   <div class="read" id="rdPmVs"></div>
   </div>
 
  </div>
@@ -448,7 +469,7 @@ const cls=(x)=>x==null?'':(x>=0?'pos':'neg');
 const css=(v)=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const C={};
 ['--text','--text-2','--muted','--faint','--line','--line-2','--ice','--ice-dim','--violet','--teal','--up','--down','--warn','--crit','--panel','--ground-2'].forEach(k=>C[k.slice(2)]=css(k));
-const PALETTE=[C.ice,C.violet,C.teal,C.warn,'#f472b6','#a3e635','#fb923c','#60a5fa','#e879f9','#34d399','#fbbf24','#94a3b8'];
+const PALETTE=[C.ice,C.violet,C.teal,C.warn,'#db2777','#65a30d','#ea580c','#0284c7','#c026d3','#059669','#ca8a04','#64748b'];
 const NYTZ='America/New_York';
 const fmtNY=(iso,opt)=>{try{return new Intl.DateTimeFormat('en-GB',Object.assign({timeZone:NYTZ,weekday:'short',hour:'2-digit',minute:'2-digit'},opt||{})).format(new Date(iso));}catch(e){return iso;}};
 const ago=(iso)=>{if(!iso)return '–';const s=(Date.now()-new Date(iso).getTime())/1000;
@@ -468,8 +489,8 @@ const chart=(id)=>{const el=$(id);if(!el||typeof echarts==='undefined')return nu
  if(!charts[id])charts[id]=echarts.init(el,null,{renderer:'canvas'});return charts[id];};
 window.addEventListener('resize',()=>Object.values(charts).forEach(c=>c.resize()));
 const AX={axisLine:{lineStyle:{color:C.line}},axisLabel:{color:C.muted,fontFamily:'IBM Plex Mono',fontSize:10},splitLine:{lineStyle:{color:C.line,opacity:.6}},axisTick:{show:false}};
-const TT={trigger:'axis',backgroundColor:C.panel,borderColor:C['line-2'],textStyle:{color:C.text,fontSize:12},axisPointer:{type:'cross',lineStyle:{color:C['ice-dim']},crossStyle:{color:C['ice-dim']},label:{backgroundColor:C['line-2']}}};
-const base=(extra)=>Object.assign({backgroundColor:'transparent',animationDuration:500,textStyle:{fontFamily:'IBM Plex Sans'},grid:{left:48,right:16,top:24,bottom:36},tooltip:TT},extra);
+const TT={trigger:'axis',backgroundColor:C.panel,extraCssText:'box-shadow:0 10px 30px rgba(15,23,42,.12);border-radius:10px;',borderColor:C['line-2'],textStyle:{color:C.text,fontSize:12},axisPointer:{type:'cross',lineStyle:{color:C['ice-dim']},crossStyle:{color:C['ice-dim']},label:{backgroundColor:C['line-2']}}};
+const base=(extra)=>Object.assign({backgroundColor:'transparent',animationDuration:900,animationEasing:'cubicOut',textStyle:{fontFamily:'IBM Plex Sans'},grid:{left:48,right:16,top:24,bottom:36},tooltip:TT},extra);
 
 // --------------------------------------------- normalization (shared, tested)
 // Keep in step with FLOW_THRESHOLD in dashboard/live.py.
@@ -528,14 +549,6 @@ const rebaseNote=(id,r,extra)=>{
   +' (fewer than two marks in this window, or a zero base)');
  if(extra)bits.push(extra);
  el.textContent=bits.join(' · ');};
-const rebasedLines=(id,r)=>{const c=chart(id);if(!c)return;
- c.setOption(base({tooltip:Object.assign({},TT,{valueFormatter:(v)=>v==null?'–':Number(v).toFixed(1)}),legend:{top:0,textStyle:{color:C['text-2'],fontSize:11},icon:'roundRect',itemWidth:10,itemHeight:4},grid:{left:44,right:14,top:30,bottom:56},
-  xAxis:Object.assign({type:'category',data:r.dates,boundaryGap:false},AX),
-  yAxis:Object.assign({type:'value',scale:true},AX),
-  dataZoom:[{type:'inside'},{type:'slider',height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(124,196,255,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
-  series:r.sets.map(s=>({name:s.label,type:'line',showSymbol:false,connectNulls:true,data:s.data,
-   lineStyle:{width:s.label==='SPY'?1.2:1.8,color:s.borderColor,type:(s.borderDash||[]).length?'dashed':'solid'},itemStyle:{color:s.borderColor},
-   markLine:{silent:true,symbol:'none',lineStyle:{color:C.faint,type:'dotted'},label:{show:false},data:[{yAxis:100}]}}))}),true);};
 // Capital flows stated with /deposit and /withdraw (runtime/capital_flows).
 // The FLOW_THRESHOLD guard above only catches >25% jumps; a 3% top-up used
 // to be read as a 3% gain. Stated flows are removed on their own day:
@@ -572,7 +585,7 @@ const rangeButtons=(id,cur,on)=>{const el=$(id);if(!el)return;el.innerHTML=RANGE
 
 // ------------------------------------------------------------------ state
 let D={};
-const UI={tab:'cockpit',perfCcy:null,raceRange:'all',raceOff:new Set(),eqRange:'1y',cmpRange:'6m',cmpSel:null,ecRange:'all',holdSort:'value_base',holdDir:-1};
+const UI={tab:'cockpit',perfCcy:null,raceRange:'all',raceOff:new Set(),eqRange:'1y',ecRange:'all',holdSort:'value_base',holdDir:-1};
 try{const h=location.hash.replace('#','');if(h==='macro')UI.tab='market';else if(['cockpit','portfolio','market','rotation','economy','agents'].includes(h))UI.tab=h;}catch(e){}
 
 function setTab(t){UI.tab=t;
@@ -615,69 +628,37 @@ function nyseSession(){
  if(!wk)return 'NYSE closed (weekend)';if(m>=570&&m<960)return 'NYSE open';if(m>=240&&m<570)return 'pre-market';if(m>=960&&m<1200)return 'after-hours';return 'NYSE closed';}
 
 // ------------------------------------------------------------------ cockpit
+// Headline numbers glide to their value instead of snapping: a count-up on
+// first paint, a short slide on each 60-second refresh. Skipped when the tab
+// is hidden or the reader asked for reduced motion.
+const tweens={};
+function tween(id,to,render){
+ const el=$(id);if(!el)return;
+ if(to==null||!isFinite(to)){el.innerHTML='–';delete tweens[id];return;}
+ const from=tweens[id]==null?to*0.9:tweens[id];tweens[id]=to;
+ const still=document.hidden||from===to||(window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches);
+ if(still){el.innerHTML=render(to);return;}
+ const t0=performance.now(),dur=900;
+ const step=(now)=>{if(tweens[id]!==to)return;const q=Math.min(1,(now-t0)/dur),e=1-Math.pow(1-q,3);
+  el.innerHTML=render(q<1?from+(to-from)*e:to);if(q<1)requestAnimationFrame(step);};
+ requestAnimationFrame(step);}
 function renderCockpit(){
  const risk=D.risk||{},ctx=D.context||{},acct=ctx.account||{};const B=book();const ccy=B.ccy;
  const acctEq=risk.account_equity??acct.equity;
- $('kAcct').innerHTML=acctEq==null?'–':`${num(acctEq)}<small>${esc(ccy)}</small>`;
+ tween('kAcct',acctEq,(v)=>`${num(v)}<small>${esc(ccy)}</small>`);
  const today=(D.equity_today||[]);const prevClose=B.last?B.last.account:null;
  const lastIntra=today.length?+today[today.length-1].v:null;
  const dayChg=(prevClose&&lastIntra)?lastIntra/prevClose-1:null;
  $('kAcctD').innerHTML=dayChg==null?'<span class="muted">no intraday marks yet</span>':`<span class="${cls(dayChg)}">${pct(dayChg,2)}</span> <span class="muted">today</span>`;
  $('kAcctSpark').innerHTML=spark(B.days.slice(-90).map(p=>p.account),260,34,C.ice);
- $('kDesk').innerHTML=risk.desk_equity==null?'–':`${num(risk.desk_equity)}<small>${esc(ccy)}</small>`;
+ tween('kDesk',risk.desk_equity,(v)=>`${num(v)}<small>${esc(ccy)}</small>`);
  const pinned=(risk.pinned||[]);
  $('kDeskD').innerHTML=pinned.length?`<span class="muted">excludes ${pinned.length} pinned: ${esc(pinned.slice(0,5).join(', '))}${pinned.length>5?'…':''}</span>`:'<span class="muted">no pinned holdings</span>';
- $('kCash').innerHTML=risk.cash_pct==null?'–':pctU(risk.cash_pct,1);
+ tween('kCash',risk.cash_pct,(v)=>pctU(v,1));
  $('kCashD').innerHTML=acct.cash!=null?`<span class="muted">${num(acct.cash)} ${esc(ccy)} of the account</span>`:'';
  $('kRet').innerHTML=B.pnl==null?'–':`<span class="${cls(B.pnl)}">${B.pnl>=0?'+':'−'}${num(Math.abs(B.pnl))}</span><small>${esc(ccy)}</small>`;
  $('kRetD').innerHTML=B.last?`<span class="${cls(B.pnlPct)}">${pct(B.pnlPct,1)}</span> <span class="muted">on ${num(B.last.contributed)} put in since ${esc(B.days[0].t)} · time-weighted ${pct(B.twr,1)}</span>`:'';
- renderPerf();renderGauges();renderAttention();renderEquity();renderSchedule();renderRace();renderMovers();renderPnl();renderRibbon();renderCosts();renderBrief();
-}
-function renderBrief(){
- const st=D.status||{},r=D.risk||{},B=book(),cyc=D.cycles||[],pos=D.positions||[],ccy=B.ccy;
- const out=[];
- const next=(D.schedule||[]).find(j=>j.key==='cycle');
- if(st.halted)out.push(`The desk is <b>halted</b> (${esc(stripMd(st.halt_reason)||'no reason recorded')}): nothing new trades until you <b>/resume</b>.`);
- else out.push(`The desk is <b>running</b>${next?`; next cycle <b>${esc(fmtNY(next.at))} New York</b>`:''}${st.require_approval?' and it will wait for your approval':''}.`);
- if(B.last)out.push(`Your account is <b>${money(B.last.account,ccy)}</b>, ${B.pnl>=0?'up':'down'} <b>${money(Math.abs(B.pnl),ccy)}</b> (${pct(B.pnlPct,1)}) against the <b>${money(B.last.contributed,ccy)}</b> put in since ${esc(B.days[0].t)}${B.hist.flex_first?' (IBKR history)':' (when the bot started recording — import your IBKR history for the full picture)'}.`);
- const pinnedVal=pos.filter(p=>p.pinned).reduce((s,p)=>s+(p.value_base||0),0);const deskPos=pos.filter(p=>!p.pinned);
- if(r.desk_equity!=null)out.push(`The system manages <b>${money(r.desk_equity,ccy)}</b>${deskPos.length?` across ${deskPos.length} position${deskPos.length>1?'s':''}`:' — all cash'}; ${pos.length-deskPos.length} pinned holding${pos.length-deskPos.length===1?' is':'s are'} yours (${money(pinnedVal,ccy)}) and never traded by it.`);
- const lastTrade=cyc.find(c=>(c.orders||0)>0);const since=lastTrade?cyc.indexOf(lastTrade):cyc.length;
- if(cyc.length)out.push(lastTrade?`Last cycle that traded: <b>${esc(fmtNY(lastTrade.t,{weekday:undefined,day:'2-digit',month:'short',hour:undefined,minute:undefined}))}</b>${since?`, ${since} cycle${since>1?'s':''} ago`:''}.`:'No recorded cycle has traded yet.');
- if(B.candidates.length)out.push(`<b>${B.candidates.length}</b> day${B.candidates.length>1?'s look':' looks'} like an unrecorded deposit or withdrawal — see Needs attention.`);
- $('brief').innerHTML=out.join(' ');
-}
-function gauge(id,title,valueFrac,limitFrac,display,sub){
- const c=chart(id);if(!c)return;
- const used=(valueFrac==null||!limitFrac)?null:Math.max(0,Math.min(1.2,Math.abs(valueFrac)/limitFrac));
- const col=used==null?C.faint:used>=.8?C.crit:used>=.5?C.warn:C.up;
- c.setOption({backgroundColor:'transparent',series:[{type:'gauge',startAngle:210,endAngle:-30,min:0,max:100,radius:'92%',center:['50%','58%'],
-  progress:{show:true,width:10,itemStyle:{color:col,shadowColor:col,shadowBlur:10}},
-  axisLine:{lineStyle:{width:10,color:[[1,C.line]]}},axisTick:{show:false},splitLine:{show:false},axisLabel:{show:false},pointer:{show:false},
-  anchor:{show:false},title:{show:true,offsetCenter:[0,'62%'],color:C.muted,fontSize:11,fontFamily:'Chakra Petch'},
-  detail:{valueAnimation:true,offsetCenter:[0,'2%'],fontSize:22,fontFamily:'IBM Plex Mono',color:C.text,formatter:()=>display+'\n{s|'+sub+'}',rich:{s:{fontSize:10.5,color:C.muted,fontFamily:'IBM Plex Mono',padding:[6,0,0,0]}}},
-  data:[{value:used==null?0:+(100*Math.min(used,1)).toFixed(1),name:title}]}]},true);}
-function renderGauges(){
- const r=D.risk||{},L=r.limits||{};
- gauge('gDD','DRAWDOWN FROM PEAK',r.drawdown_pct,L.max_drawdown_pct,r.drawdown_pct==null?'n/a':pct(r.drawdown_pct,2),'limit −'+pctU(L.max_drawdown_pct,1));
- gauge('gDay','TODAY vs OPEN',r.day_pct!=null&&r.day_pct<0?r.day_pct:0,L.max_daily_loss_pct,r.day_pct==null?'n/a':pct(r.day_pct,2),'limit −'+pctU(L.max_daily_loss_pct,1));
- gauge('gGross','GROSS EXPOSURE',r.gross_exposure,L.max_gross_exposure,r.gross_exposure==null?'n/a':pctU(r.gross_exposure,0),'cap '+pctU(L.max_gross_exposure,0));
- const bits=[];
- if(r.baseline_scope)bits.push(`baseline: <b>${esc(r.baseline_scope)}</b> book`);
- if(r.hwm)bits.push(`peak ${num(r.hwm)} ${esc(r.currency||'')}`);
- if(r.baseline_session)bits.push(`day open captured ${esc(r.baseline_session)}`);
- $('ksSub').innerHTML=bits.join(' · ');
- $('ksNote').innerHTML=r.note?`<span class="warn">⚠ ${esc(r.note)}</span>`:'';
- const used=(v,l)=>v==null||!l?null:Math.abs(Math.min(0,v))/l;
- const u1=used(r.drawdown_pct,L.max_drawdown_pct),u2=used(r.day_pct,L.max_daily_loss_pct);
- let t;
- if(r.note)t='The switches cannot measure the desk right now, so the risk manager keeps new cycles review-only until the baseline is fixed (<b>/baseline</b>).';
- else if(u1==null)t='No valid baseline yet — the first NYSE open after a restart stamps it.';
- else{const worst=Math.max(u1||0,u2||0);
-  t=`The desk is ${pct(r.drawdown_pct,1)} from its peak (${pctU(u1,0)} of the ${pctU(L.max_drawdown_pct,0)} halt) and ${pct(r.day_pct,2)} today (${pctU(u2,0)} of the ${pctU(L.max_daily_loss_pct,1)} daily halt). `+
-   (worst>=.8?'<b>Close to a halt.</b>':worst>=.5?'<b>Over half-way to a halt</b> — watch it.':'Plenty of room.')+
-   (r.gross_exposure!=null?` Invested ${pctU(r.gross_exposure,0)} of the desk.`:'');}
- $('rdKs').innerHTML=t+' <span class="faint">Measured on the desk book, as the risk manager measures it; your pinned holdings are excluded.</span>';
+ renderPmVsSpy();renderPerf();renderAttention();renderEquity();renderSchedule();renderRace();renderMovers();renderPnl();renderRibbon();renderCosts();
 }
 function renderAttention(){
  const items=[];const st=D.status||{},w=D.watch||{},p=D.pending||{},ops=D.ops||{},ctx=D.context||{},risk=D.risk||{};
@@ -712,7 +693,7 @@ function renderEquity(){
   xAxis:Object.assign({type:'category',data:rows.map(p=>p.t),boundaryGap:false},AX),
   yAxis:Object.assign({type:'value',scale:true,name:ccy,nameTextStyle:{color:C.muted,fontSize:10}},AX,{axisLabel:{color:C.muted,fontSize:10,fontFamily:'IBM Plex Mono',formatter:(v)=>kfmt(v)}}),
   axisPointer:{label:{formatter:(p)=>p.axisDimension==='y'?kfmt(p.value):p.value}},
-  dataZoom:[{type:'inside'},{type:'slider',height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(124,196,255,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
+  dataZoom:[{type:'inside'},{type:'slider',height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(37,99,235,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
   series:[{type:'line',name:'Account NetLiq',showSymbol:false,data:rows.map(p=>p.account),lineStyle:{width:2,color:col},itemStyle:{color:col},
     areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:col+'40'},{offset:1,color:col+'00'}])}},
    {type:'line',name:'Money put in',step:'end',showSymbol:false,data:rows.map(p=>+p.contributed.toFixed(2)),lineStyle:{width:1.2,color:C.muted,type:'dashed'},itemStyle:{color:C.muted}}]
@@ -767,7 +748,7 @@ function renderPortfolio(){
  const ccy=(D.risk||{}).currency||'';
  const mxW=Math.max(.01,...rows.map(r=>r.weight||0));
  $('holdT').innerHTML=`<thead><tr>${cols.map(([k,l])=>`<th data-k="${k}">${l}${UI.holdSort===k?(UI.holdDir>0?' ▲':' ▼'):''}</th>`).join('')}</tr></thead><tbody>`+
-  (rows.length?rows.map(r=>`<tr class="clickable${UI.cmpSel&&UI.cmpSel.includes(r.symbol)?' focus':''}" data-sym="${esc(r.symbol)}">
+  (rows.length?rows.map(r=>`<tr data-sym="${esc(r.symbol)}">
    <td><span class="sym">${esc(r.symbol)}</span>${r.pinned?'<span class="tag pin">pinned</span>':''}<div class="faint" style="font:11px var(--mono)">${num(r.qty)} @ ${num(r.mark,2)} ${esc(r.currency)}</div></td>
    <td>${num(r.value_base)} <span class="faint">${esc(ccy)}</span></td>
    <td><span class="wbar" style="width:${Math.round(46*(r.weight||0)/mxW)}px"></span>${pctU(r.weight,1)}</td>
@@ -776,14 +757,13 @@ function renderPortfolio(){
    <td class="${r.stop_distance_pct!=null&&r.stop_distance_pct<.04?'warn':''}">${r.stop_distance_pct==null?'<span class="faint">–</span>':pct(-r.stop_distance_pct,1)}</td>
    <td>${spark(tickerSeries(r.symbol).map(p=>+p.v),96,24,(retOver(tickerSeries(r.symbol),60)??0)>=0?C.up:C.down)}</td></tr>`).join(''):`<tr><td colspan="7" class="empty">no positions</td></tr>`)+'</tbody>';
  $('holdT').querySelectorAll('th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(k==='spark')return;UI.holdDir=UI.holdSort===k?-UI.holdDir:-1;UI.holdSort=k;renderPortfolio();});
- $('holdT').querySelectorAll('tr.clickable').forEach(tr=>tr.onclick=()=>{toggleCmp(tr.dataset.sym,true);});
  const tot=rows.reduce((s2,r)=>s2+(r.value_base||0),0);const pinN=rows.filter(r=>r.pinned).length;
  const big=rows.slice().sort((a,b)=>(b.weight||0)-(a.weight||0))[0];
  const best=rows.slice().sort((a,b)=>(b.unrealized_pct??-9)-(a.unrealized_pct??-9))[0],worst=rows.slice().sort((a,b)=>(a.unrealized_pct??9)-(b.unrealized_pct??9))[0];
  const nearStop=rows.filter(r=>r.stop_distance_pct!=null&&r.stop_distance_pct<.05);
  $('rdHold').innerHTML=rows.length?`${rows.length} positions worth ${money(tot,ccy)}; <b>${pinN}</b> pinned (yours, never traded by the desk). Largest: <b>${esc(big.symbol)}</b> at ${pctU(big.weight,1)} of the account. Best open P&L ${esc(best.symbol)} ${pct(best.unrealized_pct,0)}, worst ${esc(worst.symbol)} ${pct(worst.unrealized_pct,0)}.`+
   (nearStop.length?` <span class="warn">Within 5% of a trailing stop: ${esc(nearStop.map(r=>r.symbol).join(', '))}.</span>`:' No position is near a trailing stop.'):'No positions.';
- renderAlloc(rows);renderCompare();renderWatch();renderPM();renderPmVsSpy();
+ renderAlloc(rows);renderWatch();renderPM();
 }
 function renderAlloc(rows){
  const r=D.risk||{};const bySec={};let tot=0;
@@ -798,33 +778,13 @@ function renderAlloc(rows){
   series:[{type:'pie',radius:['52%','78%'],center:['34%','50%'],avoidLabelOverlap:true,label:{show:false},itemStyle:{borderColor:C.panel,borderWidth:2},data}]},true);
 }
 function cmpUniverse(){const t=D.tickers||{};const held=t.held||[],wl=t.watchlist||[];return {held,wl,all:[...new Set([...held,...wl])]};}
-function toggleCmp(sym,only){const u=cmpUniverse();if(!UI.cmpSel)UI.cmpSel=u.held.slice(0,4);
- if(only&&!UI.cmpSel.includes(sym))UI.cmpSel=[...UI.cmpSel,sym];else if(!only)UI.cmpSel=UI.cmpSel.includes(sym)?UI.cmpSel.filter(s=>s!==sym):[...UI.cmpSel,sym];
- renderCompare();if(only){const el=$('cmpChart');el&&el.scrollIntoView({behavior:'smooth',block:'center'});}}
-function renderCompare(){
- const u=cmpUniverse();if(!UI.cmpSel)UI.cmpSel=u.held.slice(0,4).concat(u.held.length?[]:u.wl.slice(0,3));
- $('cmpPick').innerHTML=u.all.map(s=>`<button class="chipbtn${UI.cmpSel.includes(s)?' sel':''}" data-s="${esc(s)}">${esc(s)}${u.held.includes(s)?'':' ◌'}</button>`).join('')+
-  `<button class="chipbtn${UI.cmpSel.includes('SPY')?' sel':''}" data-s="SPY">SPY</button>`;
- $('cmpPick').querySelectorAll('button').forEach(b=>b.onclick=()=>toggleCmp(b.dataset.s,false));
- rangeButtons('cmpRanges',UI.cmpRange,(r)=>{UI.cmpRange=r;renderCompare();});
- const cut=cutFor(UI.cmpRange);const spy=((D.live||{}).spy||[]).map(p=>({t:String(p.t).slice(0,10),v:+p.v}));
- const series=UI.cmpSel.map((s,i)=>({label:s,pts:(s==='SPY'?spy:tickerSeries(s).map(p=>({t:String(p.t).slice(0,10),v:+p.v}))).filter(p=>!cut||p.t>=cut),color:s==='SPY'?C.muted:PALETTE[i%PALETTE.length],dash:u.held.includes(s)||s==='SPY'?[]:[4,3]}));
- const r=rebase100(series);
- rebaseNote('tickNote',r,'solid = held, dashed = watchlist; wheel or drag the bar below to zoom');
- rebasedLines('cmpChart',r);
- const endV=r.sets.map(x=>({l:x.label,v:[...x.data].reverse().find(v=>v!=null)})).filter(x=>x.v!=null).sort((a,b)=>b.v-a.v);
- const spyE=endV.find(x=>x.l==='SPY');
- $('rdCmp').innerHTML=endV.length?`Since ${esc(r.start||'')}: best <b>${esc(endV[0].l)}</b> ${pct(endV[0].v/100-1,1)}, worst <b>${esc(endV[endV.length-1].l)}</b> ${pct(endV[endV.length-1].v/100-1,1)}`+
-  (spyE?`; SPY ${pct(spyE.v/100-1,1)}. ${endV.filter(x=>x.l!=='SPY'&&x.v>spyE.v).length} of ${endV.length-1} beat the index.`:'.'):'Pick symbols above.';
-}
 function renderWatch(){
  const u=cmpUniverse();const rows=u.wl.map(s=>{const pts=tickerSeries(s);const v=pts.map(p=>+p.v);const hi=v.length?Math.max(...v):null;
   return {s,pts,r1:retOver(pts,21),r3:retOver(pts,63),off:hi?v[v.length-1]/hi-1:null};});
  const miss=((D.tickers||{}).missing||[]);
  $('watchT').innerHTML='<thead><tr><th>Symbol</th><th>1M</th><th>3M</th><th>From high</th><th>6 months</th></tr></thead><tbody>'+
-  (rows.length?rows.map(r=>`<tr class="clickable" data-sym="${esc(r.s)}"><td><span class="sym">${esc(r.s)}</span></td><td class="${cls(r.r1)}">${pct(r.r1,1)}</td><td class="${cls(r.r3)}">${pct(r.r3,1)}</td><td class="${(r.off??0)<-.1?'neg':''}">${pct(r.off,1)}</td><td>${spark(r.pts.map(p=>+p.v),96,24,(r.r3??0)>=0?C.up:C.down)}</td></tr>`).join(''):'<tr><td colspan="5" class="empty">watchlist empty</td></tr>')+
+  (rows.length?rows.map(r=>`<tr data-sym="${esc(r.s)}"><td><span class="sym">${esc(r.s)}</span></td><td class="${cls(r.r1)}">${pct(r.r1,1)}</td><td class="${cls(r.r3)}">${pct(r.r3,1)}</td><td class="${(r.off??0)<-.1?'neg':''}">${pct(r.off,1)}</td><td>${spark(r.pts.map(p=>+p.v),96,24,(r.r3??0)>=0?C.up:C.down)}</td></tr>`).join(''):'<tr><td colspan="5" class="empty">watchlist empty</td></tr>')+
   (miss.length?`<tr><td colspan="5" class="faint" style="text-align:left;font-family:var(--sans)">no cached prices: ${esc(miss.join(', '))}</td></tr>`:'')+'</tbody>';
- $('watchT').querySelectorAll('tr.clickable').forEach(tr=>tr.onclick=()=>toggleCmp(tr.dataset.sym,true));
 }
 function renderPM(){
  const pm=D.agent_pm||{},lr=pm.last_run||{};
@@ -975,7 +935,7 @@ function renderRace(){
   grid:{left:44,right:14,top:34,bottom:56},
   xAxis:Object.assign({type:'category',data:r.dates,boundaryGap:false},AX),
   yAxis:Object.assign({type:'value',scale:true},AX),
-  dataZoom:[{type:'inside'},{type:'slider',height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(124,196,255,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
+  dataZoom:[{type:'inside'},{type:'slider',height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(37,99,235,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
   series:all.map(s=>{const x=byLabel[s.label];return {name:s.label,type:'line',showSymbol:false,connectNulls:true,data:x?x.data:[],
    lineStyle:{width:s.key==='spy'?1.2:1.8,color:s.color,type:(s.dash||[]).length?'dashed':'solid'},itemStyle:{color:s.color},
    markLine:{silent:true,symbol:'none',lineStyle:{color:C.faint,type:'dotted'},label:{show:false},data:[{yAxis:100}]}};})}),true);
@@ -1014,7 +974,7 @@ function renderPnl(){
   xAxis:Object.assign({type:'category',data:R.map(r=>r.t)},AX),
   yAxis:[Object.assign({type:'value',name:'day',nameTextStyle:{color:C.muted,fontSize:10}},AX,{axisLabel:{color:C.muted,fontSize:10,fontFamily:'IBM Plex Mono',formatter:(v)=>kfmt(v)}}),
    Object.assign({type:'value',name:'cumulative',nameTextStyle:{color:C.muted,fontSize:10},splitLine:{show:false}},AX,{splitLine:{show:false},axisLabel:{color:C.muted,fontSize:10,fontFamily:'IBM Plex Mono',formatter:(v)=>kfmt(v)}})],
-  dataZoom:[{type:'inside',startValue:from},{type:'slider',startValue:from,height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(124,196,255,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
+  dataZoom:[{type:'inside',startValue:from},{type:'slider',startValue:from,height:16,bottom:8,borderColor:C.line,fillerColor:'rgba(37,99,235,.12)',handleStyle:{color:C.ice},textStyle:{color:C.muted},dataBackground:{lineStyle:{color:C['line-2']},areaStyle:{color:C.line}}}],
   series:[
    {name:'Desk',type:'bar',stack:'p',data:R.map(r=>r.desk==null?null:+r.desk.toFixed(2)),itemStyle:{color:C.ice},barMaxWidth:14},
    {name:'Your pinned holdings',type:'bar',stack:'p',data:R.map(r=>r.pin==null?null:+r.pin.toFixed(2)),itemStyle:{color:C.teal},barMaxWidth:14},
@@ -1061,9 +1021,9 @@ function renderTemp(){
  if(c)c.setOption({backgroundColor:'transparent',series:[{type:'gauge',startAngle:200,endAngle:-20,min:-1,max:1,radius:'95%',center:['50%','62%'],splitNumber:4,
   axisLine:{lineStyle:{width:12,color:[[.25,C.up],[.5,C['ice-dim']],[.75,C.warn],[1,C.down]]}},
   pointer:{length:'58%',width:4,itemStyle:{color:C.text}},anchor:{show:true,size:10,itemStyle:{color:C.text}},
-  axisTick:{show:false},splitLine:{length:14,lineStyle:{color:C.ground2||'#0b1224',width:2}},
+  axisTick:{show:false},splitLine:{length:14,lineStyle:{color:C.panel,width:2}},
   axisLabel:{color:C.muted,fontSize:10,distance:-34,formatter:(v)=>v===-1?'discount':v===1?'stretched':''},
-  title:{offsetCenter:[0,'34%'],color:C['text-2'],fontSize:13,fontFamily:'Chakra Petch'},
+  title:{offsetCenter:[0,'34%'],color:C['text-2'],fontSize:13,fontFamily:'Space Grotesk'},
   detail:{offsetCenter:[0,'60%'],fontSize:18,fontFamily:'IBM Plex Mono',color:C.text,formatter:(v)=>t==null?'n/a':(v>=0?'+':'')+v.toFixed(2)},
   data:[{value:t==null?0:+t.toFixed(2),name:(m.label||'no data').toUpperCase()}]}]},true);
  const comps=m.components||[];
@@ -1091,7 +1051,7 @@ function renderSpy(){
  c.setOption(base({legend:{top:0,right:0,textStyle:{color:C['text-2'],fontSize:11}},grid:{left:48,right:12,top:28,bottom:28},
   tooltip:Object.assign({},TT,{valueFormatter:(v)=>v==null?'–':Number(v).toFixed(2)}),
   xAxis:Object.assign({type:'category',data:s.slice(from).map(p=>p.t),boundaryGap:false},AX),yAxis:Object.assign({type:'value',scale:true},AX),
-  series:[{name:'SPY',type:'line',showSymbol:false,data:v.slice(from),lineStyle:{width:1.8,color:C.ice},areaStyle:{color:'rgba(124,196,255,.08)'}},
+  series:[{name:'SPY',type:'line',showSymbol:false,data:v.slice(from),lineStyle:{width:1.8,color:C.ice},areaStyle:{color:'rgba(37,99,235,.08)'}},
    {name:'200-day',type:'line',showSymbol:false,data:ma.slice(from),lineStyle:{width:1.2,color:C.warn,type:'dashed'}}]}),true);
 }
 function renderRegime(){
@@ -1113,7 +1073,7 @@ function renderHeat(){
  c.setOption({backgroundColor:'transparent',tooltip:{position:'top',backgroundColor:C.panel,borderColor:C['line-2'],textStyle:{color:C.text},formatter:(p)=>`${esc(secs[p.value[1]].name||secs[p.value[1]].sym)} · ${['1 month','3 months'][p.value[0]]}: ${p.value[2]>=0?'+':''}${p.value[2]} pp`},
   grid:{left:52,right:10,top:10,bottom:30},xAxis:{type:'category',data:['1M','3M'],axisLine:{show:false},axisTick:{show:false},axisLabel:{color:C.muted,fontFamily:'IBM Plex Mono'}},
   yAxis:{type:'category',data:secs.map(s=>s.sym),inverse:true,axisLine:{show:false},axisTick:{show:false},axisLabel:{color:C['text-2'],fontFamily:'IBM Plex Mono'}},
-  visualMap:{show:false,min:-mx,max:mx,inRange:{color:[C.down,'#1b2542',C.up]}},
+  visualMap:{show:false,min:-mx,max:mx,inRange:{color:[C.down,'#eef1f7',C.up]}},
   series:[{type:'heatmap',data,label:{show:true,color:C.text,fontSize:11,fontFamily:'IBM Plex Mono',formatter:(p)=>(p.value[2]>=0?'+':'')+p.value[2]},itemStyle:{borderColor:C.panel,borderWidth:3,borderRadius:4}}]},true);
  const top=secs.slice(0,3).map(s=>s.sym),bot=secs.slice(-3).map(s=>s.sym);
  const turning=secs.filter(s=>(s.rel_1m??0)>0&&(s.rel_3m??0)<0).map(s=>s.sym),fading=secs.filter(s=>(s.rel_1m??0)<0&&(s.rel_3m??0)>0).map(s=>s.sym);
@@ -1228,9 +1188,9 @@ function rrgDraw(){
  const X=(v)=>W*(0.5+(v-100)/(2*RR.mx)),Y=(v)=>H*(0.5-(v-100)/(2*RR.my));
  RR.heads=[];ctx.clearRect(0,0,W,H);
  const tint=(x,y,w,h,c)=>{ctx.fillStyle=c;ctx.fillRect(x,y,w,h);};
- tint(W/2,0,W/2,H/2,'rgba(61,220,151,.05)');tint(0,0,W/2,H/2,'rgba(124,196,255,.05)');
+ tint(W/2,0,W/2,H/2,'rgba(61,220,151,.05)');tint(0,0,W/2,H/2,'rgba(37,99,235,.05)');
  tint(W/2,H/2,W/2,H/2,'rgba(246,185,77,.05)');tint(0,H/2,W/2,H/2,'rgba(255,107,129,.05)');
- ctx.font='600 11px "Chakra Petch",system-ui';ctx.globalAlpha=.55;
+ ctx.font='600 11px "Space Grotesk",system-ui';ctx.globalAlpha=.55;
  ctx.fillStyle=QC.leading;ctx.textAlign='right';ctx.fillText('LEADING',W-12,20);
  ctx.fillStyle=QC.improving;ctx.textAlign='left';ctx.fillText('IMPROVING',12,20);
  ctx.fillStyle=QC.weakening;ctx.textAlign='right';ctx.fillText('WEAKENING',W-12,H-12);
@@ -1300,7 +1260,7 @@ function renderMoneyMap(){
  if(!items.length){el.innerHTML='<div class="empty">no sector data yet</div>';return;}
  if(r.width<10)return;
  const shade=(v)=>{const t=Math.max(-1,Math.min(1,v/6)),u=Math.abs(t);const mix=(a,b)=>Math.round(a+(b-a)*u);
-  const from=[27,37,66],to=t>=0?[31,122,88]:[150,52,70];return `rgb(${mix(from[0],to[0])},${mix(from[1],to[1])},${mix(from[2],to[2])})`;};
+  const from=[238,241,247],to=t>=0?[52,211,153]:[251,113,133];return `rgb(${mix(from[0],to[0])},${mix(from[1],to[1])},${mix(from[2],to[2])})`;};
  const squarify=(list,x,y,w,h,out)=>{if(!list.length)return;if(list.length===1){out.push(Object.assign({},list[0],{x,y,w,h}));return;}
   const total=list.reduce((s,i)=>s+i.sz,0);let acc=0,i=0;while(i<list.length-1&&acc+list[i].sz<total/2)acc+=list[i++].sz;
   acc=Math.max(acc,list[0].sz);i=Math.max(i,1);const f=acc/total;
@@ -1424,7 +1384,7 @@ function renderCommittee(){
  if(c){const map={risk_off:-1,neutral:0,risk_on:1};
   c.setOption(base({grid:{left:60,right:12,top:12,bottom:24},xAxis:Object.assign({type:'category',data:h.map(x=>String(x.t).slice(0,10)),boundaryGap:false},AX),
    yAxis:Object.assign({type:'value',min:-1,max:1,interval:1},AX,{axisLabel:{color:C.muted,fontSize:10,formatter:(v)=>({'-1':'risk-off','0':'neutral','1':'risk-on'})[v]}}),
-   series:[{type:'line',step:'middle',data:h.map(x=>map[x.posture]??0),showSymbol:true,symbolSize:5,lineStyle:{color:C.ice,width:1.6},itemStyle:{color:C.ice},areaStyle:{color:'rgba(124,196,255,.08)'}}]}),true);}
+   series:[{type:'line',step:'middle',data:h.map(x=>map[x.posture]??0),showSymbol:true,symbolSize:5,lineStyle:{color:C.ice,width:1.6},itemStyle:{color:C.ice},areaStyle:{color:'rgba(37,99,235,.08)'}}]}),true);}
 }
 // Standard normal CDF (Abramowitz-Stegun 7.1.26), for the luck check.
 function normCdf(x){const t=1/(1+0.3275911*Math.abs(x)/Math.SQRT2);

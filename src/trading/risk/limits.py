@@ -70,6 +70,27 @@ class RiskLimits(BaseModel):
     only that currency's buys, proportionally, so the manager's relative
     weights survive at a smaller size. See ``risk/cash_fit.py``."""
 
+    min_rebalance_pct: float = Field(default=0.0, ge=0.0, le=0.05)
+    """No-trade band, as a fraction of equity. 0.0 (default) disables it.
+
+    Without a band every cycle re-trims every holding: prices drift, the
+    target share count moves by one or two, and the desk pays a commission
+    and a CHF/USD spread to move a position by a few dozen francs. It also
+    makes a retry cycle expensive, which is the reason the desk runs only
+    every second week and loses a month when one cycle is blocked.
+
+    With a band, an ADJUSTMENT to a position the book already holds is
+    skipped when it is worth less than this fraction of equity. It never
+    applies to:
+
+    * opening a position, or closing one (target zero) — those are
+      decisions, not drift;
+    * a sell while any cap scaled this basket, or while the position sits
+      above ``max_position_pct`` — a limit is never left breached to save
+      a commission.
+
+    Capped at 5% so a typo cannot freeze the book."""
+
     baseline_sanity_divergence_pct: float = Field(default=0.5, gt=0.0, le=10.0)
     """How far today's equity may sit from the stored daily-open baseline
     before the baseline itself is judged to be the broken thing.
@@ -96,6 +117,7 @@ class RiskLimits(BaseModel):
             max_drawdown_pct=settings.max_drawdown_pct,
             max_margin_borrowing_pct=settings.max_margin_borrowing_pct,
             fit_orders_to_cash=getattr(settings, "fit_orders_to_cash", True),
+            min_rebalance_pct=getattr(settings, "min_rebalance_pct", 0.0),
             baseline_sanity_divergence_pct=settings.baseline_sanity_divergence_pct,
         )
 

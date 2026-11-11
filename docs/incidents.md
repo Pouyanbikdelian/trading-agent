@@ -81,6 +81,43 @@ for being untidy. Put a gate where it is the last line; put everything else
 on the card the operator already reads. And classify a failed submission by
 where it failed, not by what the error message says.
 
+**Follow-up, 11 November — the contract itself.** Deployed as `77fce78` on
+10 November (verified, three services recreated, halt state unchanged). With
+the review now a warning, an unchanged contract would have put that warning
+on nearly every approval card, which is how a warning stops being read. Two
+clauses were producing failures that said nothing about the decision:
+
+- *Positioning rows are optional.* A row that is supplied is checked exactly
+  as before (scope, freshness, no broad-market evidence used to size a
+  stock); a missing row is no longer an issue. "Unavailable" is contradicted
+  only by evidence mapped to that symbol, not by index context.
+- *Sizing and cash arithmetic is compared at one basis point,* not 1e-6.
+  Final weights are clamped and Sentinel-scaled after the model answers, so
+  they are rarely round; a figure stated to four decimals now passes, and a
+  sizing story about a different target is still caught.
+
+This changes the PM charter text, so the first PM run after deployment is the
+real test: read `/pm review` on it. Not paper-tested — no paper desk is
+running. Claim typing (the 9 November `c10` failure) is unchanged and will
+still raise a warning.
+
+**Same day — cadence.** Two changes that make a retry cheap, so one blocked
+cycle no longer costs a month:
+
+- *Schedule.* `config/midweek_schedule.env.example`: the cycle moves from
+  Friday 17:00 (after the close; an approved basket waited for Monday's open)
+  to Wednesday 11:00 New York. Fortnightly cadence and anchor week unchanged.
+  This is a `.env` change on the server, not code.
+- *No-trade band.* `MIN_REBALANCE_PCT` (default 0, off). The risk manager had
+  none: every cycle re-trimmed every holding by a share or two. With a band,
+  an adjustment to an existing holding under that fraction of equity is
+  skipped and reported on the card. Entries, exits, an over-cap position and
+  every sell in a cap-scaled basket are exempt.
+
+The dashboard was restyled the same day (light theme; Briefing, Kill switches
+and Compare removed; Agent PM vs SPY first on the Cockpit). The kill switches
+themselves are untouched — only their gauges are gone from the page.
+
 ## 2026-11-09 — Completed cycles looked stuck behind a PM review
 
 **Symptoms.** Three manual cycles progressed from an existing `unprotected

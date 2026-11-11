@@ -9,6 +9,18 @@ from typing import Any
 
 from trading.agents.pm_reasoning import _age_hours, _review_reasoning
 
+#: How far the model's stated sizing and cash figures may sit from the
+#: figures the code computes. One basis point of the book, so a figure
+#: rounded to four decimals always passes.
+#:
+#: Why not exact (2026-11-11). These compared at 1e-6 against weights that
+#: are clamped and Sentinel-scaled AFTER the model answers — 0.05 becomes
+#: 0.034999999999999996 — so a decision could be flagged for the model
+#: rounding a product to four decimals. The check exists to catch a sizing
+#: story that does not describe the final target, not a model that prints
+#: fewer digits than a float. A real mismatch is whole percentage points.
+_ARITHMETIC_TOLERANCE = 1e-4
+
 
 def _number(value: object) -> float | None:
     if isinstance(value, bool):
@@ -206,13 +218,13 @@ def _check_contract(
         downside = _number(row.get("downside_fraction"))
         loss = _number(row.get("portfolio_loss_fraction"))
         reported_weight = _number(row.get("target_weight"))
-        if reported_weight is None or abs(reported_weight - weight) > 1e-6:
+        if reported_weight is None or abs(reported_weight - weight) > _ARITHMETIC_TOLERANCE:
             issues.append(f"{symbol}: sizing does not match final target")
         if (
             downside is None
             or not 0 < downside <= 1
             or loss is None
-            or abs(loss - weight * downside) > 1e-6
+            or abs(loss - weight * downside) > _ARITHMETIC_TOLERANCE
         ):
             issues.append(f"{symbol}: invalid downside/loss-budget arithmetic")
         for field in (
@@ -241,10 +253,10 @@ def _check_contract(
         discretionary = _number(cash_plan.get("discretionary_weight"))
         if (
             floor is None
-            or cash + 1e-6 < required_floor
-            or abs(floor - required_floor) > 1e-6
+            or cash + _ARITHMETIC_TOLERANCE < required_floor
+            or abs(floor - required_floor) > _ARITHMETIC_TOLERANCE
             or discretionary is None
-            or abs(discretionary - max(0, cash - required_floor)) > 1e-6
+            or abs(discretionary - max(0, cash - required_floor)) > _ARITHMETIC_TOLERANCE
         ):
             issues.append("cash plan does not reconcile safety floor and discretionary cash")
         try:

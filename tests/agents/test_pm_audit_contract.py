@@ -526,3 +526,77 @@ def test_the_digest_says_which_of_the_two_it_is(desk, monkeypatch):
     assert "BLOCKED" not in card and "flagged on the approval card" in card
     _desk_settings(monkeypatch, approval=False)
     assert "BLOCKED pending reasoning review" in format_pm_digest(result, None)
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-11 — a contract a careful model can actually meet
+# ---------------------------------------------------------------------------
+
+
+def _contract(response, now, weights=None, sentinel_cap=None):
+    weights = weights or {"AAA": 0.05}
+    plan = {"required_symbols": ["AAA"]}
+    payload = {
+        "today_context": {
+            "candidate_ladder": {
+                "as_of": now.date().isoformat(),
+                "ranked": [{"symbol": "AAA", "rank": 1, "score": 0.5}],
+            }
+        }
+    }
+    return _check_contract(
+        response, plan, weights, _evidence_catalog(payload, now), now, sentinel_cap
+    )
+
+
+def test_a_decision_that_says_nothing_about_positioning_is_complete(desk):
+    """Seven reviewed names used to need 21 positioning rows, on evidence the
+    positioning module itself calls uninformative for single stocks."""
+    run, now, _ = desk
+    calls = []
+
+    def llm(system, prompt):
+        calls.append(1)
+        response = valid_response(now)
+        del response["positioning_assessments"]
+        return response
+
+    result = run(llm)
+    assert len(calls) == 1  # no repair round was needed
+    assert not result["requires_operator_review"], result["reasoning_review"]["issues"]
+
+
+def test_the_charter_no_longer_demands_positioning_rows():
+    from trading.agents.pm import PM_CHARTER
+
+    assert "positioning_assessments is mandatory" not in PM_CHARTER
+    assert "positioning_assessments is OPTIONAL" in PM_CHARTER
+
+
+def test_figures_rounded_to_four_decimals_pass_after_a_clamp():
+    """The final weight is scaled after the model answers, so it is rarely
+    a round number. Comparing at 1e-6 flagged ordinary rounding."""
+    now = UtcClock().now()
+    weight = 0.05 * 0.7  # Sentinel-scaled: 0.034999999999999996
+    response = valid_response(now, weight=0.035)
+    response["sizing_reviews"][0]["portfolio_loss_fraction"] = 0.007
+    response["cash_plan"]["safety_floor"] = 0.3
+    response["cash_plan"]["discretionary_weight"] = 0.665
+    review = _contract(response, now, weights={"AAA": weight}, sentinel_cap=0.7)
+    assert review["complete"], review["issues"]
+
+
+def test_a_sizing_story_about_a_different_target_is_still_caught():
+    now = UtcClock().now()
+    response = valid_response(now, weight=0.05)  # the model still describes 5%
+    review = _contract(response, now, weights={"AAA": 0.035}, sentinel_cap=0.7)
+    assert any("sizing does not match final target" in i for i in review["issues"])
+    assert any("cash plan does not reconcile" in i for i in review["issues"])
+
+
+def test_wrong_loss_arithmetic_is_still_caught():
+    now = UtcClock().now()
+    response = valid_response(now)
+    response["sizing_reviews"][0]["portfolio_loss_fraction"] = 0.02  # 0.05 x 0.2 is 0.01
+    review = _contract(response, now)
+    assert any("invalid downside/loss-budget arithmetic" in i for i in review["issues"])
