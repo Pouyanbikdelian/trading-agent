@@ -23,6 +23,11 @@ from trading.forecasts.features import load_close_panel
 MAX_BAR_AGE_DAYS = 4
 #: Share of the universe that must have a bar for a session to be forecast.
 MIN_COVERAGE = 0.8
+#: Below this share of names with at least one headline, the feed is treated
+#: as down and the "news" forecaster is not asked. Without news it is the
+#: "numbers" forecaster under another name, and its forecasts would dilute
+#: the one comparison it exists for.
+MIN_HEADLINE_COVERAGE = 0.2
 #: A batch still unfinished after this is written off. The API itself
 #: expires a batch at 24 hours.
 BATCH_GIVE_UP = timedelta(hours=30)
@@ -61,13 +66,62 @@ def _cards(
     return cards
 
 
-def _headlines(symbols: list[str]) -> dict[str, list[str]]:
+def _yahoo_headlines(symbols: list[str]) -> dict[str, list[str]]:
     from trading.reporting.news import fetch_news_for_symbols
 
     found = fetch_news_for_symbols(symbols, max_per_symbol=4, max_age_hours=96.0)
     return {
-        s: [f"{h.published.date()} {h.title[:160]}" for h in items] for s, items in found.items()
+        s: [f"{h.published.date()} {h.title[:160]}" for h in items]
+        for s, items in found.items()
+        if items
     }
+
+
+def _google_headlines(symbols: list[str], *, budget_s: float = 120.0) -> dict[str, list[str]]:
+    """Google News RSS, one query per symbol, inside a total time budget."""
+    from email.utils import parsedate_to_datetime
+
+    from trading.runtime.news_watch import _fetch_query
+
+    cutoff = UtcClock().now() - timedelta(hours=96)
+    started = time.monotonic()
+    out: dict[str, list[str]] = {}
+    for symbol in symbols:
+        if time.monotonic() - started > budget_s:
+            break
+        try:
+            titles = []
+            for item in _fetch_query(symbol, f"{symbol} stock when:4d"):
+                try:
+                    published = parsedate_to_datetime(item["published"])
+                except (TypeError, ValueError):
+                    continue
+                if published.tzinfo is not None and published >= cutoff:
+                    titles.append(f"{published.date()} {item['title'][:160]}")
+                if len(titles) >= 4:
+                    break
+            if titles:
+                out[symbol] = titles
+        except Exception:
+            continue
+    return out
+
+
+def _headlines(symbols: list[str]) -> dict[str, list[str]]:
+    """Headlines per symbol: Yahoo first, Google News for whatever it missed.
+
+    The first live run (2026-11-11) got "Yahoo Finance is currently down"
+    for all fifty names. That fetcher logs and returns nothing, so the
+    "news" forecaster was asked with no news and nothing said so.
+    """
+    try:
+        found = _yahoo_headlines(symbols)
+    except Exception:
+        found = {}
+    missing = [s for s in symbols if s not in found]
+    if missing:
+        found.update(_google_headlines(missing))
+    return found
 
 
 def _record_usage(model: str, usage: dict[str, Any], tier: str) -> None:
@@ -168,6 +222,7 @@ def _ask_llm(
     now: datetime,
     llm_call: Callable[[str, str], dict[str, Any]] | None,
     client: Any,
+    lenses: tuple[str, ...] = llm_forecaster.LENSES,
 ) -> None:
     """Either queue one batch for every lens, or ask synchronously."""
     if use_batch:
@@ -175,7 +230,7 @@ def _ask_llm(
             return  # already queued for this session; never pay twice
         requests: list[dict[str, Any]] = []
         meta: dict[str, Any] = {}
-        for lens in llm_forecaster.LENSES:
+        for lens in lenses:
             for n, chunk in enumerate(
                 llm_forecaster.batches_for(llm_forecaster.lens_cards(cards, lens))
             ):
@@ -196,7 +251,7 @@ def _ask_llm(
         store.add_batch(state_dir, batch_id, asof=asof, model=model, requests=meta, now=now)
         status["llm_batch_submitted"] = len(requests)
         return
-    for lens in llm_forecaster.LENSES:
+    for lens in lenses:
         answers, errors = llm_forecaster.forecast(
             asof, llm_forecaster.lens_cards(cards, lens), model=model, call=llm_call
         )
@@ -322,6 +377,15 @@ def run_daily(
                     headlines = {}
                     status["errors"].append(f"headlines unavailable: {type(exc).__name__}")
                 status["llm_asked"] = len(chosen)
+                with_news = sum(1 for s in chosen if headlines.get(s))
+                status["headline_coverage"] = f"{with_news}/{len(chosen)}"
+                lenses: tuple[str, ...] = llm_forecaster.LENSES
+                if chosen and with_news < MIN_HEADLINE_COVERAGE * len(chosen):
+                    lenses = tuple(lens for lens in lenses if lens != "news")
+                    status["errors"].append(
+                        f"headlines reached only {with_news} of {len(chosen)} names; "
+                        "the news forecaster was not asked"
+                    )
                 try:
                     _ask_llm(
                         state_dir,
@@ -333,6 +397,7 @@ def run_daily(
                         now=now,
                         llm_call=llm_call,
                         client=batch_client,
+                        lenses=lenses,
                     )
                 except Exception as exc:
                     status["errors"].append(

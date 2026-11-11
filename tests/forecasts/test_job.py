@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from trading.forecasts import store
@@ -51,7 +51,10 @@ def test_llm_run_asks_the_top_momentum_names_without_showing_the_baseline(
         model="claude-sonnet-5-5",
         now=NOW,
         llm_call=_fake_llm(seen),
-        news_fn=lambda symbols: {symbols[0]: ["2026-11-09 Something was reported"]},
+        news_fn=lambda symbols: {
+            symbols[0]: ["2026-11-09 Something was reported"],
+            **{x: ["2026-11-09 Other"] for x in symbols[1:6]},
+        },
     )
     # Two forecasters (numbers, then news), each 12 names at ten per call.
     assert status["llm_asked"] == 12 and status["llm_written"] == 48
@@ -77,7 +80,13 @@ def test_llm_run_asks_the_top_momentum_names_without_showing_the_baseline(
 def test_a_second_run_for_the_same_session_adds_nothing(tmp_path, data_dir, panel):
     close, _ = panel
     seen = []
-    kwargs = {"use_llm": True, "use_batch": False, "top_n": 5, "now": NOW, "news_fn": lambda s: {}}
+    kwargs = {
+        "use_llm": True,
+        "use_batch": False,
+        "top_n": 5,
+        "now": NOW,
+        "news_fn": lambda s: {x: ["2026-11-09 Reported"] for x in s},
+    }
     run_daily(tmp_path, data_dir, list(close.columns), llm_call=_fake_llm(seen), **kwargs)
     again = run_daily(tmp_path, data_dir, list(close.columns), llm_call=_fake_llm(seen), **kwargs)
     assert again["baseline_written"] == 0 and again["llm_written"] == 0
@@ -279,7 +288,7 @@ def _batch_run(tmp_path, data_dir, close, client, **over):
         "use_llm": True,
         "top_n": 12,
         "now": NOW,
-        "news_fn": lambda s: {},
+        "news_fn": lambda s: {x: ["2026-11-09 Reported"] for x in s},
         "batch_client": client,
     }
     return run_daily(tmp_path, data_dir, list(close.columns), **{**kwargs, **over})
@@ -403,3 +412,77 @@ def test_the_pm_is_shown_against_the_mechanical_picks_not_only_spy(tmp_path):
         {"horizon": 5, "cohorts": 2, "mean_pm_minus_mechanical": 0.005, "pm_ahead": 1}
     ]
     assert "function pmVsMechanical(){" in _PAGE and "+pmVsMechanical();" in _PAGE
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-11, first live run: Yahoo's news endpoint was down for all 50 names
+# ---------------------------------------------------------------------------
+
+
+def test_without_headlines_the_news_forecaster_is_not_asked(tmp_path, data_dir, panel):
+    """A "news" forecast made with no news is the numbers forecast under
+    another name. Fifty of them were written on the first live run, and
+    nothing in the status said the feed had failed."""
+    close, _ = panel
+    seen = []
+    status = run_daily(
+        tmp_path,
+        data_dir,
+        list(close.columns),
+        top_n=10,
+        use_llm=True,
+        use_batch=False,
+        now=NOW,
+        llm_call=_fake_llm(seen),
+        news_fn=lambda symbols: {symbols[0]: ["2026-11-09 Only one name has news"]},
+    )
+    assert status["headline_coverage"] == "1/10"
+    assert any("news forecaster was not asked" in e for e in status["errors"])
+    assert len(seen) == 1 and status["llm_written"] == 20  # numbers only
+    sources = {s["source"] for s in status["summary"]["sources"]}
+    assert "llm:claude-sonnet-5-5:news" not in sources
+
+
+def test_google_news_fills_in_what_yahoo_missed(monkeypatch):
+    from trading.forecasts import job
+
+    monkeypatch.setattr(job, "_yahoo_headlines", lambda symbols: {"AAA": ["2026-11-10 From Yahoo"]})
+    asked = []
+
+    def google(symbols, **_):
+        asked.extend(symbols)
+        return {"BBB": ["2026-11-10 From Google"]}
+
+    monkeypatch.setattr(job, "_google_headlines", google)
+    found = job._headlines(["AAA", "BBB", "CCC"])
+    assert asked == ["BBB", "CCC"]  # only the names Yahoo had nothing for
+    assert found == {"AAA": ["2026-11-10 From Yahoo"], "BBB": ["2026-11-10 From Google"]}
+
+    def down(_symbols):
+        raise RuntimeError("YAHOO! FINANCE IS CURRENTLY DOWN")
+
+    monkeypatch.setattr(job, "_yahoo_headlines", down)
+    assert job._headlines(["BBB"]) == {"BBB": ["2026-11-10 From Google"]}
+
+
+def test_google_headlines_keep_only_recent_dated_items(monkeypatch):
+    from email.utils import format_datetime
+
+    from trading.core.clock import UtcClock
+    from trading.forecasts import job
+
+    now = UtcClock().now()
+
+    def fake_query(topic, query):
+        assert query == f"{topic} stock when:4d"
+        if topic == "BAD":
+            raise TimeoutError
+        return [
+            {"title": "Fresh", "published": format_datetime(now - timedelta(hours=5))},
+            {"title": "Old", "published": format_datetime(now - timedelta(days=9))},
+            {"title": "Undated", "published": ""},
+        ]
+
+    monkeypatch.setattr("trading.runtime.news_watch._fetch_query", fake_query)
+    found = job._google_headlines(["AAA", "BAD"])
+    assert list(found) == ["AAA"] and len(found["AAA"]) == 1 and found["AAA"][0].endswith("Fresh")

@@ -73,6 +73,17 @@ nothing.
   written: check the first real run. `FORECAST_SHADOW_BATCH=false` falls
   back to direct calls at full price.
 
+## First live run, 2026-11-11
+
+988 baseline forecasts and 200 LLM forecasts for the 2026-11-10 close; the
+batch route worked against the real API first time (10 requests, back in about
+three minutes). One defect: Yahoo's news endpoint was down for all fifty names,
+its fetcher logs and returns nothing, and so the "news" forecaster was asked
+with no news while the status reported no error. Those 100 rows were deleted
+before any outcome was known. Since then headlines fall back to Google News
+per symbol, the status records `headline_coverage`, and below 20% coverage the
+news forecaster is not asked at all.
+
 ## Operating it
 
 ```bash
