@@ -2514,13 +2514,12 @@ class Runner:
                         f"{result.get('candidates', 0)} screened in)."
                     )
                 return
-            buttons = None
-            if any(e.get("review_suggested") for e in events):
-                from trading.bot.keyboards import sentinel_keyboard
+            from trading.bot.keyboards import events_keyboard
 
-                buttons = sentinel_keyboard()
+            major = any(e.get("review_suggested") for e in events)
             self.alerts.info(
-                format_event_alert(events, digest=bool(result.get("digest"))), buttons=buttons
+                format_event_alert(events, digest=bool(result.get("digest")), compact=True),
+                buttons=events_keyboard(major),
             )
         except Exception:
             logger.bind(component="event_watch").exception("event watch run failed")

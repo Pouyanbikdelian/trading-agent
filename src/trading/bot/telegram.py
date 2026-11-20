@@ -87,7 +87,7 @@ HELP_TEXT = (
     "/exceptions — off-ladder ideas waiting for your call\n"
     "/watchlist — the dashboard watchlist\n\n"
     "*Market*\n"
-    "/events — macro & geopolitical alerts, last 24h · /events now — scan now\n"
+    "/events — macro & geopolitical headlines, 24h · `detail` expands · `now` scans\n"
     "/regime — regime and SPY/VIX readings\n"
     "/signal — the candidate ladder right now\n"
     "/correlation — how your holdings move together\n\n"
@@ -995,7 +995,8 @@ def _cmd_events(args: list[str]) -> str:
         return "🌍 Scanning macro & geopolitical news now — result in ~1 minute."
     from trading.runtime.event_watch import format_recent
 
-    return format_recent(settings.state_dir)
+    detail = bool(args) and args[0].lower() in ("detail", "details", "more")
+    return format_recent(settings.state_dir, detail=detail)
 
 
 def _cmd_pm(args: list[str]) -> str:

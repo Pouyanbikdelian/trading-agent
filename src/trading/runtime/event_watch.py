@@ -573,7 +573,16 @@ def _md(s: str) -> str:
     return re.sub(r"([_*`\[])", r"\\\1", s or "")
 
 
-def format_event_alert(events: list[dict[str, Any]], *, digest: bool = False) -> str:
+def format_event_alert(
+    events: list[dict[str, Any]], *, digest: bool = False, compact: bool = False
+) -> str:
+    """Full card per event, or (compact) one headline line each.
+
+    Compact is what gets pushed (Yan 2026-11-20: the full card read as
+    crowded on a phone); the Details button expands to the full version.
+    """
+    if compact:
+        return _format_compact(events, digest=digest)
     head = "🌍 *Macro & geopolitics*"
     if digest:
         head += " — overnight digest"
@@ -607,8 +616,26 @@ def format_event_alert(events: list[dict[str, Any]], *, digest: bool = False) ->
     return "\n".join(lines).rstrip()
 
 
-def format_recent(state_dir: Path, hours: float = 24.0) -> str:
-    """``/events`` — what was alerted recently, plus anything held overnight."""
+_DOT = {5: "🔴", 4: "🟠", 3: "🟡"}
+
+
+def _format_compact(events: list[dict[str, Any]], *, digest: bool = False) -> str:
+    head = "🌍 *Macro & geopolitics*" + (" — overnight" if digest else "")
+    lines = [head]
+    for ev in sorted(events, key=lambda e: -e["severity"]):
+        tag = _READ.get(ev.get("market_read", ""), "")
+        exposed = ", ".join(ev.get("exposed") or [])[:60]
+        tail = " · ".join(x for x in (tag, _md(exposed)) if x)
+        lines.append(f"{_DOT.get(ev['severity'], '•')} *{_md(ev['headline'])}*")
+        if tail:
+            lines.append(f"    {tail}")
+    if any(e.get("review_suggested") for e in events):
+        lines.append("_Major event — nothing trades without your approval._")
+    return "\n".join(lines)
+
+
+def format_recent(state_dir: Path, hours: float = 24.0, *, detail: bool = False) -> str:
+    """``/events`` — recent alerts as headlines; ``/events detail`` — full cards."""
     state = _load_state(Path(state_dir))
     cut = _now() - timedelta(hours=hours)
     recent = [a for a in (state.get("alerted") or []) if (_parse(a.get("t")) or cut) > cut]

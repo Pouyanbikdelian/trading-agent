@@ -211,5 +211,14 @@ def test_format_escapes_markdown_and_recent(tmp_path: Path) -> None:
     assert "Last 24h" in format_recent(tmp_path)
 
 
+def test_compact_is_headlines_only(tmp_path: Path) -> None:
+    r = run_event_watch(tmp_path, fetch=lambda: STRIKE, llm=_llm_major, holdings=[], now=DAY)
+    msg = format_event_alert(r["send"], compact=True)
+    assert "US strikes Iranian oil terminal" in msg and "risk-off" in msg
+    assert "Gulf supply risk" not in msg  # the why-it-matters lives behind Details
+    full = format_event_alert(r["send"])
+    assert "Gulf supply risk" in full
+
+
 def test_title_key_is_order_insensitive() -> None:
     assert title_key("Iran strikes oil terminal") == title_key("Oil terminal: Iran strikes")

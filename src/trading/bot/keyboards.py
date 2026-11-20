@@ -73,6 +73,8 @@ SAFE_COMMANDS = frozenset(
         # The sentinel's "Debate it" button sent it and was refused, so the
         # button answered "can't be run from a button" (fixed 2026-09-26).
         "/committee",
+        # Expands a compact macro/geopolitics alert into full cards. Read-only.
+        "/events detail",
     }
 )
 
@@ -159,6 +161,14 @@ def revised_approval_keyboard(cycle_id: str, preview_id: str) -> dict[str, Any]:
             [_button("📊 Positions", ACT_RUN, "/positions")],
         ]
     )
+
+
+def events_keyboard(major: bool = False) -> dict[str, Any]:
+    """Buttons under a compact event alert: expand it; debate it if major."""
+    row = [_button("📖 Details", ACT_RUN, "/events detail")]
+    if major:
+        row.append(_button("🧠 Debate it", ACT_RUN, "/committee"))
+    return _markup([row])
 
 
 def sentinel_keyboard() -> dict[str, Any]:

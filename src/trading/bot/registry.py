@@ -157,8 +157,8 @@ REGISTRY: tuple[Spec, ...] = (
     Spec("/detail", "full transcript of the latest debate"),
     Spec(
         "/events",
-        "macro & geopolitical alerts from the last 24h; 'now' scans immediately",
-        usage="/events [now]",
+        "macro & geopolitical headlines (24h); 'detail' expands, 'now' scans",
+        usage="/events [detail|now]",
         example="/events now",
     ),
     Spec("/forget", "reset the conversation thread", aliases=("/newtopic",)),
