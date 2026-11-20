@@ -1139,6 +1139,27 @@ class Runner:
                     replace_existing=True,
                     max_instances=1,
                 )
+                # Event watch: macro/geopolitical news triage -> Telegram.
+                # Every 30 min, 24/7 (wars don't wait for the open). Fetch +
+                # keyword screen are free; ONE LLM call only when something
+                # cleared the screen. INFORMATION ONLY — never the order path.
+                self._scheduler.add_job(
+                    self._run_event_watch_async,
+                    CronTrigger.from_crontab(
+                        _os.getenv("EVENT_WATCH_CRON", "*/30 * * * *"), timezone="UTC"
+                    ),
+                    id="event_watch",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                )
+                self._scheduler.add_job(
+                    self._check_event_watch_flag,
+                    IntervalTrigger(seconds=30),
+                    id="event_watch_trigger",
+                    replace_existing=True,
+                    max_instances=1,
+                )
                 # Late-day de-risk: ONE check ~50 min before the close (default
                 # 15:10 ET). If a holding is down >= SENTINEL_DERISK_DROP_PCT on
                 # the day by then, convene the committee once. The noisy open is
@@ -2475,6 +2496,43 @@ class Runner:
             self.alerts.info(format_sentinel_alert(result), buttons=sentinel_keyboard())
         except Exception:
             logger.bind(component="sentinel").exception("sentinel run failed")
+
+    async def _run_event_watch_async(self, *, force: bool = False) -> None:
+        """Macro/geopolitical news triage — INFORMATION ONLY. One Telegram
+        message per run at most; severity-5 events get the read-only
+        sentinel buttons (Debate it / Positions)."""
+        try:
+            from trading.runtime.event_watch import format_event_alert, run_event_watch
+
+            result = await asyncio.to_thread(run_event_watch, settings.state_dir, force=force)
+            events = result.get("send") or []
+            if result.get("quiet") or not events:
+                if force:
+                    self.alerts.info(
+                        "🌍 Event scan done — nothing at alert level "
+                        f"({result.get('fresh', 0)} new headlines, "
+                        f"{result.get('candidates', 0)} screened in)."
+                    )
+                return
+            buttons = None
+            if any(e.get("review_suggested") for e in events):
+                from trading.bot.keyboards import sentinel_keyboard
+
+                buttons = sentinel_keyboard()
+            self.alerts.info(
+                format_event_alert(events, digest=bool(result.get("digest"))), buttons=buttons
+            )
+        except Exception:
+            logger.bind(component="event_watch").exception("event watch run failed")
+
+    async def _check_event_watch_flag(self) -> None:
+        """``/events now`` drops state/event_watch_now.flag."""
+        flag = settings.state_dir / "event_watch_now.flag"
+        if not flag.exists():
+            return
+        with contextlib.suppress(Exception):
+            flag.unlink()
+        await self._run_event_watch_async(force=True)
 
     async def _run_lateday_derisk_async(self) -> None:
         """Late-day de-risk gate (~50 min before the close). If a holding has

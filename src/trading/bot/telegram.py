@@ -87,6 +87,7 @@ HELP_TEXT = (
     "/exceptions — off-ladder ideas waiting for your call\n"
     "/watchlist — the dashboard watchlist\n\n"
     "*Market*\n"
+    "/events — macro & geopolitical alerts, last 24h · /events now — scan now\n"
     "/regime — regime and SPY/VIX readings\n"
     "/signal — the candidate ladder right now\n"
     "/correlation — how your holdings move together\n\n"
@@ -980,6 +981,21 @@ def _cmd_committee() -> str:
         "\U0001f3db Committee convening — fresh debate underway.\n"
         "_Summary lands here in ~2 minutes; `/detail` for the full transcript._"
     )
+
+
+def _cmd_events(args: list[str]) -> str:
+    """``/events`` — recent macro/geopolitical alerts; ``/events now`` scans."""
+    if args and args[0].lower() == "now":
+        try:
+            (settings.state_dir / "event_watch_now.flag").write_text(
+                datetime.now(tz=timezone.utc).isoformat()
+            )
+        except Exception as e:
+            return f"could not request a scan: `{e}`"
+        return "🌍 Scanning macro & geopolitical news now — result in ~1 minute."
+    from trading.runtime.event_watch import format_recent
+
+    return format_recent(settings.state_dir)
 
 
 def _cmd_pm(args: list[str]) -> str:
@@ -3835,6 +3851,8 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_exceptions(args)
     if cmd == "/detail":
         return _cmd_detail()
+    if cmd == "/events":
+        return _cmd_events(args)
     if cmd == "/committee":
         # With a symbol argument: copilot history view (read-only).
         # Bare: original behavior — convene the committee.
