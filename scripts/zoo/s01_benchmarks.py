@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from harness import evaluate, monthly_dates, prices, save, show, universe
 
 
@@ -11,9 +10,9 @@ def main() -> None:
     px = prices()
     idx = px.index
     res = []
-    w = pd.DataFrame(0.0, index=idx, columns=["SPY"]); w["SPY"] = 1.0
+    w = pd.DataFrame({"SPY": 1.0}, index=idx)
     res.append(evaluate("SPY buy&hold", "benchmark", w))
-    w = pd.DataFrame(0.0, index=idx, columns=["QQQ"]); w["QQQ"] = 1.0
+    w = pd.DataFrame({"QQQ": 1.0}, index=idx)
     res.append(evaluate("QQQ buy&hold", "benchmark", w))
     w = pd.DataFrame({"SPY": 0.6, "IEF": 0.4}, index=idx)
     res.append(evaluate("60/40 SPY/IEF", "benchmark", w))

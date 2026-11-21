@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
-
 from harness import ETFS, evaluate, monthly_dates, prices, returns, save, show, universe
+from scipy.optimize import minimize
 
 
 def shrink_cov(x: np.ndarray, a: float = 0.5) -> np.ndarray:
@@ -26,9 +25,15 @@ def shrink_cov(x: np.ndarray, a: float = 0.5) -> np.ndarray:
 
 def minvar(cov: np.ndarray, cap: float) -> np.ndarray:
     n = len(cov)
-    res = minimize(lambda w: w @ cov @ w, np.full(n, 1 / n), jac=lambda w: 2 * cov @ w,
-                   bounds=[(0, cap)] * n, constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1}],
-                   method="SLSQP", options={"maxiter": 200})
+    res = minimize(
+        lambda w: w @ cov @ w,
+        np.full(n, 1 / n),
+        jac=lambda w: 2 * cov @ w,
+        bounds=[(0, cap)] * n,
+        constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1}],
+        method="SLSQP",
+        options={"maxiter": 200},
+    )
     return res.x if res.success else np.full(n, 1 / n)
 
 
@@ -66,8 +71,13 @@ def main() -> None:
         # levered to 10% vol: risk parity's whole point
         port = (w_erc.reindex(px.index).ffill().shift(1) * r[uni]).sum(axis=1)
         k = (0.10 / (port.rolling(60).std() * np.sqrt(252))).clip(upper=2.5)
-        res.append(evaluate(f"Risk parity {label} @10% vol", "allocation",
-                            w_erc.reindex(px.index).ffill().mul(k, axis=0)))
+        res.append(
+            evaluate(
+                f"Risk parity {label} @10% vol",
+                "allocation",
+                w_erc.reindex(px.index).ffill().mul(k, axis=0),
+            )
+        )
     # stock min-variance: 150 lowest-vol names each month, capped 3%
     stocks = [s for s in universe() if s in px.columns]
     vol = r[stocks].rolling(252, min_periods=200).std()
@@ -84,7 +94,9 @@ def main() -> None:
     for tgt in [0.10, 0.15]:
         rv = r["SPY"].rolling(21).std() * np.sqrt(252)
         k = (tgt / rv).clip(upper=1.5)
-        res.append(evaluate(f"SPY vol-target {int(tgt*100)}%", "allocation", pd.DataFrame({"SPY": k})))
+        res.append(
+            evaluate(f"SPY vol-target {int(tgt * 100)}%", "allocation", pd.DataFrame({"SPY": k}))
+        )
     tab = save(res, "s06_allocation")
     show(tab)
 

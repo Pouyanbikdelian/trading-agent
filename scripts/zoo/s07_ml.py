@@ -10,17 +10,16 @@ Market timing: logistic model on SPY trend/vol/drawdown/breadth features
 predicting next-month SPY up/down; hold SPY when P(up) > 0.5, else IEF.
 """
 
+# ruff: noqa: N806
 from __future__ import annotations
 
 import importlib.util
 import warnings
 
-import numpy as np
 import pandas as pd
+from harness import ROOT, evaluate, monthly_dates, prices, returns, save, show, universe
 from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
-
-from harness import ROOT, evaluate, monthly_dates, prices, returns, save, show, universe
 
 warnings.filterwarnings("ignore")
 _spec = importlib.util.spec_from_file_location("qsb", ROOT / "scripts/quality_short_backtest.py")
@@ -42,8 +41,11 @@ def build_panel() -> pd.DataFrame:
         "mom6": pm.shift(1) / pm.shift(6) - 1,
         "rev1": pm / pm.shift(1) - 1,
         "vol60": r[stocks].rolling(60, min_periods=40).std().loc[m],
-        "beta": r[stocks].rolling(252, min_periods=200).cov(spy)
-        .div(spy.rolling(252).var(), axis=0).loc[m],
+        "beta": r[stocks]
+        .rolling(252, min_periods=200)
+        .cov(spy)
+        .div(spy.rolling(252).var(), axis=0)
+        .loc[m],
         "d52": (P / P.rolling(252).max()).loc[m],
         "fwd": pm.shift(-1) / pm - 1,
     }
@@ -100,15 +102,21 @@ def main() -> None:
     r = returns()
     stocks = [s for s in universe() if s in px.columns]
     m = monthly_dates(px.index)
-    beta = r[stocks].rolling(252, min_periods=200).cov(r["SPY"]).div(
-        r["SPY"].rolling(252).var(), axis=0).loc[m]
+    beta = (
+        r[stocks]
+        .rolling(252, min_periods=200)
+        .cov(r["SPY"])
+        .div(r["SPY"].rolling(252).var(), axis=0)
+        .loc[m]
+    )
     models = {
         "Ridge": lambda: Ridge(alpha=10.0),
-        "GBM": lambda: HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05,
-                                                     max_iter=200, min_samples_leaf=200),
-        "RandomForest": lambda: RandomForestRegressor(n_estimators=150, max_depth=5,
-                                                      min_samples_leaf=200, n_jobs=-1,
-                                                      random_state=0),
+        "GBM": lambda: HistGradientBoostingRegressor(
+            max_depth=3, learning_rate=0.05, max_iter=200, min_samples_leaf=200
+        ),
+        "RandomForest": lambda: RandomForestRegressor(
+            n_estimators=150, max_depth=5, min_samples_leaf=200, n_jobs=-1, random_state=0
+        ),
     }
     res = []
     for name, fn in models.items():
@@ -123,15 +131,17 @@ def main() -> None:
     rs = r["SPY"]
     stocks_px = px[stocks]
     breadth = (stocks_px > stocks_px.rolling(200).mean()).mean(axis=1)
-    X = pd.DataFrame({
-        "trend200": spy / spy.rolling(200).mean() - 1,
-        "trend50": spy / spy.rolling(50).mean() - 1,
-        "mom1": spy / spy.shift(21) - 1,
-        "mom12": spy / spy.shift(252) - 1,
-        "vol21": rs.rolling(21).std(),
-        "dd": spy / spy.rolling(252).max() - 1,
-        "breadth": breadth,
-    }).loc[m]
+    X = pd.DataFrame(
+        {
+            "trend200": spy / spy.rolling(200).mean() - 1,
+            "trend50": spy / spy.rolling(50).mean() - 1,
+            "mom1": spy / spy.shift(21) - 1,
+            "mom12": spy / spy.shift(252) - 1,
+            "vol21": rs.rolling(21).std(),
+            "dd": spy / spy.rolling(252).max() - 1,
+            "breadth": breadth,
+        }
+    ).loc[m]
     y = (spy.loc[m].shift(-1) / spy.loc[m] - 1 > 0).astype(float)
     w = pd.DataFrame(0.0, index=m, columns=["SPY", "IEF"])
     for i, d in enumerate(m):

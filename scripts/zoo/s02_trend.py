@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-
 from harness import ETFS, evaluate, monthly_dates, prices, returns, save, show
 
 
@@ -26,8 +25,11 @@ def main() -> None:
 
     # 1. SPY 200d MA timing: in SPY above, else IEF / else cash
     above = px["SPY"] > px["SPY"].rolling(200).mean()
-    res.append(evaluate("SPY>200d else IEF", "trend",
-                        pd.DataFrame({"SPY": above * 1.0, "IEF": (~above) * 1.0})))
+    res.append(
+        evaluate(
+            "SPY>200d else IEF", "trend", pd.DataFrame({"SPY": above * 1.0, "IEF": (~above) * 1.0})
+        )
+    )
     res.append(evaluate("SPY>200d else cash", "trend", pd.DataFrame({"SPY": above * 1.0})))
     # 2. Faber 10-month SMA, monthly, on SPY
     sma10 = px["SPY"].loc[m].rolling(10).mean()
@@ -53,8 +55,7 @@ def main() -> None:
     # 6. TSMOM 12m on all 11 ETFs, inverse-vol, long/flat and long/short, 10% vol target
     r12 = px.loc[m] / px.loc[m].shift(12) - 1
     iv = 1 / (r.rolling(60).std().loc[m])
-    for name, sgn in [("long/flat", r12.gt(0).astype(float)),
-                      ("long/short", np.sign(r12))]:
+    for name, sgn in [("long/flat", r12.gt(0).astype(float)), ("long/short", np.sign(r12))]:
         w = (sgn * iv).div(iv.where(r12.notna()).sum(axis=1), axis=0)
         w = w.reindex(idx).ffill()
         res.append(evaluate(f"TSMOM-12m ETFs {name}, 10% vol", "trend", vol_target(w)))

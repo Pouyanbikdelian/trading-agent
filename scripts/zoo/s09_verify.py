@@ -6,19 +6,18 @@ trading costs; (4) regime label lagged one extra day; (5) year by year vs
 SPY; (6) deflated Sharpe charged for all 83 zoo strategies + 4 ensembles.
 """
 
+# ruff: noqa: N803, N812
 from __future__ import annotations
 
 import sys
 
-import numpy as np
+import harness as H
 import pandas as pd
+from harness import OUT, TRAIN_END, sharpe
 from scipy.stats import kurtosis, skew
 
-import harness as H
-from harness import OUT, REGIMES, TRAIN_END, sharpe
-
 sys.path.insert(0, str(OUT.parents[1] / "src"))
-from trading.selection.scores import deflated_sharpe  # noqa: E402
+from trading.selection.scores import deflated_sharpe
 
 PICKS = {
     "bull/calm": ["QQQ EMA50/200", "QQQ IBS<0.2", "Risk parity (ERC) core 6"],
@@ -71,9 +70,14 @@ def ensemble(R: pd.DataFrame, lab: pd.Series, switch_bp: float = 0.0) -> pd.Seri
 
 def summary(name: str, r: pd.Series) -> dict:
     eq = (1 + r).cumprod()
-    return {"test": name, "sharpe": sharpe(r), "train": sharpe(r[r.index <= TRAIN_END]),
-            "oos": sharpe(r[r.index > TRAIN_END]), "cagr": eq.iloc[-1] ** (252 / len(r)) - 1,
-            "maxdd": (eq / eq.cummax() - 1).min()}
+    return {
+        "test": name,
+        "sharpe": sharpe(r),
+        "train": sharpe(r[r.index <= TRAIN_END]),
+        "oos": sharpe(r[r.index > TRAIN_END]),
+        "cagr": eq.iloc[-1] ** (252 / len(r)) - 1,
+        "maxdd": (eq / eq.cummax() - 1).min(),
+    }
 
 
 def main() -> None:
@@ -95,8 +99,11 @@ def main() -> None:
     print(pd.DataFrame(rows).round(2).to_string(index=False))
 
     e = ensemble(base, lab, 10)
-    yr = pd.DataFrame({"ensemble": e, "SPY": spy}).groupby(e.index.year).apply(
-        lambda x: (1 + x).prod() - 1)
+    yr = (
+        pd.DataFrame({"ensemble": e, "SPY": spy})
+        .groupby(e.index.year)
+        .apply(lambda x: (1 + x).prod() - 1)
+    )
     yr["ens_sharpe"] = e.groupby(e.index.year).apply(sharpe)
     print("\nYear by year:\n", yr.round(3).to_string())
     days = lab.reindex(e.index).value_counts()

@@ -80,7 +80,7 @@ def regimes() -> pd.Series:
     rv = r.rolling(21).std()
     stress = np.where(rv > rv.expanding(252).median(), "stressed", "calm")
     lab = pd.Series(
-        [("bear" if a == "down" else f"bull/{b}") for a, b in zip(trend, stress)],
+        [("bear" if a == "down" else f"bull/{b}") for a, b in zip(trend, stress, strict=True)],
         index=spy.index,
     )
     lab[spy.rolling(200).mean().isna() | rv.expanding(252).median().isna()] = np.nan
@@ -127,10 +127,14 @@ def stats(res: Result) -> dict:
     yrs = len(r) / 252
     tr, te = r[r.index <= TRAIN_END], r[r.index > TRAIN_END]
     out = {
-        "name": res.name, "family": res.family,
-        "sharpe": sharpe(r), "train": sharpe(tr), "test": sharpe(te),
+        "name": res.name,
+        "family": res.family,
+        "sharpe": sharpe(r),
+        "train": sharpe(tr),
+        "test": sharpe(te),
         "cagr": eq.iloc[-1] ** (1 / yrs) - 1 if yrs > 0 else np.nan,
-        "vol": r.std() * np.sqrt(252), "maxdd": (eq / eq.cummax() - 1).min(),
+        "vol": r.std() * np.sqrt(252),
+        "maxdd": (eq / eq.cummax() - 1).min(),
         "start": r.index[0].date(),
     }
     lab = regimes().reindex(r.index)

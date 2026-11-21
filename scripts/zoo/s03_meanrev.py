@@ -1,11 +1,11 @@
 """Step 3 — mean reversion: index swing rules + cross-sectional stock reversal."""
 
+# ruff: noqa: N806
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-
-from harness import ETFS, evaluate, prices, returns, save, show, universe, weekly_dates
+from harness import evaluate, prices, save, show, universe, weekly_dates
 
 
 def rsi(s: pd.Series | pd.DataFrame, n: int):
@@ -25,7 +25,6 @@ def hold_state(entry: pd.Series, exit_: pd.Series) -> pd.Series:
 def main() -> None:
     px = prices()
     hi, lo, cl = prices("high"), prices("low"), prices("close")
-    r = returns()
     idx = px.index
     res = []
     # --- index swing rules (Connors-style), long only
@@ -48,13 +47,18 @@ def main() -> None:
     r5 = (px[stocks] / px[stocks].shift(5) - 1).loc[wk]
     above = (px[stocks] > px[stocks].rolling(200).mean()).loc[wk]
     n = 50
+
     def book(mask_long, mask_short=None, hedge=False):
         w = pd.DataFrame(0.0, index=wk, columns=[*stocks, "SPY"])
         for d in wk:
             row = r5.loc[d].dropna()
             if len(row) < 200:
                 continue
-            L = row[mask_long.loc[d].reindex(row.index).fillna(False)] if mask_long is not None else row
+            L = (
+                row[mask_long.loc[d].reindex(row.index).fillna(False)]
+                if mask_long is not None
+                else row
+            )
             L = L.nsmallest(n).index
             if len(L) == 0:
                 continue
@@ -65,12 +69,21 @@ def main() -> None:
             if hedge:
                 w.loc[d, "SPY"] = -1.0
         return w
+
     allm = above.astype(bool) | True
     res.append(evaluate("Weekly reversal: 50 losers, long", "meanrev", book(allm)))
-    res.append(evaluate("Weekly reversal: 50 losers, long, SPY hedge", "meanrev", book(allm, hedge=True)))
-    res.append(evaluate("Weekly reversal: losers-winners L/S", "meanrev", book(allm, mask_short=True)))
+    res.append(
+        evaluate("Weekly reversal: 50 losers, long, SPY hedge", "meanrev", book(allm, hedge=True))
+    )
+    res.append(
+        evaluate("Weekly reversal: losers-winners L/S", "meanrev", book(allm, mask_short=True))
+    )
     res.append(evaluate("Weekly reversal: 50 losers in uptrend", "meanrev", book(above)))
-    res.append(evaluate("Weekly reversal: losers in uptrend, SPY hedge", "meanrev", book(above, hedge=True)))
+    res.append(
+        evaluate(
+            "Weekly reversal: losers in uptrend, SPY hedge", "meanrev", book(above, hedge=True)
+        )
+    )
 
     # --- the bounce screen as a portfolio: 5d drop <= -10% & above 200d, hold 5 days
     r5d = px[stocks] / px[stocks].shift(5) - 1

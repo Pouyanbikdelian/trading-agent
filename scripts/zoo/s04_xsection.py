@@ -4,13 +4,12 @@ Includes the desk's own mechanical config (126d lookback, 21d skip, top-25)
 so the zoo says where the current system ranks.
 """
 
+# ruff: noqa: N806
 from __future__ import annotations
 
 import importlib.util
 
-import numpy as np
 import pandas as pd
-
 from harness import ROOT, evaluate, monthly_dates, prices, returns, save, show, universe
 
 _spec = importlib.util.spec_from_file_location("qsb", ROOT / "scripts/quality_short_backtest.py")
@@ -41,7 +40,9 @@ def main() -> None:
     P = px[stocks]
     pm = P.loc[m]
     spy = r["SPY"]
-    beta = r[stocks].rolling(252, min_periods=200).cov(spy).div(spy.rolling(252).var(), axis=0).loc[m]
+    beta = (
+        r[stocks].rolling(252, min_periods=200).cov(spy).div(spy.rolling(252).var(), axis=0).loc[m]
+    )
     vol = r[stocks].rolling(60, min_periods=40).std().loc[m]
     sig = {
         "Mom 12-1": pm.shift(1) / pm.shift(12) - 1,
@@ -69,8 +70,11 @@ def main() -> None:
     for name, s in sig.items():
         for n in [25, 50]:
             res.append(evaluate(f"{name} top{n} long", "xsection", topn_weights(s, n, None)))
-        res.append(evaluate(f"{name} top50 beta-hedged", "xsection_hedged",
-                            topn_weights(s, 50, "beta", beta)))
+        res.append(
+            evaluate(
+                f"{name} top50 beta-hedged", "xsection_hedged", topn_weights(s, 50, "beta", beta)
+            )
+        )
     tab = save(res, "s04_xsection")
     show(tab)
 

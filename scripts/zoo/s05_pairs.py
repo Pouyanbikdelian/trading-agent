@@ -7,13 +7,13 @@ Variants: any pair / only pairs inside the same correlation cluster /
 cointegration-filtered (Engle-Granger p<0.05).
 """
 
+# ruff: noqa: N806
 from __future__ import annotations
 
 import importlib.util
 
 import numpy as np
 import pandas as pd
-
 from harness import ROOT, evaluate, prices, save, show, universe
 
 _spec = importlib.util.spec_from_file_location("ls", ROOT / "scripts/ls_search.py")
@@ -35,13 +35,12 @@ def pick_pairs(form: pd.DataFrame, n: int, mode: str, clu: pd.Series | None):
     out = []
     from statsmodels.tsa.stattools import coint
 
-    for k in order[: 4000]:
+    for k in order[:4000]:
         a, b = cols[iu[0][k]], cols[iu[1][k]]
         if mode == "cluster" and (clu is None or clu.get(a) != clu.get(b)):
             continue
-        if mode == "coint":
-            if coint(np.log(form[a].values), np.log(form[b].values))[1] > 0.05:
-                continue
+        if mode == "coint" and coint(np.log(form[a].values), np.log(form[b].values))[1] > 0.05:
+            continue
         sig = float((norm[a] - norm[b]).std())
         out.append((a, b, sig))
         if len(out) >= n:
