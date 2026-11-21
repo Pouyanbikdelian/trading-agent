@@ -80,6 +80,7 @@ HELP_TEXT = (
     "*Agents*\n"
     "/committee — convene a debate now · /detail — the full transcript\n"
     "/pm — the PM's targets · /pm run — decide again (no order)\n"
+    "/sleeve — the regime-switch ETF sleeve: regime and allocation\n"
     "/why SYM — why we bought, sold or held it\n"
     "/mandates — your standing instructions (type one to add it)\n"
     "/lessons · /lesson — what the desk has learned\n"
@@ -3854,6 +3855,10 @@ async def _dispatch(text: str, *, replied_to: str | None = None) -> str | None:
         return _cmd_detail()
     if cmd == "/events":
         return _cmd_events(args)
+    if cmd == "/sleeve":
+        from trading.portfolio.regime_sleeve import format_note, read_state
+
+        return format_note(read_state(settings.state_dir))
     if cmd == "/committee":
         # With a symbol argument: copilot history view (read-only).
         # Bare: original behavior — convene the committee.

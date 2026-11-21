@@ -75,6 +75,7 @@ SAFE_COMMANDS = frozenset(
         "/committee",
         # Expands a compact macro/geopolitics alert into full cards. Read-only.
         "/events detail",
+        "/sleeve",
     }
 )
 

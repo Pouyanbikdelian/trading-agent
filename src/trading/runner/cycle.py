@@ -765,6 +765,8 @@ class Cycle:
         # say about SPY. Only when the bridge is actually on, so the
         # mechanical strategy's universe is unchanged at sleeve 0.
         instruments = self._add_pm_targets(instruments)
+        # Regime-switch ETF sleeve: price its 11 ETFs only when it is on.
+        instruments = self._add_regime_instruments(instruments)
 
         # 2. Build wide-format price frame.
         prices = self._load_prices(instruments, ts_start)
@@ -930,6 +932,11 @@ class Cycle:
             equity=float(getattr(account, "equity", 0.0) or 0.0),
             base_currency=getattr(account, "base_currency", None) or "USD",
             fx_rates=fx_rates,
+        )
+        # 7d. Regime-switch ETF sleeve (REGIME_SLEEVE_PCT). Same position as the
+        # PM: after the shadow ladder, before the risk manager and approval.
+        signal = self._merge_regime_sleeve(
+            signal, instruments_by_key=instruments_by_key, ts=ts_start
         )
         # Sector tags for the risk manager's sector cap. cfg.sector_map wins;
         # otherwise derive key -> sector from the fundamentals cache so the cap
@@ -2248,6 +2255,103 @@ class Cycle:
                 f"{[i.symbol for i in extra]}"
             )
         return [*instruments, *extra]
+
+    def _add_regime_instruments(self, instruments: list[Any]) -> list[Any]:
+        """Price the regime sleeve's ETFs. No-op at sleeve 0, never raises."""
+        try:
+            from trading.core.config import settings as _s
+
+            if float(getattr(_s, "regime_sleeve_pct", 0.0) or 0.0) <= 0:
+                return instruments
+            from trading.core.types import AssetClass, Instrument
+            from trading.strategies.regime_switch import ALL_SYMBOLS
+
+            have = {getattr(i, "symbol", "").upper() for i in instruments}
+            extra = [
+                Instrument(symbol=s, asset_class=AssetClass.ETF)
+                for s in ALL_SYMBOLS
+                if s not in have
+            ]
+            return [*instruments, *extra]
+        except Exception:
+            logger.bind(component="cycle").exception("regime sleeve: could not add its ETFs")
+            return instruments
+
+    def _regime_closes(self) -> pd.DataFrame:
+        """Full cached history for the sleeve's ETFs.
+
+        Not the cycle's price frame: that one is cut to ``history_bars``
+        (252) and aligned on the intersection with 500 stocks, and the
+        allocator needs 252 bars of covariance PLUS warm-up.
+        """
+        from trading.core.types import AssetClass, Instrument
+        from trading.strategies.regime_switch import ALL_SYMBOLS
+
+        cols = {}
+        for sym in ALL_SYMBOLS:
+            df = self.cache.read(
+                Instrument(symbol=sym, asset_class=AssetClass.ETF), self.config.freq
+            )
+            if df.empty or self.config.price_column not in df.columns:
+                raise ValueError(f"no cached prices for {sym}")
+            cols[sym] = df[self.config.price_column]
+        return pd.DataFrame(cols).sort_index().dropna(how="all")
+
+    def _merge_regime_sleeve(
+        self, signal: Any, *, instruments_by_key: dict[str, Any], ts: datetime
+    ) -> Any:
+        """Add the regime-switch sleeve to the book. Off at 0; never raises.
+
+        A failure skips the sleeve for this cycle and SAYS so on the card:
+        a sleeve that silently did not trade looks, in a position report,
+        exactly like one that chose cash.
+        """
+        from trading.core.config import settings as _s
+
+        pct = float(getattr(_s, "regime_sleeve_pct", 0.0) or 0.0)
+        if pct <= 0:
+            return signal
+        from trading.portfolio.regime_sleeve import (
+            check_fresh,
+            format_note,
+            key_resolver,
+            merge_regime_targets,
+            write_state,
+        )
+        from trading.strategies.regime_switch import ALL_SYMBOLS, latest_allocation
+
+        try:
+            alloc = latest_allocation(self._regime_closes())
+            check_fresh(alloc["asof"], ts)
+        except Exception as exc:
+            logger.bind(component="cycle").exception("regime sleeve skipped")
+            _cycle_note(self, f"🧭 Regime sleeve skipped this cycle: {exc}")
+            return signal
+        mode_scale, mode_name = self._pm_mode_scale()
+        eff = pct * (mode_scale if mode_scale is not None else 1.0)
+        merged = merge_regime_targets(
+            signal.target_weights,
+            alloc["weights"],
+            eff,
+            universe=ALL_SYMBOLS,
+            key_for=key_resolver(instruments_by_key),
+        )
+        state = {
+            **alloc,
+            "sleeve_pct": pct,
+            "effective_pct": eff,
+            "mode": mode_name,
+            "cycle_ts": ts.isoformat(),
+        }
+        try:
+            write_state(_s.state_dir, state)
+        except Exception:
+            logger.bind(component="cycle").exception("regime sleeve: state write failed")
+        _cycle_note(self, format_note(state))
+        metadata = dict(signal.metadata or {})
+        metadata["regime_sleeve_pct"] = f"{eff:.4f}"
+        metadata["regime_sleeve_regime"] = str(alloc["regime"])
+        return signal.model_copy(update={"target_weights": merged, "metadata": metadata})
 
     def _pm_capital_scale(
         self,

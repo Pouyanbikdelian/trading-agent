@@ -110,6 +110,8 @@ python3 scripts/audit_committee_repetition.py   # is the committee saying anythi
 
 Deployment is the VPS at `/opt/trading-agent` via docker compose — see `docs/deploy.md`. Live drills are in `docs/DRILLS.md`; run them on the paper book.
 
+**Deploying: follow `.claude/skills/deploy-vps/SKILL.md` exactly.** The VPS is on a detached HEAD (`git pull` silently deploys old code), the live runner is `trader-live` not `trader`, and a gateway restart needs a 2FA tap.
+
 ## Test discipline
 
 - `tests/test_smoke.py` is fast, hermetic, no network — runs every commit.

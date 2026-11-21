@@ -155,6 +155,7 @@ REGISTRY: tuple[Spec, ...] = (
         example="/committee MU",
     ),
     Spec("/detail", "full transcript of the latest debate"),
+    Spec("/sleeve", "regime-switch ETF sleeve: regime, legs, current allocation"),
     Spec(
         "/events",
         "macro & geopolitical headlines (24h); 'detail' expands, 'now' scans",

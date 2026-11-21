@@ -174,6 +174,11 @@ class Settings(BaseSettings):
     # benchmark-only — signals, shadow ledger and dashboard all still
     # compute, but every weight is zero so it can never reach an order.
     strategy_sleeve_pct: float = Field(default=1.0, alias="STRATEGY_SLEEVE_PCT", ge=0.0, le=1.0)
+    # Fraction of the managed account the regime-switch ETF allocator directs
+    # (strategies/regime_switch.py; portfolio/regime_sleeve.py). Independent
+    # of the other two knobs, like they are of each other. 0.0 = off: deploying
+    # the code changes nothing until the operator sets it.
+    regime_sleeve_pct: float = Field(default=0.0, alias="REGIME_SLEEVE_PCT", ge=0.0, le=1.0)
     # The PM decision runs shortly before the cycle that may consume it.
     # Keep this operator-configurable rather than duplicating a timing
     # constant in the scheduler and dashboard.

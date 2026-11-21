@@ -29,6 +29,7 @@ from trading.strategies import long_term_momentum as _long_term_momentum  # noqa
 from trading.strategies import pairs as _pairs  # noqa: F401
 from trading.strategies import pairs_kalman as _pairs_kalman  # noqa: F401
 from trading.strategies import pca_residual as _pca_residual  # noqa: F401
+from trading.strategies import regime_switch as _regime_switch  # noqa: F401
 from trading.strategies import risk_parity as _rp  # noqa: F401
 from trading.strategies import rsi2 as _rsi2  # noqa: F401
 from trading.strategies import top_k_momentum as _top_k_momentum  # noqa: F401
